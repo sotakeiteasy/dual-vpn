@@ -1,0 +1,527 @@
+#!/bin/bash
+# Личный AmneziaWG + корпоративный WireGuard одновременно, через sing-box-lx.
+#
+#   sudo ./vpn ui [ПРОФИЛЬ]     панель: статус сверху, логи снизу  (q — выход)
+#   sudo ./vpn start [ПРОФИЛЬ]  то же без панели, простым выводом в терминал
+#   sudo ./vpn list             какие личные конфиги лежат в conf/
+#   sudo ./vpn stop             снять зависший процесс и маршруты
+#   sudo ./vpn status           что сейчас поднято
+#   sudo ./vpn diag             полный тест: старт, замеры, остановка
+#   sudo ./vpn check МЕТКА      срез сети как есть, ничего не запуская
+#   sudo ./vpn dns              прописать корп-домены в /etc/resolver
+#   sudo ./vpn dns-remove       убрать их
+#
+# Без аргументов — start.
+#
+# ПРОФИЛЬ — имя файла из conf/ без .conf, который пойдёт личным туннелем:
+# `vpn ui nl-1` возьмёт conf/nl-1.conf. Без него — personal.conf, как раньше.
+# Корп-туннель выбирается сам и от профиля не зависит.
+
+set -u
+# Код и данные разведены. Внутри .app код лежит в бандле и переписывается
+# при каждом обновлении, поэтому конфиги и состояние обязаны жить снаружи —
+# иначе обновление стирало бы их вместе со старой версией.
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+: "${DUALVPN_DATA:=$BASE}"
+DATA="$DUALVPN_DATA"
+CONF="$DATA/conf"
+LIB="$BASE/lib"
+# Внутри .app всё лежит плоско, в Contents/Resources; в папке проекта —
+# в lib/bin и lib/scripts. Различаем по наличию бинарника рядом.
+if [ -x "$BASE/sing-box" ]; then
+  BIN="$BASE"
+  SCRIPTS="$BASE"
+  LAUNCHD="$BASE/launchd"
+else
+  BIN="$LIB/bin"
+  SCRIPTS="$LIB/scripts"
+  LAUNCHD="$LIB/launchd"
+fi
+STATE="$DATA/lib/state"
+TUN_IP="172.19.0.1"     # адрес tun из build-config.py, по нему ищем интерфейс
+
+# Настройки рабочей сети — домены, проверочные хосты, исключения из
+# маршрутов — лежат в conf/site.env: они у каждого свои и в репозиторий
+# не попадают. Без файла корп-часть просто не проверяется.
+if [ -f "$CONF/site.env" ]; then
+  # shellcheck disable=SC1091
+  . "$CONF/site.env"
+fi
+# SB_CORP_EXCLUDE — адреса, которые не гнать в корп-туннель, даже если они
+# есть в его AllowedIPs. Нужно, когда конкретный публичный хост через туннель
+# не отвечает (SYN не уходит вовсе), а напрямую открывается.
+: "${CORP_DOMAINS:=}"
+: "${CORP_PROBE:=}"
+: "${CORP_HOSTS:=}"
+: "${SB_CORP_EXCLUDE:=}"
+export CORP_DOMAINS CORP_PROBE CORP_HOSTS SB_CORP_EXCLUDE
+
+PID=""
+PEERS=""   # адреса пиров из config.json, заполняется динамически
+
+# Профиль личного туннеля. build-config.py читает его из окружения, поэтому
+# он же доезжает до панели: tui.py запускает `vpn start` как дочерний процесс.
+: "${SB_PERSONAL:=}"
+export SB_PERSONAL
+
+# Проверяем имя до старта: иначе ошибка вылезет уже после sudo и v6_off.
+set_profile() {
+  # Аргумент важнее переменной окружения, та — важнее сохранённого выбора.
+  # Файл нужен демону: в plist профиль не передашь, а из окна его меняют.
+  local name="${1:-$SB_PERSONAL}"
+  if [ -z "$name" ] && [ -f "$STATE/profile" ]; then
+    name=$(tr -d ' \n' < "$STATE/profile")
+  fi
+  [ -z "$name" ] && return 0
+  name="${name%.conf}"
+  if [ ! -f "$CONF/$name.conf" ]; then
+    echo "нет профиля «${name}»: не найден $CONF/$name.conf"
+    cmd_list
+    exit 1
+  fi
+  SB_PERSONAL="$name"
+  export SB_PERSONAL
+}
+
+cmd_list() {
+  echo "личные конфиги в conf/:"
+  local found=0
+  for f in "$CONF"/*.conf; do
+    [ -e "$f" ] || continue
+    found=1
+    local n mark=""
+    n="$(basename "$f" .conf)"
+    case "$n" in
+      corp|wg|wg[-_0-9]*) mark="  (корп)" ;;
+      personal)           mark="  (личный по умолчанию)" ;;
+    esac
+    echo "  $n$mark"
+  done
+  [ "$found" = 1 ] || echo "  (пусто)"
+  echo "запуск: sudo $0 ui ИМЯ"
+}
+
+need_root() {
+  if [ "$(id -u)" != "0" ]; then
+    echo "нужен root: sudo $0 ${1:-start}"
+    exit 1
+  fi
+}
+
+# Адреса пиров из config.json. Нужны и старту, и стопу: host-маршруты на них
+# ставятся мимо туннеля и живут отдельно от tun-интерфейса.
+peers_from_config() {
+  [ -f "$STATE/config.json" ] || return 0
+  python3 -c '
+import json,sys
+c=json.load(open(sys.argv[1]))
+for e in c.get("endpoints",[]):
+    for p in e.get("peers",[]):
+        print(p["address"])
+' "$STATE/config.json" 2>/dev/null
+}
+
+find_tun() {
+  for i in $(ifconfig -l | tr ' ' '\n' | grep '^utun'); do
+    if ifconfig "$i" 2>/dev/null | grep -q "${TUN_IP//./\\.}"; then
+      echo "$i"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ----------------------------------------------------------------- IPv6
+#
+# Личный сервер v6-адрес не выдаёт, поэтому нести v6 в туннель нечем.
+# Оставить как есть — значит гнать v6-трафик мимо туннеля, с настоящего адреса.
+# Завести v6 на tun и уронить его внутри — значит ломать браузер: приложения
+# по Happy Eyeballs идут сначала по v6 и получают отказ.
+# Поэтому на время работы туннеля v6 в системе выключается, а при выходе
+# возвращается ровно в прежнее состояние.
+
+V6_SAVED="$STATE/ipv6.saved"
+
+# Имя сетевого сервиса («Wi-Fi») по имени интерфейса («en0»).
+v6_service() {
+  local dev="$1"
+  [ -z "$dev" ] && return 1
+  networksetup -listnetworkserviceorder 2>/dev/null |
+    grep -B1 "Device: ${dev})" | head -1 | sed 's/^([0-9]*) //'
+}
+
+# networksetup передёргивает сетевой сервис и иногда думает секундами.
+# Ждать его молча нельзя: старт туннеля встанет, а в логе будет тишина.
+v6_run() {
+  "$@" >/dev/null 2>&1 &
+  local np=$!
+  local i=0
+  while [ $i -lt 15 ]; do
+    kill -0 "$np" 2>/dev/null || { wait "$np"; return $?; }
+    sleep 1
+    i=$((i + 1))
+  done
+  kill -9 "$np" 2>/dev/null
+  echo "→ networksetup не ответил за 15с, продолжаю без него"
+  return 1
+}
+
+v6_off() {
+  local dev svc state
+  # SB_NO_V6=1 — не трогать системный IPv6 (для быстрых прогонов диагностики)
+  [ "${SB_NO_V6:-}" = "1" ] && { echo "→ IPv6 не трогаю (SB_NO_V6=1)"; return 0; }
+  dev=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')
+  svc=$(v6_service "$dev")
+  if [ -z "$svc" ]; then
+    echo "→ не определил сетевой сервис для $dev — IPv6 не трогаю"
+    return 0
+  fi
+
+  # Что было до нас: Automatic / Manual / Off
+  state=$(networksetup -getinfo "$svc" 2>/dev/null |
+          awk -F': ' '/^IPv6:/ {print $2; exit}')
+  if [ -z "$state" ] || [ "$state" = "Off" ]; then
+    echo "→ IPv6 на «${svc}» уже выключен"
+    return 0
+  fi
+
+  # Файл пишем ДО выключения: если процесс убьют прямо сейчас,
+  # `vpn stop` всё равно будет знать, что возвращать.
+  printf '%s\n%s\n' "$svc" "$state" > "$V6_SAVED"
+  echo "→ выключаю IPv6 на «${svc}» (было: $state)…"
+  if v6_run networksetup -setv6off "$svc"; then
+    echo "→ IPv6 выключен, вернём при выходе"
+  else
+    rm -f "$V6_SAVED"
+    echo "→ IPv6 выключить не удалось — трафик по v6 пойдёт мимо туннеля"
+  fi
+}
+
+v6_restore() {
+  [ -f "$V6_SAVED" ] || return 0
+  local svc="" state="" now="" err=""
+  svc=$(sed -n 1p "$V6_SAVED")
+  state=$(sed -n 2p "$V6_SAVED")
+  [ -z "$svc" ] && { rm -f "$V6_SAVED"; return 0; }
+
+  # Ошибки НЕ прячем: молчаливый провал уже оставлял систему без IPv6.
+  err=$(networksetup -setv6automatic "$svc" 2>&1)
+  now=$(networksetup -getinfo "$svc" 2>/dev/null |
+        awk -F': ' '/^IPv6:/ {print $2; exit}')
+
+  if [ "$now" = "Off" ]; then
+    echo "!! IPv6 вернуть НЕ удалось: ${err:-без сообщения}"
+    echo "!! включи вручную: sudo networksetup -setv6automatic \"${svc}\""
+    return 1
+  fi
+
+  rm -f "$V6_SAVED"
+  if [ "$state" = "Automatic" ]; then
+    echo "→ IPv6 возвращён на «${svc}»"
+  else
+    # Ручные адреса скрипт не запоминает — их надо вернуть самому.
+    echo "→ IPv6 на «${svc}» включён как Automatic, а было «${state}» — проверь настройки"
+  fi
+}
+
+# --------------------------------------------------------------- start
+
+cleanup() {
+  echo ""
+  # Снимаем раньше sing-box: дальше идёт уборка маршрутов на десятки секунд,
+  # и держать машину бодрой ради неё незачем.
+  [ -n "$CAFF" ] && kill "$CAFF" 2>/dev/null
+  echo "→ останавливаю sing-box…"
+  [ -n "$PID" ] && kill "$PID" 2>/dev/null
+  # Ждём с проверкой, а не вслепую: залипший на битом сокете процесс на TERM
+  # не реагирует, и тогда `wait` висел бы до бесконечности.
+  if [ -n "$PID" ]; then
+    for _ in $(seq 1 20); do
+      kill -0 "$PID" 2>/dev/null || break
+      sleep 0.5
+    done
+  fi
+  # Дальше — та же полная уборка, что и у `vpn stop`. Раньше здесь была своя
+  # укороченная версия, полагавшаяся на то, что 0/1 и 128.0/1 исчезнут сами
+  # вместе с интерфейсом. Это верно только при штатном завершении: если процесс
+  # завис или его добили KILL, маршруты остаются и сеть лежит.
+  trap - INT TERM EXIT
+  cmd_stop
+  exit 0
+}
+
+cmd_start() {
+  need_root start
+  mkdir -p "$STATE"
+  trap cleanup INT TERM
+  # Подстраховка: на любом другом выходе (ошибка, exit) IPv6 всё равно вернём.
+  trap v6_restore EXIT
+
+  # Пересобираем config.json из conf/*.conf: корп-конфиг ротируется,
+  # достаточно положить новый файл — правки скриптов не нужны.
+  echo "→ собираю конфиг из conf/…"
+  if ! python3 "$SCRIPTS/build-config.py"; then
+    echo "не удалось собрать конфиг — правь conf/*.conf"
+    exit 1
+  fi
+  if ! "$BIN/sing-box" check -c "$STATE/config.json"; then
+    echo "конфиг не прошёл проверку"
+    exit 1
+  fi
+
+  # Шлюз по умолчанию: определяем ДО старта, пока туннель не перебил маршруты.
+  # Ничего не захардкожено: работает и на Wi-Fi, и на раздаче с телефона.
+  GW=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2; exit}')
+  IFACE=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')
+  if [ -z "$GW" ]; then
+    echo "нет маршрута по умолчанию — сеть не поднята?"
+    exit 1
+  fi
+  echo "→ аплинк: $IFACE, шлюз $GW"
+
+  # Настоящий адрес провайдера, пока туннель не поднят. Раньше «утечка»
+  # определялась сравнением выходного адреса с адресом сервера, но сервер
+  # может выходить в сеть не тем адресом, на котором принимает соединения,
+  # и тогда рабочий туннель показывался как утечка.
+  # Совпадение с этим адресом — единственный однозначный признак.
+  REAL_IP=$(curl -4 -s --max-time 4 https://ifconfig.me 2>/dev/null)
+  case "$REAL_IP" in
+    *[!0-9.]*|"") : >"$STATE/real-ip" ;;          # не ответили — не гадаем
+    *)            printf '%s' "$REAL_IP" >"$STATE/real-ip" ;;
+  esac
+
+  # До старта туннеля: иначе первые же запросы браузера уйдут по v6 мимо него
+  v6_off
+
+  # Имена пиров резолвим сейчас, пока DNS ещё не в туннеле.
+  for H in $(peers_from_config); do
+    case "$H" in
+      *[a-zA-Z]*) IP=$(dig +short +time=3 +tries=1 A "$H" | grep -E '^[0-9.]+$' | head -1) ;;
+      *)          IP="$H" ;;
+    esac
+    [ -n "$IP" ] && PEERS="$PEERS $IP"
+  done
+  if [ -z "$PEERS" ]; then
+    echo "не удалось определить адреса пиров — прерываю, иначе будет петля"
+    exit 1
+  fi
+  echo "→ пиры (пойдут мимо туннеля):$PEERS"
+
+  # Сон рвёт туннель насмерть: во сне keepalive не уходит, WG-сессия протухает,
+  # а TCP-соединения, открытые до сна, после пробуждения уже мертвы — их не
+  # воскрешает ничто, вкладка в браузере висит до перезагрузки. Поэтому пока
+  # туннель поднят, засыпать по простою не даём. -i держит только системный сон:
+  # экран гаснет как обычно, и от сети это всё равно no-op (там sleep 0).
+  # Крышку это не покрывает — clamshell-сон ассерциями не отменяется.
+  caffeinate -i -w $$ &
+  CAFF=$!
+
+  echo "→ запускаю sing-box…"
+  "$BIN/sing-box" run -c "$STATE/config.json" &
+  PID=$!
+
+  TUN=""
+  for _ in $(seq 1 30); do
+    TUN=$(find_tun) && break
+    kill -0 "$PID" 2>/dev/null || { echo "sing-box упал на старте, смотри вывод выше"; exit 1; }
+    sleep 1
+  done
+  if [ -z "$TUN" ]; then
+    echo "tun не поднялся за 30с"
+    cleanup
+  fi
+  echo "→ tun: $TUN"
+
+  # Порядок важен: сперва вывести пиров из-под туннеля, потом ставить 0/1.
+  for P in $PEERS; do
+    route -n delete -host "$P" >/dev/null 2>&1
+    route -n add -host "$P" "$GW" >/dev/null 2>&1
+  done
+  route -n add -net 0.0.0.0/1 -interface "$TUN" >/dev/null 2>&1
+  echo "→ маршруты выставлены"
+
+  echo "→ работает. Ctrl+C для остановки."
+  wait "$PID"
+  cleanup
+}
+
+# --------------------------------------------------------------- stop
+
+cmd_stop() {
+  need_root stop
+
+  # Каждый шаг независим и переживает падение предыдущего: stop зовут именно
+  # тогда, когда всё уже сломано, и он обязан доводить уборку до конца.
+
+  # 1. Процесс. TERM, потом ждём с проверкой, потом KILL.
+  # Просто `sleep 3` мало: после сна мака sing-box залипает на битом UDP-сокете
+  # ("socket is already connected") и на TERM не реагирует — graceful shutdown
+  # виснет на том же сокете. Поэтому дожидаемся фактической смерти.
+  if pgrep -f "$BIN/sing-box" >/dev/null 2>&1; then
+    pkill -TERM -f "$BIN/sing-box" 2>/dev/null
+    for _ in $(seq 1 20); do          # до 10 с, шаг 0.5
+      pgrep -f "$BIN/sing-box" >/dev/null 2>&1 || break
+      sleep 0.5
+    done
+    if pgrep -f "$BIN/sing-box" >/dev/null 2>&1; then
+      echo "→ не отвечает на TERM, добиваю KILL"
+      pkill -KILL -f "$BIN/sing-box" 2>/dev/null
+      for _ in $(seq 1 10); do        # до 5 с
+        pgrep -f "$BIN/sing-box" >/dev/null 2>&1 || break
+        sleep 0.5
+      done
+    fi
+    if pgrep -f "$BIN/sing-box" >/dev/null 2>&1; then
+      echo "!! sing-box не умер даже от KILL: pid $(pgrep -f "$BIN/sing-box" | tr '\n' ' ')"
+      echo "   маршруты всё равно уберу, но процесс придётся снимать вручную"
+    else
+      echo "→ sing-box остановлен"
+    fi
+  else
+    echo "→ sing-box не запущен"
+  fi
+
+  # 2. Маршруты на пиров — переживают процесс, снимаем по конфигу.
+  for P in $(peers_from_config); do
+    case "$P" in
+      *[a-zA-Z]*) continue ;;
+    esac
+    route -n delete -host "$P" >/dev/null 2>&1 && echo "→ убран маршрут на $P"
+  done
+
+  # 3. Обе половинки дефолта. sing-box ставит 0.0.0.0/1 И 128.0.0.0/1;
+  # если снять только первую, вторая продолжает указывать на мёртвый tun,
+  # и половина интернета отваливается наглухо. Перезагрузка Wi-Fi не лечит:
+  # маршрут статический, он переживает смену сети.
+  for NET in 0.0.0.0/1 128.0.0.0/1; do
+    route -n delete -net "$NET" >/dev/null 2>&1 && echo "→ убран маршрут $NET"
+  done
+
+  # 4. Всё, что ещё висит на нашем tun. Страховка на случай, если sing-box
+  # успел прописать что-то помимо двух половинок.
+  T=$(find_tun 2>/dev/null) || T=""
+  if [ -n "$T" ]; then
+    # Netif — четвёртая колонка. По $NF брать нельзя: у строк с таймаутом
+    # есть пятая колонка Expire, и последним полем окажется она.
+    netstat -rn -f inet | awk -v i="$T" 'NR>3 && $4==i {print $1}' | while read -r R; do
+      case "$R" in
+        ""|link*) continue ;;
+      esac
+      route -n delete -net "$R" >/dev/null 2>&1 && echo "→ убран остаточный маршрут $R ($T)"
+    done
+  fi
+
+  # 5. IPv6 — на случай, если прошлый запуск убили жёстко и он остался выключен.
+  v6_restore
+
+  # 6. Кеш резолвера: в нём могли осесть ответы корп-DNS, недоступного без туннеля.
+  dscacheutil -flushcache 2>/dev/null
+  killall -HUP mDNSResponder 2>/dev/null
+
+  # 7. Проверяем, что вышли в чистое состояние, а не отрапортовали вслепую.
+  if netstat -rn -f inet | grep -qE '^(0/1|128\.0/1)[[:space:]]'; then
+    echo "!! половинки дефолтного маршрута всё ещё на месте:"
+    netstat -rn -f inet | grep -E '^(0/1|128\.0/1)[[:space:]]' | sed 's/^/     /'
+    echo "   снять вручную: sudo route -n delete -net 0.0.0.0/1; sudo route -n delete -net 128.0.0.0/1"
+  elif route -n get default >/dev/null 2>&1; then
+    echo "→ готово, сеть в норме (default → $(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}'))"
+  else
+    echo "!! маршрут по умолчанию отсутствует — сеть не поднята?"
+  fi
+}
+
+# --------------------------------------------------------------- status
+
+cmd_status() {
+  if pgrep -f "$BIN/sing-box" >/dev/null; then
+    echo "sing-box : работает (pid $(pgrep -f "$BIN/sing-box" | tr '\n' ' '))"
+  else
+    echo "sing-box : не запущен"
+  fi
+  T=$(find_tun) && echo "tun      : $T" || echo "tun      : нет"
+  echo "аплинк   : $(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}') / $(route -n get default 2>/dev/null | awk '/gateway:/ {print $2; exit}')"
+  echo "маршруты :"
+  netstat -rn -f inet | grep -E '^(0/1|128\.0/1|default)' | sed 's/^/  /'
+  echo "resolver :"
+  if ls /etc/resolver/* >/dev/null 2>&1; then
+    for f in /etc/resolver/*; do
+      echo "  $(basename "$f") -> $(awk '/nameserver/ {print $2; exit}' "$f")"
+    done
+  else
+    echo "  пусто (корп-домены будут резолвиться публично!)"
+  fi
+}
+
+# --------------------------------------------------------------- daemon
+
+# Под launchd панели нет, а вместе с ней нет и ротации логов — она живёт
+# в tui.py. Поэтому здесь та же схема, но на bash: файл на запуск, последние
+# KEEP_LOGS штук, ui.log — симлинк на свежий.
+KEEP_LOGS=10
+
+cmd_daemon() {
+  need_root daemon
+  mkdir -p "$STATE"
+  DIR="$STATE/logs"
+  mkdir -p "$DIR"
+
+  # Логи старой схемы забираем по mtime, а не затираем.
+  for OLD in "$STATE/ui.log" "$STATE/ui.log.1"; do
+    [ -f "$OLD" ] && [ ! -L "$OLD" ] || continue
+    TS=$(stat -f %Sm -t "%Y-%m-%d_%H%M%S" "$OLD" 2>/dev/null) || continue
+    mv "$OLD" "$DIR/ui-$TS.log" 2>/dev/null
+  done
+
+  # При битом конфиге демон падает, launchd поднимает его снова, и каждый
+  # заход создавал новый файл: за две минуты история из десяти запусков
+  # вытеснялась циклом перезапуска. Свежий лог в такой ситуации продолжаем.
+  LAST=$(ls -1t "$DIR"/ui-*.log 2>/dev/null | head -1)
+  if [ -n "$LAST" ] && [ -n "$(find "$LAST" -mmin -1 2>/dev/null)" ]; then
+    LOG="$LAST"
+  else
+    LOG="$DIR/ui-$(date +%Y-%m-%d_%H%M%S).log"
+    : >"$LOG"
+  fi
+  ln -sfn "logs/$(basename "$LOG")" "$STATE/ui.log"
+
+  # ls сортирует по имени, а имя — это дата, так что порядок хронологический.
+  # `head -n -N` тут не годится: это GNU-расширение, в BSD head его нет.
+  ls -1 "$DIR"/ui-*.log 2>/dev/null |
+    awk -v k="$KEEP_LOGS" '{a[NR]=$0} END {for (i = 1; i <= NR - k; i++) print a[i]}' |
+    while read -r F; do rm -f "$F"; done
+
+  echo "=== $(date '+%Y-%m-%d %H:%M:%S') vpn daemon ===" >>"$LOG"
+  exec >>"$LOG" 2>&1
+  # Профиль выбираем уже после перенаправления: раньше set_profile вызывался
+  # до него, и сообщение «нет профиля X» уходило в stdout, которого у службы
+  # нет вовсе. Демон падал, launchd поднимал его по кругу, в логе — пусто.
+  set_profile "${1:-}"
+  cmd_start
+}
+
+# --------------------------------------------------------------- dispatch
+
+case "${1:-start}" in
+  start)      set_profile "${2:-}"; cmd_start ;;
+  daemon)     cmd_daemon "${2:-}" ;;
+  ui)         set_profile "${2:-}"; need_root ui; exec python3 "$SCRIPTS/tui.py" ;;
+  list)       cmd_list ;;
+  version|-v|--version)
+    echo "DualVPN $(cat "$BASE/VERSION" 2>/dev/null || echo '?')"
+    "$BIN/sing-box" version 2>/dev/null | head -1
+    ;;
+  stop)       cmd_stop ;;
+  status)     cmd_status ;;
+  diag)       shift; exec bash "$SCRIPTS/diag.sh" "$@" ;;
+  check)      shift; exec bash "$SCRIPTS/check.sh" "$@" ;;
+  dns)        shift; exec bash "$SCRIPTS/setup-resolver.sh" "$@" ;;
+  dns-remove) shift; exec bash "$SCRIPTS/setup-resolver.sh" remove "$@" ;;
+  -h|--help|help)
+    sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^#\{1\} \{0,1\}//'
+    ;;
+  *)
+    echo "неизвестная команда: $1"
+    echo "см. $0 help"
+    exit 1
+    ;;
+esac

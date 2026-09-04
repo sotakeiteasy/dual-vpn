@@ -1,0 +1,29 @@
+# Приватные ключи. Главная причина, по которой этот файл существует.
+conf/*.conf
+conf/site.env
+!conf/*.example
+
+# Рабочее состояние: собранный config.json содержит те же ключи,
+# логи — адреса и историю соединений.
+lib/state/
+
+# Бинарник sing-box: 57 МБ, качается отдельно (см. README).
+lib/bin/
+
+# Окружение и сборка приложения.
+lib/venv/
+lib/scripts/build/
+lib/scripts/dist/
+*.egg-info/
+__pycache__/
+*.pyc
+
+.DS_Store
+
+# Собранные образы для релиза.
+dist/
+
+
+# Генерируется из icon.svg при сборке.
+lib/scripts/DualVPN.icns
+lib/scripts/ui/icons/

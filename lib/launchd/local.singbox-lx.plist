@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.singbox-lx</string>
+
+  <!-- @@BASE@@ подставляется установщиком: путь у каждого свой. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@@BASE@@/vpn</string>
+    <string>daemon</string>
+  </array>
+
+  <!-- Каталог данных прибит здесь, и окно берёт его отсюда же. Иначе
+       служба читает конфиги из одного места, а окно показывает другое:
+       ровно так лог оказывался пустым, а рабочий туннель — «молчащим». -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DUALVPN_DATA</key>
+    <string>@@DATA@@</string>
+  </dict>
+
+  <!-- Туннель поднимается только по кнопке, сам при загрузке не лезет. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- Перезапуск только после падения. При штатном `vpn stop` выход нулевой,
+       и launchd не станет поднимать обратно то, что человек только что выключил. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <!-- Свой лог демон пишет сам, с ротацией (см. cmd_daemon).
+       Сюда попадёт только то, что случится раньше её запуска. -->
+  <key>StandardErrorPath</key>
+  <string>@@BASE@@/lib/state/launchd.err</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

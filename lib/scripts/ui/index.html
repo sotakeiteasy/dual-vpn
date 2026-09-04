@@ -1,0 +1,745 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VPN-lx</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg:        #ececec;
+  --panel:     #fbfbfb;
+  --line:      #00000014;
+  --text:      #1d1d1f;
+  --dim:       #6e6e73;
+  --ok:        #1a9c4b;
+  --warn:      #c77700;
+  --bad:       #d13b30;
+  --off:       #8e8e93;
+  --accent:    #0a6cff;
+  --logbg:     #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:    #1c1c1e;  --panel: #252527;  --line: #ffffff1a;
+    --text:  #f2f2f7;  --dim:   #98989f;  --logbg: #1a1a1c;
+    --ok: #32d367; --warn: #ffb03a; --bad: #ff5f52; --off: #7c7c82;
+    --accent: #4c9bff;
+  }
+}
+* { box-sizing: border-box; }
+/* Без !important атрибут hidden проигрывает display:flex у самого элемента —
+   поиск по логу оставался виден во вкладке «как это работает». */
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  color: var(--text); background: var(--bg);
+  display: grid; grid-template-columns: 330px 1fr; height: 100vh;
+  overflow: hidden;                    /* прокручивается содержимое, не окно */
+  -webkit-user-select: none; user-select: none;
+}
+/* min-height:0 обязателен: без него flex-потомок не сжимается ниже своего
+   содержимого, прокрутка уезжает на всё окно и обе панели едут вместе. */
+#side, #logs, #lines, #how { min-height: 0; }
+
+/* ------------------------------------------------------------ левая часть */
+#side { display: flex; flex-direction: column; gap: 12px; padding: 14px; overflow-y: auto; }
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+
+/* Главное состояние: крупно, одной фразой, чтобы читалось с расстояния. */
+#state { padding: 13px 14px; display: flex; gap: 11px; align-items: flex-start; }
+/* Разделитель вместо зазора: состояние и туннели — про одно и то же,
+   отдельными карточками они читались как два несвязанных блока. */
+#tunnels { border-top: 1px solid var(--line); }
+#dot { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; flex: none;
+       background: var(--off); box-shadow: 0 0 0 3px transparent; }
+#dot.ok   { background: var(--ok);   box-shadow: 0 0 0 3px #1a9c4b22; }
+#dot.warn { background: var(--warn); box-shadow: 0 0 0 3px #c7770022; }
+#dot.bad  { background: var(--bad);  box-shadow: 0 0 0 3px #d13b3022; }
+#state-title { font-size: 15px; font-weight: 600; letter-spacing: -0.1px; }
+#state-sub   { color: var(--dim); margin-top: 2px; }
+
+/* Туннели: две строки, каждая со своим состоянием — корп отдельно от личного. */
+.tun { display: flex; align-items: baseline; gap: 8px; padding: 9px 14px; }
+.tun + .tun { border-top: 1px solid var(--line); }
+.tun-name { width: 58px; color: var(--dim); flex: none; }
+.tun-val  { font-variant-numeric: tabular-nums; }
+.chip { font-size: 11px; padding: 1px 7px; border-radius: 20px; margin-left: auto; flex: none; }
+.chip.ok  { color: var(--ok);   background: #1a9c4b1f; }
+.chip.bad { color: var(--bad);  background: #d13b301f; }
+.chip.off { color: var(--off);  background: #8e8e9320; }
+
+#actions { display: flex; gap: 7px; }
+/* flex:1 у button задумано для строк кнопок; прямой потомок колонки от него
+   растягивался на всю свободную высоту. Отрицательный отступ подтягивает
+   кнопку к своему списку: общий gap колонки в 12px здесь слишком велик и
+   кнопка выглядела отдельной от раздела, к которому относится. */
+#side > button, #confs-wrap > button { flex: none; margin-top: -5px; }
+#confs-wrap { display: flex; flex-direction: column; gap: 12px; }
+button {
+  font: inherit; font-weight: 500; color: var(--text); flex: 1;
+  padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--panel); cursor: pointer;
+}
+/* :not(.primary) обязателен: иначе это правило перебивает синий фон по
+   специфичности, и на наведении кнопка становилась почти белой. */
+button:hover:not(:disabled):not(.primary) { background: #8080801a; }
+button:disabled { opacity: 0.45; cursor: default; }
+button.busy { color: var(--dim); }
+button.primary { background: var(--accent); border-color: transparent; color: #fff; }
+button.primary:hover:not(:disabled) { background: #0b62e4; }
+
+/* При поднятом туннеле конфиги не трогаются: смена файла всё равно
+   подействует только после перезапуска, а полупроходной режим («поменял,
+   а работает старое») уже один раз всех запутал. Гасим весь блок целиком —
+   так понятнее, чем поштучно выключенные кнопки. */
+#confs-wrap.locked { opacity: 0.45; pointer-events: none; }
+#lockhint { color: var(--dim); padding: 2px 3px 0; }
+/* Подвал колонки: версия нужна, когда просят «а какая у тебя», но внимания
+   к себе требовать не должна. */
+#version { color: var(--dim); font-size: 11px; padding: 2px 3px 4px;
+           margin-top: auto; }
+h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
+     letter-spacing: 0.5px; color: var(--dim); margin: 4px 0 -2px 3px;
+     display: flex; align-items: center; gap: 5px; }
+.info { width: 14px; height: 14px; border-radius: 50%; flex: none; cursor: pointer;
+        border: 1px solid var(--dim); color: var(--dim); font-size: 9px;
+        font-weight: 700; text-transform: none;
+        /* inline-flex вместо line-height: буква «i» узкая, и при центровании
+           текстом она уезжала влево от центра кружка. */
+        display: inline-flex; align-items: center; justify-content: center;
+        padding-left: 0.5px; }
+.info:hover { border-color: var(--accent); color: var(--accent); }
+.warnline { color: var(--warn); padding: 8px 12px; }
+
+/* Конфиги: список с пометкой активного и кнопкой добавления. */
+.conf { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; }
+.conf + .conf { border-top: 1px solid var(--line); }
+.conf:hover { background: #8080801a; }
+.conf-radio { width: 13px; height: 13px; border-radius: 50%; flex: none;
+              border: 1.5px solid var(--dim); }
+.conf.active .conf-radio { border-color: var(--accent); background: var(--accent);
+                           box-shadow: inset 0 0 0 2.5px var(--panel); }
+/* У рабочего выбора нет: галочка вместо переключателя, чтобы не звало нажать. */
+.conf-radio.fixed { border: none; background: none; box-shadow: none; color: var(--ok); }
+.conf.active .conf-radio.fixed::before { content: '✓'; font-size: 12px; }
+.conf[data-pick="0"] { cursor: default; }
+.conf[data-pick="0"]:hover { background: none; }
+.conf-name { flex: 1; }
+.conf-kind { font-size: 11px; color: var(--dim); }
+.conf-menu { flex: none; width: 24px; padding: 0; line-height: 18px; color: var(--dim);
+             background: none; border: none; border-radius: 5px; font-size: 15px; }
+.conf-menu:hover { background: #80808033; color: var(--text); }
+.emptyrow { padding: 11px 12px; color: var(--dim); }
+
+#rowmenu { position: fixed; z-index: 20; background: var(--panel); padding: 4px;
+           border: 1px solid var(--line); border-radius: 8px; min-width: 132px;
+           box-shadow: 0 8px 24px #00000033; display: flex; flex-direction: column; }
+#rowmenu button { text-align: left; border: none; background: none; padding: 5px 9px;
+                  border-radius: 5px; font-weight: 400; }
+#rowmenu button:hover { background: #80808026; }
+#rowmenu button.danger { color: var(--bad); }
+
+/* ------------------------------------------------------------ правая часть */
+#logs { display: flex; flex-direction: column; border-left: 1px solid var(--line);
+        background: var(--logbg); min-width: 0; overflow: hidden; }
+#logbar { display: flex; gap: 8px; align-items: center; padding: 9px 12px;
+          border-bottom: 1px solid var(--line); }
+#search { flex: 1; font: inherit; padding: 4px 9px; border-radius: 6px;
+          border: 1px solid var(--line); background: var(--bg); color: var(--text);
+          -webkit-user-select: text; user-select: text; }
+#logbar label { color: var(--dim); display: flex; gap: 5px; align-items: center; }
+.tzhint { color: var(--dim); font-size: 11px; }
+#lines { flex: 1; overflow-y: auto; padding: 8px 0; margin: 0;
+         font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+         -webkit-user-select: text; user-select: text; }
+.ln { padding: 0 12px; white-space: pre-wrap; word-break: break-word; }
+.ltime { color: var(--dim); }
+.llvl  { margin-left: 7px; }
+.l-info { color: var(--dim); }
+.l-warn { color: var(--warn); }
+.l-error { color: var(--bad); font-weight: 600; }
+.lid   { color: var(--dim); opacity: 0.55; margin-left: 6px; }
+.lmsg  { margin-left: 6px; }
+.ln.err  { color: var(--bad); background: #d13b300f; }
+.ln.warn { color: var(--warn); }
+.ln.head { color: var(--dim); }
+#empty { color: var(--dim); padding: 20px 14px; }
+
+#tabs { display: flex; gap: 2px; padding: 8px 10px 0; }
+.tab { flex: none; font-size: 12px; font-weight: 500; padding: 5px 12px;
+       border: none; background: none; color: var(--dim); border-radius: 6px; }
+.tab:hover { background: #8080801a; color: var(--text); }
+.tab.on { background: #80808026; color: var(--text); }
+
+/* Раздел «как это работает»: читаемая колонка, не растягивается на всё окно. */
+#how { flex: 1; overflow-y: auto; padding: 4px 22px 28px; line-height: 1.6; }
+#how > * { max-width: 660px; }
+#how h3 { font-size: 13px; margin: 22px 0 6px; letter-spacing: -0.1px; }
+#how h3:first-child { margin-top: 14px; }
+#how p  { margin: 0 0 8px; color: var(--text); }
+#how .note { color: var(--dim); }
+#how code { font: 11.5px/1.5 ui-monospace, Menlo, monospace;
+            background: #80808024; padding: 1px 5px; border-radius: 4px; }
+#how ol { margin: 6px 0; padding-left: 20px; }
+#how li { margin: 3px 0; }
+#how table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+#how td { padding: 5px 8px; border-top: 1px solid var(--line); vertical-align: top; }
+#how td:first-child { color: var(--dim); width: 128px; white-space: nowrap; }
+#how .box { border: 1px solid var(--line); border-radius: 8px; padding: 2px 12px;
+            margin: 8px 0; background: var(--panel); }
+
+/* Просмотр конфига поверх: ключи закрыты, показывать их незачем. */
+#sheet { position: fixed; inset: 0; background: #00000055; display: none;
+         align-items: center; justify-content: center; }
+#sheet.on { display: flex; }
+#sheet-box { background: var(--panel); border-radius: 12px; width: 460px;
+             max-height: 74vh; display: flex; flex-direction: column;
+             box-shadow: 0 12px 40px #00000040; }
+#sheet-head { padding: 13px 16px; border-bottom: 1px solid var(--line);
+              font-weight: 600; display: flex; }
+/* Конфиг — моноширинным и с сохранением переносов, справка — обычным
+   текстом, который переносится по ширине окна. */
+#sheet-body.mono { font: 11.5px/1.6 ui-monospace, Menlo, monospace;
+                   white-space: pre-wrap; }
+#sheet-body p { margin: 0 0 10px; }
+#sheet-body p:last-child { margin-bottom: 0; }
+#sheet-body { padding: 14px 16px; overflow: auto;
+              font: 12.5px/1.65 -apple-system, sans-serif;
+              -webkit-user-select: text; user-select: text; }
+#sheet-foot { padding: 11px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; }
+.field { display: block; margin-bottom: 14px; }
+.flabel { display: block; font-weight: 500; margin-bottom: 4px; }
+.field input { width: 100%; font: inherit; padding: 5px 9px; border-radius: 6px;
+               border: 1px solid var(--line); background: var(--bg); color: var(--text);
+               -webkit-user-select: text; user-select: text; }
+.field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.fhint { display: block; color: var(--dim); font-size: 11px; margin-top: 3px; }
+</style>
+
+<div id="side">
+  <div class="card">
+    <div id="state">
+      <div id="dot"></div>
+      <div>
+        <div id="state-title">соединяюсь…</div>
+        <div id="state-sub">&nbsp;</div>
+      </div>
+    </div>
+    <div id="tunnels"></div>
+  </div>
+
+  <button id="btn-install" class="primary" hidden>Установить службу…</button>
+
+  <div id="actions">
+    <button id="btn-toggle" class="primary">Включить</button>
+    <button id="btn-restart">Перезапустить</button>
+  </div>
+
+  <div id="lockhint" hidden>выключи VPN, чтобы менять конфиги</div>
+  <div id="confs-wrap">
+  <h2>рабочий <span class="info" data-info="corp">i</span></h2>
+  <div class="card" id="confs-corp"></div>
+  <button data-add="corp" id="btn-corp">Добавить рабочий конфиг…</button>
+  <button id="btn-site">Настроить рабочую сеть…</button>
+
+  <h2>личный <span class="info" data-info="personal">i</span></h2>
+  <div class="card" id="confs-personal"></div>
+  <button data-add="personal">Добавить личный конфиг…</button>
+  </div>
+  <div id="version"></div>
+</div>
+
+<div id="logs">
+  <div id="tabs">
+    <button class="tab on" data-tab="log">Логи</button>
+    <button class="tab" data-tab="how">Как это работает</button>
+  </div>
+  <div id="logbar">
+    <input id="search" placeholder="поиск по логу" spellcheck="false">
+    <label><input type="checkbox" id="only-err"> только ошибки</label>
+    <span class="tzhint" title="время местное">UTC+3</span>
+  </div>
+  <div id="lines"><div id="empty">лога пока нет</div></div>
+  <div id="how" hidden></div>
+</div>
+
+<div id="sheet">
+  <div id="sheet-box">
+    <div id="sheet-head"><span id="sheet-name"></span></div>
+    <div id="sheet-body"></div>
+    <div id="sheet-foot">
+      <button id="sheet-del">Удалить</button>
+      <button id="sheet-load" hidden>Взять из файла…</button>
+      <button id="sheet-save" hidden>Сохранить</button>
+      <button id="sheet-close" class="primary">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Мост в Python: сообщения туда, вызовы render/renderLogs — обратно.
+const send = (name, arg) =>
+  window.webkit.messageHandlers.py.postMessage({name, arg: arg ?? null});
+
+// Вызовы из Python идут через эту обёртку: WKWebView обезличивает исключения
+// из evaluateJavaScript в «Script error» без строки и текста, а консоли у окна
+// нет. Ловим здесь и отправляем настоящее сообщение в лог приложения.
+function call(fn, arg) {
+  try {
+    window[fn](arg);
+  } catch (e) {
+    send('jserror', `${fn}: ${e && e.message} @${e && e.lineNumber}`);
+  }
+}
+
+// Экранирование. Кавычки тоже: значения уходят в data-атрибуты, а имя
+// конфига — это имя файла, которое пользователь волен назвать как угодно.
+const esc = t => String(t).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let LAST = {};
+let PENDING = null;    // команда отправлена, состояние ещё не догнало
+
+// Рестарт нельзя ждать сравнением с желаемым состоянием: жмут его при поднятом
+// туннеле, и «уже как надо» получается сразу. Ждём полный цикл: упал и поднялся.
+function busyNow(s) {
+  if (!PENDING) return false;
+  if (Date.now() - PENDING.at > 25000) return false;   // страховка от залипания
+  if (PENDING.mode === 'restart') {
+    if (!s.up) PENDING.sawDown = true;
+    return !(PENDING.sawDown && s.up);
+  }
+  return s.up !== PENDING.want;
+}
+
+// Каждая ветка отрисовки отчитывается один раз: если в ней исключение,
+// сообщение не придёт, и selftest это увидит. Иначе «страница загрузилась»
+// проходило бы даже при мёртвом рендере.
+const done = {};
+const prev = {};      // последняя отрисованная разметка, чтобы не топтать DOM
+const tick = w => { if (!done[w]) { done[w] = 1; send('rendered', w); } };
+
+function render(s) {
+  LAST = s;
+  const up = s.up, corp = !!s.corp_ip, leak = s.v6_leak;
+
+  // Четыре состояния, а не два: «корп не отвечает» — отдельный случай,
+  // при котором личный туннель работает и интернет есть.
+  // Первый запуск: без службы кнопки бессмысленны, поэтому вместо них
+  // предложение её поставить — иначе человек нажимает «Включить» и ничего
+  // не происходит.
+  const noDaemon = s.daemon === false;
+
+  let cls = 'off', title = 'Выключено', sub = 'туннели не подняты';
+  if (noDaemon) { cls='warn'; title='Нужна установка';
+                  sub='фоновая служба ещё не поставлена'; }
+  else if (leak) { cls='bad';  title='Утечка IPv6';        sub='часть трафика идёт мимо туннеля: ' + leak; }
+  // Не поднялся и не просто выключен — показываем причину, а не пустоту.
+  else if (!up && s.why) { cls='bad'; title='Не запускается'; sub = s.why; }
+  else if (!up)  { cls='off';  title='Выключено';          sub='туннели не подняты'; }
+  // Заголовок обязан отражать все три строки ниже, иначе получается прямое
+  // противоречие: сверху «всё работает», а в личном — «мимо туннеля».
+  else if (s.exit_state === 'leak') { cls='bad'; title='Трафик мимо туннеля';
+                                      sub='тебя видно адресом провайдера ' + (s.exit_ip || ''); }
+  else if (!corp){ cls='warn'; title='Корп не отвечает';   sub='личный туннель работает, интернет есть'; }
+  else           { cls='ok';   title='Всё работает';       sub='оба туннеля подняты'; }
+
+  document.getElementById('dot').className = cls;
+  document.getElementById('state-title').textContent = title;
+  const subEl = document.getElementById('state-sub');
+  // Сообщения (ошибка команды, «перезапускаю») красят эту строку. Без явного
+  // сброса цвет оставался, и обычный текст показывался тревожным.
+  if (!NOTICE) { subEl.textContent = sub; subEl.style.color = ''; }
+
+  const row = (name, val, state, label) =>
+    `<div class="tun"><span class="tun-name">${name}</span>
+       <span class="tun-val">${val}</span>
+       <span class="chip ${state}">${label}</span></div>`;
+
+  document.getElementById('tunnels').innerHTML =
+    row('личный', up ? (s.exit_ip || '—') : '—',
+        !up ? 'off' : s.exit_state === 'leak' ? 'bad'
+            : s.exit_state === 'tunnel' ? 'ok' : 'off',
+        !up ? 'выключен' : s.exit_state === 'leak' ? 'мимо туннеля'
+            : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
+    row('корп', up ? (s.corp_ip || '—') : '—',
+        !up ? 'off' : (corp ? 'ok' : 'bad'),
+        !up ? 'выключен' : (corp ? 'отвечает' : 'молчит')) +
+    row('выход', up ? [s.exit_country, s.exit_city].filter(Boolean).join(' ') || '—' : '—',
+        'off', s.err_count ? s.err_count + ' ошибок' : 'без ошибок');
+
+  // Пока команда не отработала, состояние ещё старое. Без этого кнопка
+  // выглядела мёртвой: нажал — ничего не изменилось, и хочется нажать снова.
+  const t = document.getElementById('btn-toggle');
+  const r = document.getElementById('btn-restart');
+  const wasRestart = PENDING && PENDING.mode === 'restart';
+  const busy = busyNow(s);
+  if (PENDING && !busy) {
+    PENDING = null;
+    // Перезапуск закончился раньше таймаута — незачем держать подпись
+    // «применяю конфиг», пока заголовок говорит уже что-то другое.
+    if (wasRestart && NOTICE) { NOTICE = null; clearTimeout(notice.t); }
+  }
+
+  t.disabled = r.disabled = busy;
+  t.classList.toggle('busy', busy);
+  r.classList.toggle('busy', busy);
+  if (busy && wasRestart) {
+    t.textContent = up ? 'Выключить' : 'Включить';
+    r.textContent = 'перезапускаю…';
+  } else if (busy) {
+    t.textContent = PENDING.want ? 'включаю…' : 'выключаю…';
+    r.textContent = 'Перезапустить';
+  } else {
+    t.textContent = up ? 'Выключить' : 'Включить';
+    t.classList.toggle('primary', !up);
+    r.textContent = 'Перезапустить';
+    r.disabled = !up;
+  }
+  document.getElementById('btn-install').hidden = !noDaemon;
+  document.getElementById('actions').hidden = noDaemon;
+  document.getElementById('confs-wrap').classList.toggle('locked', up);
+  document.getElementById('lockhint').hidden = !up;
+  tick('status');
+}
+
+function renderConfs(d) {
+  const sig = JSON.stringify(d);
+  if (sig === prev.confs) { tick('confs'); return; }
+  prev.confs = sig;
+  // Список перерисовывается — меню повисло бы с именем файла, которого может
+  // уже не быть, и «Удалить» ушло бы в никуда.
+  closeMenu();
+
+  const rows = (list, pick) => list.map(c => `
+    <div class="conf ${c.active ? 'active' : ''}" data-name="${esc(c.name)}"
+         data-pick="${pick ? 1 : 0}">
+      <div class="conf-radio ${pick ? '' : 'fixed'}"></div>
+      <span class="conf-name">${esc(c.name)}</span>
+      <button class="conf-menu" data-menu="${esc(c.name)}" title="Действия">⋯</button>
+    </div>`).join('');
+
+  document.getElementById('confs-corp').innerHTML =
+    (d.corp_ambiguous
+      ? '<div class="warnline">несколько рабочих конфигов — сборка не пройдёт, оставь один</div>'
+      : '') +
+    (rows(d.corp || [], false) ||
+      '<div class="emptyrow">рабочего конфига нет</div>');
+
+  // «Заменить» при пустом списке звучит как насмешка: заменять нечего.
+  document.getElementById('btn-corp').textContent =
+    (d.corp || []).length ? 'Заменить рабочий конфиг…' : 'Добавить рабочий конфиг…';
+
+  document.getElementById('confs-personal').innerHTML =
+    (d.personal_ambiguous
+      ? '<div class="warnline">подходящих личных конфигов несколько — выбери один, иначе сборка не пройдёт</div>'
+      : '') +
+    (rows(d.personal || [], true) ||
+      '<div class="emptyrow">личных конфигов нет</div>');
+  tick('confs');
+}
+
+// Выпадающее меню строки: удаление должно быть в одном клике, а не прятаться
+// внутри просмотра — там его никто не найдёт.
+function openMenu(name, near) {
+  closeMenu();
+  const m = document.createElement('div');
+  m.id = 'rowmenu';
+  m.innerHTML = ['Показать', 'Редактировать', 'Удалить']
+    .map((t, i) => `<button data-act="${['show','edit','del'][i]}"
+                      class="${i === 2 ? 'danger' : ''}">${t}</button>`).join('');
+  document.body.appendChild(m);
+  const r = near.getBoundingClientRect();
+  m.style.top = Math.max(8, Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8)) + 'px';
+  m.style.left = Math.max(8, Math.min(r.left - 92, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.onclick = e => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const act = b.dataset.act;
+    closeMenu();
+    send(act === 'show' ? 'show_config' : act === 'edit' ? 'edit_config' : 'del_config', name);
+  };
+}
+
+function closeMenu() {
+  const m = document.getElementById('rowmenu');
+  if (m) m.remove();
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('#rowmenu') && !e.target.closest('[data-menu]')) closeMenu();
+}, true);
+// Меню позиционируется абсолютно и при прокрутке колонки отрывается от строки.
+document.getElementById('side').addEventListener('scroll', closeMenu);
+
+// Строка sing-box наполовину состоит из повторяющейся меты. Часовой пояс
+// одинаков во всех строках, дата — тоже (лог на один запуск), а идентификатор
+// соединения нужен редко, но именно по нему связываются строки одного
+// соединения — поэтому не выбрасываем, а приглушаем.
+const LOGLINE = /^\+\d{4}\s+\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2}:\d{2})\s+(\w+)\s*(\[[^\]]*\])?\s*(.*)$/;
+
+function fmtLine(l) {
+  const m = LOGLINE.exec(l);
+  if (!m) return `<span class="lmsg">${esc(l)}</span>`;
+  const [, time, lvl, id, rest] = m;
+  return `<span class="ltime">${time}</span>` +
+         `<span class="llvl l-${lvl.toLowerCase()}">${lvl}</span>` +
+         (id ? `<span class="lid">${esc(id)}</span>` : '') +
+         `<span class="lmsg">${esc(rest)}</span>`;
+}
+
+function renderLogs(lines) {
+  const q = document.getElementById('search').value.toLowerCase();
+  const onlyErr = document.getElementById('only-err').checked;
+  const box = document.getElementById('lines');
+  // Держим прокрутку у хвоста, только если пользователь и так внизу.
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+
+  const out = lines.filter(l => {
+    if (onlyErr && !/ ERROR |^ERROR/.test(l)) return false;
+    return !q || l.toLowerCase().includes(q);
+  }).map(l => {
+    const cls = / ERROR |^ERROR/.test(l) ? 'err' : / WARN /.test(l) ? 'warn'
+              : l.startsWith('===') || l.startsWith('→') ? 'head' : '';
+    return `<div class="ln ${cls}">${fmtLine(l)}</div>`;
+  }).join('');
+
+  const html = out || '<div id="empty">ничего не найдено</div>';
+  // Присваивание innerHTML сбрасывает прокрутку и снимает выделение текста.
+  // Раз в две секунды это делало лог нечитаемым: ни отмотать, ни скопировать.
+  if (html !== prev.logs) {
+    prev.logs = html;
+    box.innerHTML = html;
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+  tick('logs');
+}
+
+function renderHowto(h) {
+  const sig = JSON.stringify(h);
+  if (sig === prev.howto) { tick('howto'); return; }
+  prev.howto = sig;
+
+  const ep = t => (h.endpoints || []).find(e => e.tag === t) || {};
+  const p = ep('awg-personal'), c = ep('wg-corp');
+  const nets = (h.corp_nets || []).map(n => `<code>${esc(n)}</code>`).join(' ') || '<span class="note">не задано</span>';
+  const doms = (h.corp_domains || []).map(d => `<code>${esc(d)}</code>`).join(' ') || '<span class="note">не задано</span>';
+
+  document.getElementById('how').innerHTML = `
+    <h3>Зачем два туннеля сразу</h3>
+    <p>Обычный VPN-клиент держит одно соединение: либо рабочее, либо личное.
+    Здесь подняты оба одновременно, и для каждого пакета решается, в какой из
+    них его отправить. Поэтому корпоративные ресурсы доступны, не отключая
+    личный туннель, и наоборот.</p>
+
+    <h3>Куда уходит конкретный пакет</h3>
+    <p>Правила проверяются по порядку, до первого совпадения:</p>
+    <ol>
+      <li>адрес попадает в корп-подсети → <code>рабочий туннель</code></li>
+      <li>адрес локальный (<code>10/8</code>, <code>192.168/16</code>) → мимо туннелей, в свою сеть</li>
+      <li>всё остальное → <code>${esc(h.final || 'личный туннель')}</code></li>
+    </ol>
+    <div class="box"><p>Твои корп-подсети: ${nets}</p></div>
+
+    <h3>Имена и DNS</h3>
+    <p>Адрес корп-сервера снаружи не резолвится, поэтому запросы к
+    ${doms} отправляются корпоративному DNS
+    <code>${esc(h.corp_dns || '—')}</code>, а остальные — публичному через личный
+    туннель. Это настроено файлом в <code>/etc/resolver</code>, а не общими
+    настройками сети: ${(h.resolvers || []).map(r => `<code>${esc(r)}</code>`).join(' ') || '—'}.</p>
+    <p class="note">Следствие: короткое имя вроде <code>git</code> не сработает,
+    нужно полное — правило в /etc/resolver срабатывает по суффиксу.</p>
+
+    <h3>Какие конфиги подходят</h3>
+    <p>Это обычные файлы WireGuard, которые выдаёт админ или личный сервер.
+    Кладутся в <code>conf/</code>, тип определяется по имени файла:</p>
+    <table>
+      <tr><td>рабочий</td><td><code>corp.conf</code>, <code>wg.conf</code>,
+        <code>wg-*.conf</code>, <code>wg0-*.conf</code><br>
+        <span class="note">обычный WireGuard. Маршруты берутся из его
+        <code>AllowedIPs</code> — что админ туда положил, то и пойдёт в
+        рабочий туннель</span></td></tr>
+      <tr><td>личный</td><td><code>personal.conf</code>, <code>awg-*.conf</code>,
+        <code>amnezia-*.conf</code><br>
+        <span class="note">WireGuard или AmneziaWG. Второй — форк с маскировкой
+        трафика (<code>Jc</code>, <code>S1</code>, <code>H1</code> и подобные
+        поля), чтобы провайдер не опознавал соединение как VPN</span></td></tr>
+    </table>
+    <p class="note">Любой другой файл в <code>conf/</code> тоже можно выбрать
+    личным — слева в списке. Рабочий подключается всегда и выбора не требует.</p>
+
+    <h3>Что подключено сейчас</h3>
+    <table>
+      <tr><td>рабочий</td><td><code>${esc(c.address || '—')}</code>  MTU ${esc(c.mtu || '—')}</td></tr>
+      <tr><td>личный</td><td><code>${esc(p.address || '—')}</code>  MTU ${esc(p.mtu || '—')}${p.awg ? '  · с маскировкой' : ''}</td></tr>
+    </table>
+
+    <h3>Почему это две программы</h3>
+    <p>Туннель правит таблицу маршрутов системы, а на это нужны права
+    администратора. Поэтому им владеет фоновая служба, запускаемая системой,
+    а это окно — обычная программа без особых прав: она показывает состояние и
+    посылает службе две команды, включить и выключить.</p>
+    <p class="note">Служба сама при загрузке Мака не стартует — только когда
+    нажмёшь «Включить».</p>
+
+    <h3>Если что-то не работает</h3>
+    <p>Смотри на строку «корп» слева. Если молчит она одна, а личный туннель
+    жив — проблема в рабочей сети, а не в программе. Если пропало всё сразу
+    после того, как ноутбук поспал, помогает «Перезапустить»: во сне соединение
+    рвётся, и открытые до этого страницы остаются висеть на мёртвых соединениях.</p>`;
+  tick('howto');
+}
+
+// Пока стоит — render не затирает строку состояния своим текстом.
+let NOTICE = null;
+
+function notice(msg, color, ms) {
+  const el = document.getElementById('state-sub');
+  NOTICE = msg;
+  el.textContent = msg;
+  el.style.color = color;
+  clearTimeout(notice.t);
+  notice.t = setTimeout(() => { NOTICE = null; render(LAST); }, ms);
+}
+
+function failed(msg) {
+  PENDING = null;                     // операция не пошла, кнопки отпускаем
+  notice(msg, 'var(--bad)', 7000);
+}
+
+function restarting() {
+  PENDING = {mode: 'restart', at: Date.now(), sawDown: false};
+  notice('применяю конфиг, туннель перезапускается…', 'var(--dim)', 25000);
+}
+
+function renderVersion(v) {
+  document.getElementById('version').textContent =
+    `DualVPN ${v.app}` + (v.singbox ? ` · sing-box ${v.singbox}` : '');
+}
+
+// Домены рабочей сети раньше были зашиты в код. Теперь их задают здесь,
+// иначе после выноса в файл задать их стало бы нечем.
+const SITE_FIELDS = [
+  ["CORP_DOMAINS", "Домены рабочей сети",
+   "example.local corp.example.com",
+   "их резолвит корпоративный DNS, остальное — публичный. Через пробел"],
+  ["CORP_PROBE", "Хост для проверки связи",
+   "git.example.local",
+   "по нему окно понимает, отвечает ли рабочая сеть. Должен быть доступен только изнутри"],
+  ["CORP_HOSTS", "Что проверяет диагностика",
+   "git.example.local wiki.example.local",
+   "необязательно, через пробел"],
+  ["SB_CORP_EXCLUDE", "Не гнать в рабочий туннель",
+   "198.51.100.7/32",
+   "нужно редко: когда хост из AllowedIPs через туннель не отвечает, а напрямую открывается"],
+];
+
+function showSite(cur) {
+  document.getElementById('sheet-name').textContent = 'Рабочая сеть';
+  const b = document.getElementById('sheet-body');
+  b.classList.remove('mono');
+  b.innerHTML = SITE_FIELDS.map(([k, label, ph, hint]) => `
+    <label class="field">
+      <span class="flabel">${label}</span>
+      <input id="f-${k}" value="${esc(cur[k] || '')}" placeholder="${esc(ph)}"
+             spellcheck="false" autocapitalize="off">
+      <span class="fhint">${hint}</span>
+    </label>`).join('');
+  document.getElementById('sheet-del').hidden = true;
+  document.getElementById('sheet-save').hidden = false;
+  document.getElementById('sheet-load').hidden = false;
+  document.getElementById('sheet').classList.add('on');
+}
+
+// Поля заполняются из выбранного файла: набивать их руками, когда готовый
+// site.env уже есть, — лишняя работа.
+function fillSite(v) {
+  SITE_FIELDS.forEach(([k]) => {
+    const el = document.getElementById('f-' + k);
+    if (el) el.value = v[k] || '';
+  });
+}
+
+function closeSheet() {
+  document.getElementById('sheet').classList.remove('on');
+}
+
+function showInfo(title, paras) {
+  document.getElementById('sheet-save').hidden = true;
+  document.getElementById('sheet-load').hidden = true;
+  document.getElementById('sheet-name').textContent = title;
+  const b = document.getElementById('sheet-body');
+  b.classList.remove('mono');
+  // Абзацами, а не одним куском с переносами: иначе строки ломались там, где
+  // я их набрал, и в конце абзаца оставалось по два слова.
+  b.innerHTML = paras.map(t => `<p>${esc(t)}</p>`).join('');
+  document.getElementById('sheet-del').hidden = true;
+  document.getElementById('sheet').classList.add('on');
+}
+
+function showConf(name, text) {
+  document.getElementById('sheet-save').hidden = true;
+  document.getElementById('sheet-load').hidden = true;
+  document.getElementById('sheet-del').hidden = false;
+  document.getElementById('sheet-body').classList.add('mono');
+  document.getElementById('sheet-name').textContent = name + '.conf';
+  // Файл показывается целиком, включая ключи: он лежит на этой же машине,
+  // и прятать его от владельца — только мешать копировать.
+  document.getElementById('sheet-body').textContent = text;
+  document.getElementById('sheet').classList.add('on');
+  document.getElementById('sheet').dataset.name = name;
+}
+
+document.getElementById('btn-toggle').onclick = () => {
+  const want = !LAST.up;
+  PENDING = {want, at: Date.now()};
+  send(want ? 'start' : 'stop');
+  render(LAST);                       // мгновенная реакция, не ждём опроса
+};
+document.getElementById('btn-install').onclick = () => send('install_daemon');
+document.getElementById('btn-site').onclick = () => send('site');
+document.getElementById('sheet-load').onclick = () => send('load_site');
+document.getElementById('sheet-save').onclick = () => {
+  const v = {};
+  SITE_FIELDS.forEach(([k]) => { v[k] = document.getElementById('f-' + k).value; });
+  send('save_site', v);
+};
+document.getElementById('btn-restart').onclick = () => {
+  PENDING = {mode: 'restart', at: Date.now(), sawDown: false};
+  send('restart');
+  render(LAST);
+};
+
+document.getElementById('side').onclick = e => {
+  const i = e.target.closest('[data-info]');
+  if (i) { send('info', i.dataset.info); return; }
+  const a = e.target.closest('[data-add]');
+  if (a) send('add_config', a.dataset.add);
+};
+
+document.getElementById('search').oninput = () => send('logs');
+document.getElementById('only-err').onchange = () => send('logs');
+document.getElementById('sheet-close').onclick = closeSheet;
+document.getElementById('sheet-del').onclick =
+  () => send('del_config', document.getElementById('sheet').dataset.name);
+
+// Сообщаем Python, что страница поднялась: на этом держится сквозной тест —
+// он проверяет всю цепочку от ресурса в бандле до моста обратно.
+send('ready');
+
+document.getElementById('tabs').onclick = e => {
+  const t = e.target.closest('.tab');
+  if (!t) return;
+  const log = t.dataset.tab === 'log';
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
+  document.getElementById('logbar').hidden = !log;
+  document.getElementById('lines').hidden = !log;
+  document.getElementById('how').hidden = log;
+};
+
+document.getElementById('side').addEventListener('click', e => {
+  const mb = e.target.closest('[data-menu]');
+  if (mb) { openMenu(mb.dataset.menu, mb); return; }
+  const row = e.target.closest('.conf');
+  if (row && row.dataset.pick === '1') send('use_config', row.dataset.name);
+});
+</script>
