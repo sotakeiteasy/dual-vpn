@@ -30,13 +30,6 @@
 Всё, включая sing-box, лежит внутри `.app`. Конфиги и состояние —
 в `~/Library/Application Support/DualVPN`.
 
-Удалить: `.app` в корзину, затем
-
-```bash
-sudo launchctl bootout system/local.singbox-lx
-sudo rm /Library/LaunchDaemons/local.singbox-lx.plist /etc/sudoers.d/singbox-lx
-```
-
 ## Из исходников
 
 Нужен macOS 13+, Python 3.9+ и бинарник
@@ -58,7 +51,6 @@ bash install.sh                    # без sudo, пароль спросит с
 
 `install.sh` создаёт окружение, собирает `.app`, прогоняет проверки и только
 потом трогает систему. Он же и обновление: `git pull && bash install.sh`.
-Снять всё — `bash install.sh remove`.
 
 Конфиги, `site.env`, бинарник и `lib/state/` вне гита и переустановку
 переживают.
@@ -134,6 +126,18 @@ bash lib/scripts/selftest.sh
 Синтаксис, кодировки, ротация логов, plist, а для собранного приложения —
 подпись, запуск, исключения в JS и то, что каждая часть окна отработала.
 `install.sh` прогоняет их сам и при провале ничего не ставит.
+
+## Удаление
+
+Из исходников — `bash install.sh remove`. Установленное из `.dmg`: перетащи
+`.app` в корзину, затем
+
+```bash
+sudo launchctl bootout system/local.singbox-lx
+sudo rm /Library/LaunchDaemons/local.singbox-lx.plist /etc/sudoers.d/singbox-lx
+```
+
+Конфиги при этом остаются: `~/Library/Application Support/DualVPN`.
 
 ## Лицензия
 
