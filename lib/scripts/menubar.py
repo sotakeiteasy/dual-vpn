@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 LABEL = "local.singbox-lx"
 PLIST = f"/Library/LaunchDaemons/{LABEL}.plist"
 REFRESH = 2.0
+BAR_PT = 18          # высота значка в точках; меню-бар — 22
 LOG = os.path.expanduser("~/Library/Logs/singbox-lx-menubar.log")
 
 
@@ -173,11 +174,22 @@ class App(rumps.App):
         name = f"menubar-{state}.png"
         for cand in (os.path.join(BASE, "ui", "icons", name),           # в .app
                      os.path.join(BASE, "lib", "scripts", "ui", "icons", name)):
-            if os.path.exists(cand):
-                self.template = (state == "default")
-                self.icon = cand
-                log(f"значок: {state}")
-                return
+            if not os.path.exists(cand):
+                continue
+            # Обычный — шаблоном: macOS сама сделает его белым на тёмной
+            # панели и чёрным на светлой. Цветные шаблоном быть не могут,
+            # иначе цвет потеряется.
+            self.template = (state == "default")
+            self.icon = cand
+            # rumps грузит файл без размера, поэтому 44 пикселя считаются
+            # 44 точками — вдвое крупнее нужного. Задаём 22 точки: пиксели
+            # остаются, и на экране с двойной плотностью значок чёткий.
+            img = getattr(self, "_icon_nsimage", None)
+            if img is not None:
+                img.setSize_((BAR_PT, BAR_PT))
+                img.setTemplate_(state == "default")
+            log(f"значок: {state}, шаблон={state == 'default'}")
+            return
         log(f"значок не найден: {name}")
 
     # ------------------------------------------------------------ показ
