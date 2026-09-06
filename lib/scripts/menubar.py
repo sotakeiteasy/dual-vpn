@@ -108,6 +108,33 @@ def launchctl(*args):
     return err or f"launchctl вернул {r.returncode}"
 
 
+def stop_tunnel():
+    """Выключить и убрать за собой в любом состоянии.
+
+    Штатный путь — INT службе: она сама снимает sing-box и разбирает маршруты.
+    Но службы может не быть вовсе (не установлена, снята, упала до launchd),
+    а маршруты при этом висят, и кнопка «Выключить» раньше в таком состоянии
+    только ругалась. Поэтому вторым шагом зовём уборку напрямую: `vpn stop`
+    рассчитан ровно на это и безопасен при уже выключенном туннеле.
+    """
+    err = launchctl("kill", "INT", f"system/{LABEL}")
+    if not err:
+        return ""
+    log(f"служба не отозвалась ({err}) — убираю напрямую")
+    r = subprocess.run(["/usr/bin/sudo", "-n", os.path.join(BASE, "vpn"), "stop"],
+                       capture_output=True, text=True)
+    for line in (r.stdout or "").strip().splitlines():
+        log(f"vpn stop: {line}")
+    if r.returncode == 0:
+        return ""
+    direct = (r.stderr or r.stdout).strip()
+    if "password" in direct.lower() or direct.startswith("sudo:"):
+        direct = "нет прав: переустанови (install-daemon.sh)"
+    # Показываем обе причины: без первой непонятно, почему вообще дошло
+    # до прямой уборки.
+    return f"{err}; напрямую тоже не вышло: {direct}"
+
+
 class App(rumps.App):
     def __init__(self):
         # Без названия: в меню-баре место общее, а состояние читается цветом.
@@ -135,7 +162,7 @@ class App(rumps.App):
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Выход", callback=rumps.quit_application))
 
-        self.window = Window(BASE, tui.STATE, log, launchctl, DATA)
+        self.window = Window(BASE, tui.STATE, log, launchctl, DATA, stop_tunnel)
 
         log(f"старт, проект: {BASE}")
         log(f"данные: {DATA}")
@@ -153,7 +180,7 @@ class App(rumps.App):
             rumps.notification("DualVPN", "не удалось включить", err)
 
     def on_stop(self, _):
-        err = launchctl("kill", "INT", f"system/{LABEL}")
+        err = stop_tunnel()
         if err:
             rumps.notification("DualVPN", "не удалось выключить", err)
 

@@ -69,9 +69,13 @@ if ! launchctl bootstrap system "$PLIST"; then
 fi
 
 # Права ровно на две команды и ровно на этот демон — не на launchctl вообще.
+# Третья строка — аварийный путь: если службы нет или она уже упала, а
+# маршруты висят, «Выключить» вызывает уборку напрямую. Без этого кнопка в
+# таком состоянии просто ругалась, и разгребать приходилось из терминала.
 cat > "$SUDOERS.tmp" <<EOF
 $USER_NAME ALL=(root) NOPASSWD: /bin/launchctl kickstart -k system/$LABEL
 $USER_NAME ALL=(root) NOPASSWD: /bin/launchctl kill INT system/$LABEL
+$USER_NAME ALL=(root) NOPASSWD: $BASE/vpn stop
 EOF
 chmod 440 "$SUDOERS.tmp"
 chown root:wheel "$SUDOERS.tmp"

@@ -64,13 +64,17 @@ class Bridge(NSObject):
 class Window:
     _ver_sent = False           # версия шлётся один раз: она не меняется
     data = None                 # каталог данных; задаётся в __init__
+    stop = None                 # как выключать; задаётся в __init__
 
-    def __init__(self, base, state, log, launchctl, data=None):
+    def __init__(self, base, state, log, launchctl, data=None, stop=None):
         self.base = base            # код: vpn, скрипты, sing-box
         self.data = data or base    # данные: conf/, lib/state
         self.state = state
         self.log = log
         self.launchctl = launchctl
+        # Выключение идёт своим путём: у него есть запасной вариант на случай,
+        # когда службы нет, а маршруты остались (см. stop_tunnel в menubar.py).
+        self.stop = stop
         self.win = None
         self.view = None
         self.timer = None
@@ -377,7 +381,10 @@ class Window:
         elif name == "start":
             self.command("kickstart", "-k", "system/local.singbox-lx")
         elif name == "stop":
-            self.command("kill", "INT", "system/local.singbox-lx")
+            err = (self.stop() if self.stop
+                   else self.launchctl("kill", "INT", "system/local.singbox-lx"))
+            if err:
+                self.eval(f"failed({_js(err)})")
         elif name == "restart":
             self.command("kickstart", "-k", "system/local.singbox-lx")
         elif name == "logs":

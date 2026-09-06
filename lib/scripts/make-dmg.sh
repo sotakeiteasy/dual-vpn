@@ -11,6 +11,16 @@ VER=$(cat "$BASE/VERSION")
 APP="$BASE/lib/scripts/dist/DualVPN.app"
 OUT="$BASE/dist"
 DMG="$OUT/DualVPN-$VER.dmg"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
+# Снять копию с учёта в LaunchServices. Просто удалить папку мало: запись
+# переживает удаление, и Launchpad со Spotlight продолжают показывать вторую
+# «DualVPN» рядом с установленной — ровно эта пара и появлялась после сборки.
+unregister() {
+  [ -x "$LSREGISTER" ] || return 0
+  [ -e "$1" ] || return 0
+  "$LSREGISTER" -u "$1" >/dev/null 2>&1 || true
+}
 
 # Пересобираем всегда. Иначе образ молча уезжает из старой сборки: у .app
 # и DMG разные команды, и легко отдать людям вчерашнее приложение.
@@ -45,11 +55,13 @@ ln -s /Applications "$STAGE/Applications"      # чтобы перетащить
 # UDZO — сжатие: без него образ весит столько же, сколько распакованный бандл.
 hdiutil create -quiet -volname "DualVPN $VER" -srcfolder "$STAGE" \
   -ov -format UDZO "$DMG"
+unregister "$STAGE/DualVPN.app"
 rm -rf "$STAGE"
 
 # Промежуточная сборка Spotlight'ом индексируется, и в Launchpad появляется
 # второе приложение — рядом с установленным. Приложение уже внутри образа,
 # держать копию незачем.
+unregister "$APP"
 rm -rf "$BASE/lib/scripts/build" "$BASE/lib/scripts/dist"
 
 echo "готово: $DMG"

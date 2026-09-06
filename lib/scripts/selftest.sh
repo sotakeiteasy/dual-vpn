@@ -222,6 +222,12 @@ else
       && ok "отрисовка: $W" || bad "отрисовка $W не отработала (исключение в JS?)"
   done
   rm -f "$ERR"
+  # Запуск бандла регистрирует его в LaunchServices, и в Launchpad появляется
+  # вторая «DualVPN» рядом с установленной. Запись переживает даже удаление
+  # папки сборки, поэтому снимаем с учёта явно, а не надеемся на уборку файлов.
+  LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  [ -x "$LSREGISTER" ] && "$LSREGISTER" -u "$APP" >/dev/null 2>&1
+  ok "сборочная копия снята с учёта в LaunchServices"
 fi
 
 head "итог"
