@@ -3,27 +3,26 @@ conf/*.conf
 conf/site.env
 !conf/*.example
 
-# Рабочее состояние: собранный config.json содержит те же ключи,
-# логи — адреса и историю соединений.
+# Рабочее состояние живёт в %ProgramData%\DualVPN, но при запуске из
+# исходников с DUALVPN_DATA=. оно оседает здесь.
+state/
 lib/state/
 
-# Бинарник sing-box: 57 МБ, качается отдельно (см. README).
+# Бинарники: sing-box.exe ~60 МБ и wintun.dll, качаются отдельно (см. README).
 lib/bin/
 
-# Окружение и сборка приложения.
+# Окружение и сборка.
 lib/venv/
-lib/scripts/build/
-lib/scripts/dist/
+build/
+dist/
+*.spec
 *.egg-info/
 __pycache__/
 *.pyc
 
-.DS_Store
-
-# Собранные образы для релиза.
-dist/
-
+# Готовый установщик.
+installer/Output/
 
 # Генерируется из icon.svg при сборке.
-lib/scripts/DualVPN.icns
-lib/scripts/ui/icons/
+lib/dualvpn/ui/icons/
+*.ico

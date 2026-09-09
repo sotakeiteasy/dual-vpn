@@ -5,33 +5,29 @@
     conf/personal.conf   личный AmneziaWG  -> весь остальной трафик
     conf/corp.conf       корпоративный WG  -> подсети из его AllowedIPs
 
-Вместо personal.conf можно взять любой другой файл из conf/ — профиль:
-    SB_PERSONAL=nl-1 python3 build-config.py
-    python3 build-config.py --personal nl-1
+Вместо personal.conf можно взять любой другой файл из conf\\ — профиль:
+    set SB_PERSONAL=nl-1 && python -m dualvpn.buildconfig
+    python -m dualvpn.buildconfig --personal nl-1
 
 Корп-маршруты берутся ИЗ AllowedIPs корп-конфига, поэтому при ротации
 достаточно положить новый файл — правки скрипта не нужны.
 
-Вызывается из `vpn start`, отдельно запускать не нужно.
+Зовётся службой при каждом включении, отдельно запускать не нужно.
 """
 
 import ipaddress
 import json
 import socket
-import subprocess
 import os
 import re
 import sys
 
-# Раскладка: <корень>/conf — исходные .conf, <корень>/lib/state — то, что
-# генерируется. Скрипт лежит в <корень>/lib/scripts.
-#
-# DUALVPN_DATA отделяет данные от кода: внутри .app код лежит в бандле и
-# переписывается при обновлении, а конфиги должны это пережить.
-BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DATA = os.environ.get("DUALVPN_DATA") or BASE
-CONF = os.path.join(DATA, "conf")
-STATE = os.path.join(DATA, "lib", "state")
+# Раскладку знает paths.py — здесь только имена.
+from . import paths, winnet
+
+BASE = paths.BASE
+CONF = paths.CONF
+STATE = paths.STATE
 
 # Поля [Interface], которые sing-box ждёт как AWG-параметры (в нижнем регистре).
 AWG_INT = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4")
@@ -163,19 +159,14 @@ def endpoint(conf, tag, default_mtu):
         # Принудительно взять публичный адрес: SB_ENDPOINT_PUBLIC=1
         if (ipaddress.ip_address(host).is_private
                 and os.environ.get("SB_ENDPOINT_PUBLIC") == "1"):
-            for server in ("8.8.8.8", "1.1.1.1"):
-                try:
-                    out = subprocess.run(
-                        ["dig", "+short", "+time=4", "+tries=1", f"@{server}", "A", name],
-                        capture_output=True, text=True, timeout=8).stdout
-                    pub = next((l.strip() for l in out.splitlines()
-                                if re.match(r"^[\d.]+$", l.strip())), "")
-                except Exception:
-                    pub = ""
-                if pub:
-                    print(f"  [{tag}] {name}: {host} -> публичный {pub}")
-                    host = pub
-                    break
+            # Спрашиваем публичный DNS в обход системного: системный в корп-сети
+            # как раз и отдаёт внутренний адрес, ради обхода которого сюда и
+            # зашли. dig на Windows нет, поэтому Resolve-DnsName с -Server.
+            pub = winnet.resolve4_via(name, "8.8.8.8") or \
+                  winnet.resolve4_via(name, "1.1.1.1")
+            if pub:
+                print(f"  [{tag}] {name}: {host} -> публичный {pub}")
+                host = pub
 
     ep = {
         "type": "wireguard",
@@ -244,9 +235,8 @@ LOCAL_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
 def running_pid():
     """PID работающего sing-box из нашей папки, иначе ''."""
     try:
-        out = subprocess.run(["pgrep", "-f", os.path.join(BASE, "lib", "bin", "sing-box")],
-                             capture_output=True, text=True, timeout=5).stdout.split()
-        return out[0] if out else ""
+        pids = winnet.pids_of(paths.SINGBOX)
+        return str(pids[0]) if pids else ""
     except Exception:
         return ""
 
@@ -290,11 +280,12 @@ def main():
     stack = os.environ.get("SB_STACK", "gvisor")
 
     # SB_CORP_SYSTEM=1 — поднимать корп-туннель системным интерфейсом.
-    # Обход дефекта sing-box на macOS: для эндпоинта с одним пиром он открывает
-    # connected UDP-сокет, а отправка с явным адресом получателя на таком сокете
-    # даёт EISCONN («socket is already connected»). Ломается переустановка
-    # ключей раз в ~2 минуты, и туннель тихо умирает. С системным интерфейсом
-    # сокетом занимается ядро, и этот путь не используется.
+    # Оставлено запасным выходом от macOS-версии. Там для эндпоинта с одним
+    # пиром sing-box открывал connected UDP-сокет, отправка с явным адресом
+    # получателя давала EISCONN, ломалась переустановка ключей раз в ~2 минуты
+    # и туннель тихо умирал. На Windows этот путь другой, и дефект не
+    # воспроизводится — но если туннель начнёт отваливаться по тому же
+    # расписанию, проверять стоит отсюда.
     if os.environ.get("SB_CORP_SYSTEM") == "1":
         ep_corp["system"] = True
 
@@ -303,7 +294,7 @@ def main():
     # побайтово совпадают с ванильным WireGuard (это штатные номера типов
     # сообщений), поэтому обычный сервер принимает их как есть.
     # Смысл: личный туннель на этом же коде работает без ошибок, а обычный
-    # WireGuard-путь форка на macOS отбивается EISCONN при рукопожатии.
+    # WireGuard-путь форка отбивался EISCONN при рукопожатии (см. выше).
     if os.environ.get("SB_CORP_AWG") == "1":
         ep_corp.update({"jc": 0, "jmin": 0, "jmax": 0, "s1": 0, "s2": 0,
                         "h1": 1, "h2": 2, "h3": 3, "h4": 4})
@@ -374,9 +365,9 @@ def main():
     corp_dns = split_list(corp["interface"].get("dns", ""))
     corp_dns = [d for d in corp_dns if re.match(r"^[\d.]+$", d)]
 
-    # Домены, которые резолвятся через корп-DNS. Дублируют /etc/resolver на macOS
-    # (там правила sing-box до DNS не доходят), но нужны на Windows, где DNS
-    # действительно проходит через tun.
+    # Домены, которые резолвятся через корп-DNS. На Windows это и есть весь
+    # split-DNS: запросы идут через tun, и правила sing-box до них доходят —
+    # отдельных системных правил (NRPT) не нужно.
     # Домены рабочей сети берём из настроек: у каждого они свои.
     extra = {d for d in os.environ.get("CORP_DOMAINS", "").split() if d}
 
@@ -445,6 +436,9 @@ def main():
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(config, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
+    # На Windows chmod почти ничего не значит — приватные ключи в config.json
+    # закрывает не он, а ACL каталога данных, который выставляет установщик.
+    # Строку оставляем ради запусков из исходников под WSL и ради явности.
     os.chmod(out_path, 0o600)
 
     print(f"собрано: {out_path}")
