@@ -23,6 +23,13 @@ from . import ipc, paths
 POLL_EVERY = 2.0
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# Фильтр для create_file_dialog. pywebview проверяет каждую строку регуляркой
+# вида ^([\w ]+)\(\*\.\w+...\)$ : в описании допустимы только буквы и пробелы,
+# без точек, а кириллица на части сборок под \w не подходит. Из-за «site.env
+# (*.env)» и «Все файлы (*.*)» диалог падал с ValueError ещё до открытия —
+# держим строки латиницей и без точек в описании.
+_FILE_TYPES = ("Config files (*.conf;*.env)", "All files (*.*)")
+
 
 def _is_admin():
     """Уже ли этот процесс с правами администратора.
@@ -269,8 +276,7 @@ class Api:
         import webview
         w = self.holder.get("window")
         picked = w.create_file_dialog(
-            webview.OPEN_DIALOG, allow_multiple=False,
-            file_types=("Конфиги WireGuard (*.conf)", "Все файлы (*.*)"))
+            webview.OPEN_DIALOG, allow_multiple=False, file_types=_FILE_TYPES)
         if not picked:
             return
         path = picked[0]
@@ -291,8 +297,7 @@ class Api:
         import webview
         w = self.holder.get("window")
         picked = w.create_file_dialog(
-            webview.OPEN_DIALOG, allow_multiple=False,
-            file_types=("site.env (*.env)", "Все файлы (*.*)"))
+            webview.OPEN_DIALOG, allow_multiple=False, file_types=_FILE_TYPES)
         if not picked:
             return
         with open(picked[0], encoding="utf-8", errors="replace") as fh:

@@ -217,11 +217,19 @@ class Tunnel:
             # buildconfig сообщает об ошибках через sys.exit с текстом.
             return str(exc) or "не удалось собрать конфиг — правь conf\\*.conf"
 
-        check = subprocess.run(
-            [paths.SINGBOX, "check", "-c", paths.CONFIG_JSON],
-            capture_output=True, text=True, creationflags=_NO_WINDOW)
+        # timeout обязателен: без него зависший sing-box повесил бы
+        # весь start навсегда, а клиент ждёт ответ по каналу без таймаута —
+        # снаружи это ровно ««Включить» зависло».
+        try:
+            check = subprocess.run(
+                [paths.SINGBOX, "check", "-c", paths.CONFIG_JSON],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=20, creationflags=_NO_WINDOW)
+        except subprocess.TimeoutExpired:
+            return "sing-box check не ответил за 20с"
         if check.returncode != 0:
-            return f"конфиг не прошёл проверку: {check.stderr.strip()}"
+            return f"конфиг не прошёл проверку: {(check.stderr or '').strip()}"
 
         # Шлюз по умолчанию определяем ДО старта, пока туннель не перебил
         # маршруты. Ничего не захардкожено: работает и на Wi-Fi, и на раздаче.
