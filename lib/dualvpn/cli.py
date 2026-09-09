@@ -8,6 +8,9 @@
     dualvpn log [N]             последние строки журнала sing-box
     dualvpn version
 
+    dualvpn tray                значок в трее (обычный способ запуска)
+    dualvpn window              окно с состоянием, конфигами и логом
+
 Управление службой (нужны права администратора):
 
     dualvpn service install     поставить и запустить службу
@@ -77,8 +80,23 @@ def main(argv=None):
         if sub == "console":
             service.run_in_console()
             return 0
+        if sub == "run":
+            # Так нас зовёт диспетчер служб у собранного exe — руками эту
+            # команду вводить незачем.
+            service.run_dispatcher()
+            return 0
         sys.argv = [sys.argv[0]] + argv[1:]
         service.handle_command_line()
+        return 0
+
+    if cmd == "tray":
+        from . import tray
+        tray.run()
+        return 0
+
+    if cmd == "window":
+        from . import window
+        window.open_window()
         return 0
 
     if cmd == "status":

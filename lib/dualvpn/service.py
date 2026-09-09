@@ -12,6 +12,8 @@
 
 import datetime
 import os
+import subprocess
+import sys
 import threading
 
 from . import ipc, paths, probe, tunnel, winnet
@@ -110,6 +112,8 @@ class Core:
                                     payload.get("text", ""))
         if op == "remove-config":
             return self._remove_config(payload.get("name", ""))
+        if op == "read-config":
+            return self._read_config(payload.get("name", ""))
         if op == "set-site":
             return self._set_site(payload.get("text", ""))
         if op == "get-site":
@@ -125,8 +129,32 @@ class Core:
         st["last_error"] = self.last_error
         st["autostart"] = self.autostart_enabled()
         st["version"] = paths.version()
+        st["singbox"] = self._singbox_version()
         st["profiles"] = self._profiles()
         return st
+
+    _singbox_cached = None
+
+    @classmethod
+    def _singbox_version(cls):
+        """Версия sing-box. Спрашиваем один раз: бинарник между запусками
+        службы не меняется, а запуск процесса на каждый опрос статуса —
+        это раз в две секунды на пустом месте."""
+        if cls._singbox_cached is not None:
+            return cls._singbox_cached
+        cls._singbox_cached = ""
+        try:
+            out = subprocess.run(
+                [paths.SINGBOX, "version"], capture_output=True, text=True,
+                timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            first = (out.stdout or "").strip().splitlines()
+            if first:
+                # «sing-box version 1.14.0-lx.35» → «1.14.0-lx.35»
+                parts = first[0].split()
+                cls._singbox_cached = parts[-1] if parts else ""
+        except Exception:
+            pass
+        return cls._singbox_cached
 
     def _do_start(self, profile=""):
         if not self.lock.acquire(blocking=False):
@@ -196,6 +224,21 @@ class Core:
         self.log(f"→ добавлен конфиг {name}.conf")
         return {"ok": True, "profiles": self._profiles()}
 
+    def _read_config(self, name):
+        """Отдаёт конфиг целиком, вместе с ключами.
+
+        Каталог conf\\ закрыт от обычного пользователя, поэтому прочитать файл
+        может только служба. Права проверяет ipc.Server: команды нет ни в
+        READ_OPS, ни в USER_OPS, значит нужен администратор.
+        """
+        name = self._safe_name(name)
+        try:
+            with open(os.path.join(paths.CONF, f"{name}.conf"),
+                      encoding="utf-8", errors="replace") as fh:
+                return {"ok": True, "text": fh.read()}
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+
     def _remove_config(self, name):
         name = self._safe_name(name)
         try:
@@ -261,6 +304,14 @@ def _service_class():
         _svc_description_ = ("Два туннеля WireGuard одновременно: рабочий и "
                              "личный. Держит маршруты и убирает их за собой.")
 
+        # В собранном виде службу запускает не python.exe со скриптом, а наш
+        # собственный exe. Диспетчеру служб нужно сказать об этом явно, иначе
+        # он пропишет в реестр путь к несуществующему pythonservice.exe и
+        # служба не стартует вовсе — с невнятной ошибкой 1053.
+        if getattr(sys, "frozen", False):
+            _exe_name_ = sys.executable
+            _exe_args_ = "service run"
+
         def __init__(self, args):
             super().__init__(args)
             self.wait_stop = win32event.CreateEvent(None, 0, 0, None)
@@ -301,6 +352,18 @@ def run_in_console():
         pass
     finally:
         core.shutdown()
+
+
+def run_dispatcher():
+    """Точка входа, которую зовёт диспетчер служб у собранного exe.
+
+    Из исходников этот путь не используется: там службу запускает
+    pythonservice.exe, и win32serviceutil разбирается сам.
+    """
+    import servicemanager
+    servicemanager.Initialize()
+    servicemanager.PrepareToHostSingle(_service_class())
+    servicemanager.StartServiceCtrlDispatcher()
 
 
 def handle_command_line():

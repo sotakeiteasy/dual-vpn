@@ -277,16 +277,41 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
 </div>
 
 <script>
-// Мост в Python: сообщения туда, вызовы render/renderLogs — обратно.
-const send = (name, arg) =>
-  window.webkit.messageHandlers.py.postMessage({name, arg: arg ?? null});
+// Мост в Python. pywebview поднимает window.pywebview.api не мгновенно, а
+// скрипт страницы выполняется сразу и первым делом шлёт 'ready'. Поэтому всё,
+// что отправлено до готовности моста, копится в очереди и уходит следом —
+// иначе первое же сообщение терялось бы молча.
+const _outbox = [];
+const _flush = () => {
+  while (_outbox.length) {
+    const m = _outbox.shift();
+    window.pywebview.api.send(m.name, m.arg);
+  }
+};
+const send = (name, arg) => {
+  const m = {name, arg: arg ?? null};
+  if (window.pywebview && window.pywebview.api) { _outbox.push(m); _flush(); }
+  else _outbox.push(m);
+};
+window.addEventListener('pywebviewready', _flush);
 
-// Вызовы из Python идут через эту обёртку: WKWebView обезличивает исключения
-// из evaluateJavaScript в «Script error» без строки и текста, а консоли у окна
-// нет. Ловим здесь и отправляем настоящее сообщение в лог приложения.
+// Вызовы из Python идут через эту обёртку: исключение внутри evaluate_js
+// наружу не всплывает, а консоли у окна нет. Ловим здесь и отправляем
+// настоящее сообщение в лог приложения.
 function call(fn, arg) {
   try {
     window[fn](arg);
+  } catch (e) {
+    send('jserror', `${fn}: ${e && e.message} @${e && e.lineNumber}`);
+  }
+}
+
+// То же для функций с несколькими аргументами (showConf, showInfo). Отдельная
+// обёртка, а не спред в call: renderLogs принимает массив целиком, и спред
+// разложил бы его на сотни аргументов.
+function callN(fn, args) {
+  try {
+    window[fn].apply(null, args);
   } catch (e) {
     send('jserror', `${fn}: ${e && e.message} @${e && e.lineNumber}`);
   }
@@ -544,10 +569,11 @@ function renderHowto(h) {
     <p>Адрес корп-сервера снаружи не резолвится, поэтому запросы к
     ${doms} отправляются корпоративному DNS
     <code>${esc(h.corp_dns || '—')}</code>, а остальные — публичному через личный
-    туннель. Это настроено файлом в <code>/etc/resolver</code>, а не общими
-    настройками сети: ${(h.resolvers || []).map(r => `<code>${esc(r)}</code>`).join(' ') || '—'}.</p>
+    туннель. Разводит их сам sing-box: DNS-запросы идут через tun, и правила
+    успевают сработать до того, как ответит система. Отдельных правил Windows
+    (NRPT) для этого не нужно.</p>
     <p class="note">Следствие: короткое имя вроде <code>git</code> не сработает,
-    нужно полное — правило в /etc/resolver срабатывает по суффиксу.</p>
+    нужно полное — правило срабатывает по суффиксу домена.</p>
 
     <h3>Какие конфиги подходят</h3>
     <p>Это обычные файлы WireGuard, которые выдаёт админ или личный сервер.

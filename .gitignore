@@ -11,11 +11,11 @@ lib/state/
 # Бинарники: sing-box.exe ~60 МБ и wintun.dll, качаются отдельно (см. README).
 lib/bin/
 
-# Окружение и сборка.
+# Окружение и сборка. installer/dualvpn.spec написан руками и в репозитории
+# нужен — игнорируем только то, что PyInstaller генерирует сам, в build/.
 lib/venv/
 build/
 dist/
-*.spec
 *.egg-info/
 __pycache__/
 *.pyc
