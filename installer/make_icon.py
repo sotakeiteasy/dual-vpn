@@ -12,6 +12,12 @@ import sys
 
 from PIL import Image, ImageDraw
 
+# Консоль на английской Windows — cp1252, и обычный print с кириллицей падает
+# с UnicodeEncodeError. Именно на этом рушилась сборка в CI: скрипт делал своё
+# дело, а потом умирал на строчке «собрано».
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # Тот же зелёный, что у поднятого туннеля в трее (tray.COLORS["up"]).
 GREEN = (46, 160, 67, 255)
 WHITE = (255, 255, 255, 255)

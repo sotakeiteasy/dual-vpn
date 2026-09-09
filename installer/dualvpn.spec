@@ -14,7 +14,10 @@
 
 import os
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(SPECPATH)))
+# SPECPATH — это КАТАЛОГ со spec-файлом (installer/), а не путь к самому файлу.
+# Отсюда до корня ровно один уровень: второй dirname уводил на папку выше
+# репозитория, и PyInstaller не находил entry_cli.py.
+ROOT = os.path.dirname(os.path.abspath(SPECPATH))
 INST = os.path.join(ROOT, "installer")
 ICON = os.path.join(INST, "DualVPN.ico")
 

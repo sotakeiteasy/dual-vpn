@@ -25,6 +25,13 @@ import sys
 
 from . import ipc, paths
 
+# Весь вывод здесь русский, а консоль на английской Windows — cp1252, где
+# кириллицы нет вовсе. Без этого `dualvpn status` падал бы с UnicodeEncodeError
+# вместо того, чтобы показать состояние. errors='replace' страхует и на
+# экзотических кодовых страницах: лучше вопросительные знаки, чем исключение.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _print_status(st):
     up = st.get("up")
