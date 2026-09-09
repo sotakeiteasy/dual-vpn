@@ -13,7 +13,12 @@
 содержит приватные ключи, поэтому подсунуть его обычный пользователь не должен.
 
 Формат простой: одна строка JSON туда, одна обратно, соединение закрывается.
-Клиенту достаточно обычного open() — pywin32 нужен только серверу.
+Обе стороны говорят через pywin32 (win32file/win32pipe). У встроенного open()
+на именованном канале Windows есть известная червоточина: на части сочетаний
+Windows/Python комбинация «чтение и запись сразу» валится с
+OSError: [Errno 22] Invalid argument, хотя сам канал исправен. Через pywin32
+работает то же самое, что уже годами работает на стороне сервера — не
+изобретаем второй протокол, идём тем же путём.
 """
 
 import json
@@ -195,23 +200,46 @@ class NotRunning(RuntimeError):
 def call(op, **payload):
     """Шлёт команду службе и возвращает её ответ.
 
-    Клиентская половина намеренно не зависит от pywin32: именованный канал в
-    Windows открывается обычным файловым API, и трей от этого остаётся
-    простым процессом без лишних зависимостей.
-
     Вызов блокирующий и таймаута не имеет — это осознанно: `start` честно
     работает до тридцати секунд, и обрывать его по таймеру значило бы бросить
     туннель на полпути, с уже расставленными маршрутами.
     """
+    import pywintypes
+    import win32file
+    import win32pipe
+
     req = json.dumps({"op": op, "payload": payload},
                      ensure_ascii=False).encode("utf-8")
+    handle = None
     try:
-        with open(paths.PIPE_NAME, "r+b", buffering=0) as pipe:
-            pipe.write(req)
-            data = pipe.readline()
-    except OSError as exc:
+        # Все экземпляры канала заняты другими клиентами — редко, но бывает,
+        # если трей опрашивает статус ровно в момент, когда открылось окно.
+        # WaitNamedPipe ждёт освобождения; на 20 попыток по 200мс — секунды
+        # четыре суммарно, дальше уже не «занято», а действительно не отвечает.
+        for _ in range(20):
+            try:
+                handle = win32file.CreateFile(
+                    paths.PIPE_NAME,
+                    win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                    0, None, win32file.OPEN_EXISTING, 0, None)
+                break
+            except pywintypes.error as exc:
+                if exc.winerror != 231:          # не ERROR_PIPE_BUSY — сразу наружу
+                    raise
+                win32pipe.WaitNamedPipe(paths.PIPE_NAME, 200)
+        if handle is None:
+            raise NotRunning(
+                f"служба {paths.SERVICE_NAME} не отвечает: канал занят")
+
+        win32file.WriteFile(handle, req)
+        _, data = win32file.ReadFile(handle, _BUF)
+    except pywintypes.error as exc:
         raise NotRunning(
-            f"служба {paths.SERVICE_NAME} не отвечает: {exc}") from exc
+            f"служба {paths.SERVICE_NAME} не отвечает: {exc.strerror}") from exc
+    finally:
+        if handle is not None:
+            win32file.CloseHandle(handle)
+
     try:
         return json.loads(data.decode("utf-8"))
     except ValueError as exc:
