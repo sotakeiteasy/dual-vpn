@@ -1,9 +1,14 @@
-# Сборка DualVPN: два exe через PyInstaller, затем установщик через Inno Setup.
+﻿# Сборка DualVPN: три exe через PyInstaller, затем установщик через Inno Setup.
 #
 #   powershell -ExecutionPolicy Bypass -File installer\build.ps1
 #
 # Готовый установщик кладётся в installer\Output\DualVPN-<версия>-setup.exe.
 # Запускать из корня репозитория или откуда угодно — путь вычисляется сам.
+#
+# ВАЖНО: файл сохранён в UTF-8 С BOM. Windows PowerShell 5.1 (powershell.exe,
+# в отличие от pwsh) без BOM читает скрипт как ANSI: кириллица в строках и
+# комментариях рассыпается, парсер спотыкается на «Missing closing '}'», и
+# сборка падает ещё до первой команды. Не пересохраняй без BOM.
 
 $ErrorActionPreference = 'Stop'
 
@@ -44,6 +49,7 @@ try {
         --distpath (Join-Path $Root 'dist') `
         --workpath (Join-Path $Root 'build') `
         (Join-Path $Inst 'dualvpn.spec')
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller вернул $LASTEXITCODE" }
 
     # Бинарники кладём рядом с exe: paths.BIN у обычной сборки — это папка
     # приложения, и sing-box ищет wintun.dll в своём каталоге.
@@ -74,4 +80,5 @@ if (-not $Iscc) {
 }
 
 & $Iscc "/DMyVersion=$Version" (Join-Path $Inst 'dualvpn.iss')
+if ($LASTEXITCODE -ne 0) { throw "Inno Setup вернул $LASTEXITCODE" }
 Write-Host "-> готово: installer\Output\DualVPN-$Version-setup.exe"
