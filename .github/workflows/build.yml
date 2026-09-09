@@ -12,6 +12,7 @@ name: build
 on:
   workflow_dispatch:
   push:
+    branches: ["**"]     # тесты гоняем на каждый push, сборку — только по тегу
     tags: ["v*"]
 
 permissions:
@@ -23,8 +24,24 @@ env:
   WINTUN_VERSION: "0.14.1"
 
 jobs:
+  # Чистая логика: разбор конфигов, границы прав, владение маршрутами.
+  # Быстро и без Windows — поведение самой системы (каналы, PowerShell,
+  # службы) так не проверить, для него нужна живая машина.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest tests -q
+
   windows:
     runs-on: windows-latest
+    # Собираем только по тегу и по кнопке: обычный push проверяем тестами.
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: tests
 
     steps:
       - uses: actions/checkout@v4

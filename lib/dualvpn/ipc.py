@@ -32,6 +32,17 @@ READ_OPS = frozenset({"status", "list-profiles", "log"})
 # Команды управления туннелем: их разрешаем любому вошедшему пользователю.
 USER_OPS = frozenset({"start", "stop", "set-profile"})
 
+
+def requires_admin(op):
+    """Нужны ли для команды права администратора.
+
+    Отдельной функцией, а не условием внутри обработчика соединения: это
+    граница доступа к приватным ключам, и она должна быть проверяема, не
+    поднимая канал. Всё, что не перечислено явно, требует прав — новая
+    команда по умолчанию закрыта, а не открыта.
+    """
+    return op not in READ_OPS and op not in USER_OPS
+
 _BUF = 65536
 
 
@@ -124,7 +135,7 @@ class Server:
             except Exception:
                 pass
 
-        if op not in READ_OPS and op not in USER_OPS and not is_admin:
+        if requires_admin(op) and not is_admin:
             self._reply(pipe, {"ok": False,
                                "error": "нужны права администратора"})
             return

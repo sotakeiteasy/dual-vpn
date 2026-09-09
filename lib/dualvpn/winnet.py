@@ -5,111 +5,78 @@
 не зависит от языка системы, а `route print` на русской Windows печатает
 «Сетевой адрес» и разбирается только угадыванием колонок.
 
-Платить за это запуском PowerShell на каждый вызов нельзя: пробер опрашивает
-состояние раз в две секунды, а холодный старт powershell.exe — почти секунда.
-Поэтому процесс поднимается один раз и живёт, пока живёт служба, а команды
-отправляются ему в stdin и разделяются маркером.
+На один запрос — один запуск powershell.exe. Раньше здесь жил долгоживущий
+хост (`powershell.exe -Command -`, команды в stdin, ответы через маркер) ради
+экономии на старте процесса. Идея не работает: в режиме `-Command -`
+PowerShell читает stdin ДО КОНЦА ПОТОКА и только потом что-то выполняет. Пока
+хост жив и stdin открыт, ответа нет вовсе — каждый вызов упирался в таймаут,
+а из shutdown это исключение вылетало наружу и роняло приложение на выходе.
+Плата за надёжность — около секунды на вызов; поэтому пробер опрашивает
+состояние пореже (см. probe.FAST_EVERY), а не по четыре раза в секунду.
 """
 
 import json
 import os
 import subprocess
-import threading
-import uuid
-
-# Маркер конца ответа. Случайный на каждый запуск, чтобы его нельзя было
-# подделать выводом самой команды.
-_MARK = f"<<<dualvpn-{uuid.uuid4().hex}>>>"
 
 _PS_ARGS = [
     "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
-    "-ExecutionPolicy", "Bypass", "-Command", "-",
+    "-ExecutionPolicy", "Bypass", "-Command",
 ]
 
 # CREATE_NO_WINDOW: под службой окна и так нет, но при запуске из трея
 # без этого флага на каждый вызов моргала бы консоль.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-
-class PowerShellError(RuntimeError):
-    pass
+# Последняя причина, по которой запрос не удался. Наружу ошибки не летят
+# (см. PowerShell.run), но для диагностики знать её надо.
+last_error = ""
 
 
 class PowerShell:
-    """Долгоживущий powershell, которому команды шлют по одной.
+    """Запускает PowerShell — по процессу на запрос.
 
-    Не потокобезопасен сам по себе — доступ сериализуется замком: пробер и
-    обработчик команд службы ходят сюда из разных потоков.
+    Потокобезопасен без замков: у каждого вызова свой процесс, общего
+    состояния между вызовами нет.
     """
 
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._proc = None
+    def run(self, script, timeout=30):
+        """Выполняет script, возвращает stdout. Наружу ошибок не отдаёт.
 
-    def _spawn(self):
-        self._proc = subprocess.Popen(
-            _PS_ARGS,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            bufsize=1, creationflags=_NO_WINDOW,
-        )
+        Почти все вызовы здесь — «сними маршрут, если он есть», и отсутствие
+        объекта это норма, а не сбой. Пустая строка значит и «ничего не
+        нашлось», и «спросить не удалось»; кто хочет знать наверняка, смотрит
+        на состояние системы после.
 
-    def _alive(self):
-        return self._proc is not None and self._proc.poll() is None
-
-    def run(self, script, timeout=20):
-        """Выполняет script, возвращает его вывод одной строкой.
-
-        Ошибки PowerShell не всплывают исключением: почти все вызовы здесь —
-        «сними маршрут, если он есть», и отсутствие объекта это норма, а не
-        сбой. Кто хочет знать результат, проверяет таблицу маршрутов после.
+        Исключений отсюда не бывает намеренно: уборка маршрутов обязана
+        доходить до конца даже тогда, когда всё вокруг уже сломано, — а
+        именно в таком состоянии её обычно и зовут.
         """
-        with self._lock:
-            if not self._alive():
-                self._spawn()
-            try:
-                return self._exchange(script, timeout)
-            except (OSError, PowerShellError):
-                # Процесс мог умереть между проверкой и записью — например,
-                # система убила его при выходе из сеанса. Один раз поднимаем
-                # заново: если и вторая попытка не прошла, это уже не икота.
-                self._kill()
-                self._spawn()
-                return self._exchange(script, timeout)
+        global last_error
+        # Первая же ошибка не должна прекращать скрипт: «нет такого маршрута»
+        # здесь ожидаемый ответ, а не повод бросать остальное.
+        wrapped = ("$ErrorActionPreference='SilentlyContinue'\n"
+                   "try {\n" + script + "\n} catch { }\n")
+        try:
+            r = subprocess.run(
+                _PS_ARGS + [wrapped],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=timeout, creationflags=_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired:
+            last_error = f"powershell не ответил за {timeout}с"
+            return ""
+        except OSError as exc:
+            last_error = f"powershell не запустился: {exc}"
+            return ""
+        out = (r.stdout or "").strip()
+        if not out and r.returncode != 0:
+            last_error = ((r.stderr or "").strip()[:200]
+                          or f"код возврата {r.returncode}")
+        return out
 
-    def _exchange(self, script, timeout):
-        # $ErrorActionPreference='Continue' — иначе первая же ошибка в скрипте
-        # уронила бы весь хост, и следующая команда ушла бы в мёртвый stdin.
-        wrapped = (
-            "$ErrorActionPreference='Continue'\n"
-            "try {\n" + script + "\n} catch { }\n"
-            f"Write-Output '{_MARK}'\n"
-        )
-        self._proc.stdin.write(wrapped)
-        self._proc.stdin.flush()
-
-        out = []
-        done = threading.Event()
-
-        def read():
-            try:
-                for line in self._proc.stdout:
-                    if line.rstrip("\r\n") == _MARK:
-                        break
-                    out.append(line.rstrip("\r\n"))
-            finally:
-                done.set()
-
-        t = threading.Thread(target=read, daemon=True)
-        t.start()
-        if not done.wait(timeout):
-            # Читающий поток остался висеть на stdout — процесс уже не наш,
-            # доверять его буферу нельзя. Убиваем, следующий вызов поднимет.
-            self._kill()
-            raise PowerShellError(f"powershell не ответил за {timeout}с")
-        return "\n".join(out).strip()
-
-    def json(self, script, timeout=20, default=None):
+    def json(self, script, timeout=30, default=None):
         """То же, но результат заворачивается в JSON и разбирается.
 
         @(...) вокруг выражения обязателен: ConvertTo-Json от одного объекта
@@ -128,20 +95,10 @@ class PowerShell:
             return [] if default is None else default
         return data if isinstance(data, list) else [data]
 
-    def _kill(self):
-        if self._proc is not None:
-            try:
-                self._proc.kill()
-            except OSError:
-                pass
-            self._proc = None
-
     def close(self):
-        with self._lock:
-            self._kill()
+        """Ничего не держим — оставлено, чтобы не трогать места вызова."""
 
 
-# Один хост на процесс. Служба и трей — разные процессы, у каждого свой.
 PS = PowerShell()
 
 
@@ -307,13 +264,15 @@ def pids_of(exe_path):
     из другого клиента, и снимать его мы не имеем права.
     """
     target = os.path.normcase(os.path.abspath(exe_path))
+    # Get-Process, а не Get-CimInstance Win32_Process: WMI-запрос стоит
+    # секунду с лишним, а этот вызов идёт в каждом цикле пробера.
     rows = PS.json(
-        "Get-CimInstance Win32_Process -Filter \"Name='sing-box.exe'\""
-        " -ErrorAction SilentlyContinue | Select-Object ProcessId,ExecutablePath"
+        "Get-Process -Name sing-box -ErrorAction SilentlyContinue |"
+        " Select-Object Id,Path"
     )
     out = []
     for r in rows:
-        p = r.get("ExecutablePath") or ""
+        p = r.get("Path") or ""
         if p and os.path.normcase(os.path.abspath(p)) == target:
-            out.append(int(r["ProcessId"]))
+            out.append(int(r["Id"]))
     return out
