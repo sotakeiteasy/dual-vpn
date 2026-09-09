@@ -1,0 +1,95 @@
+# Сборка Windows-версии на раннере GitHub: своя Windows-машина не нужна.
+#
+# Запуск вручную — вкладка Actions, кнопка «Run workflow». По тегу вида v1.2.3
+# собранное дополнительно прикладывается к релизу.
+#
+# Готовые файлы лежат в артефактах прогона:
+#   DualVPN-Portable.exe   портативная версия, один файл
+#   DualVPN-setup.exe      установщик (служба, ярлыки, автозапуск)
+
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write        # нужно, чтобы приложить файлы к релизу по тегу
+
+env:
+  # Форк sing-box с поддержкой AmneziaWG — в основной сборке её нет.
+  SINGBOX_VERSION: "1.14.0-lx.35"
+  WINTUN_VERSION: "0.14.1"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Бинарники в репозитории не лежат: sing-box ~60 МБ, и у него своя
+      # лицензия. Тянем их сюда — версии закреплены в env выше.
+      - name: Скачать sing-box и wintun
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path lib\bin | Out-Null
+
+          $v = $env:SINGBOX_VERSION
+          $url = "https://github.com/Leadaxe/sing-box-lx/releases/download/v$v/sing-box-$v-windows-amd64.zip"
+          Write-Host "-> $url"
+          Invoke-WebRequest $url -OutFile sb.zip
+          Expand-Archive sb.zip -DestinationPath sb
+          # В архиве всё лежит в подпапке с именем версии.
+          Copy-Item (Get-ChildItem sb -Recurse -Filter sing-box.exe)[0].FullName lib\bin\
+
+          $w = $env:WINTUN_VERSION
+          Invoke-WebRequest "https://www.wintun.net/builds/wintun-$w.zip" -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wt
+          Copy-Item "wt\wintun\bin\amd64\wintun.dll" lib\bin\
+
+          Get-ChildItem lib\bin
+
+      - name: Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Сборка
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File installer\build.ps1
+
+      - name: Портативная версия
+        uses: actions/upload-artifact@v4
+        with:
+          name: DualVPN-Portable
+          path: dist/DualVPN-Portable.exe
+          if-no-files-found: error
+
+      - name: Установщик
+        uses: actions/upload-artifact@v4
+        with:
+          name: DualVPN-setup
+          path: installer/Output/*.exe
+          if-no-files-found: error
+
+      # Собранное без установки — на случай, если портативный exe не подойдёт
+      # (антивирус, политика на однофайловые сборки).
+      - name: Распакованная версия
+        uses: actions/upload-artifact@v4
+        with:
+          name: DualVPN-dist
+          path: dist/DualVPN/
+
+      - name: Приложить к релизу
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/DualVPN-Portable.exe
+            installer/Output/*.exe
