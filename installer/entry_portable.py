@@ -4,8 +4,10 @@
 (манифест requireAdministrator, см. dualvpn.spec), служба в систему не
 ставится, данные лежат рядом с exe.
 
-Аргументов не требует. Единственный поддерживаемый — `window`: им трей
-открывает окно, запуская этот же файл дочерним процессом.
+Без аргументов — обычный запуск: трей. Любая команда (`window`, `admin-op`,
+что угодно, что появится в cli.py потом) идёт в общий разбор dualvpn.cli —
+так portable ведёт себя как dualvpn.exe, без отдельной ветки на каждую
+команду здесь.
 """
 
 import os
@@ -18,10 +20,9 @@ def main():
     from dualvpn.portable import data_dir
     os.environ.setdefault("DUALVPN_DATA", data_dir())
 
-    if len(sys.argv) > 1 and sys.argv[1] == "window":
-        from dualvpn import window
-        window.open_window()
-        return 0
+    if len(sys.argv) > 1:
+        from dualvpn.cli import main as cli_main
+        return cli_main(sys.argv[1:])
 
     from dualvpn import portable
     portable.run()

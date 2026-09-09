@@ -47,6 +47,15 @@ BIN = BUNDLE if getattr(sys, "frozen", False) else os.path.join(BASE, "lib", "bi
 SINGBOX = os.path.join(BIN, "sing-box.exe")
 WINTUN = os.path.join(BIN, "wintun.dll")
 
+# Вёрстка окна. В onedir-сборке PyInstaller 6+ данные (--add-data) лежат в
+# BUNDLE\dualvpn\ui — это подпапка _internal, а НЕ там же, где сам exe, и уж
+# точно не там, куда указывает __file__ у модуля window.py: в частности,
+# window.py брал путь через __file__ раньше, и в собранном виде промахивался
+# мимо index.html — окно падало ещё до показа, а трей тихо принимал это за
+# «процесс не открылся» и на следующем клике перезапускал сам себя.
+UI_DIR = (os.path.join(BUNDLE, "dualvpn", "ui") if getattr(sys, "frozen", False)
+          else os.path.join(BASE, "lib", "dualvpn", "ui"))
+
 CONFIG_JSON = os.path.join(STATE, "config.json")
 STATUS_JSON = os.path.join(STATE, "status.json")
 PROFILE_FILE = os.path.join(STATE, "profile")

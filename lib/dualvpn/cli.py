@@ -10,6 +10,10 @@
 
     dualvpn tray                значок в трее (обычный способ запуска)
     dualvpn window              окно с состоянием, конфигами и логом
+    dualvpn admin-op ОП ЗАПРОС ОТВЕТ
+                                служебное: окно зовёт так себя же с правами
+                                администратора на одну команду в conf\\ —
+                                руками вводить незачем
 
 Управление службой (нужны права администратора):
 
@@ -104,6 +108,32 @@ def main(argv=None):
     if cmd == "window":
         from . import window
         window.open_window()
+        return 0
+
+    if cmd == "admin-op":
+        # Короткий elevated-заход: окно попросило у пользователя UAC ровно на
+        # одну команду в conf\ (add-config, read-config, ...), запустило этот
+        # процесс с правами через Start-Process -Verb RunAs и ждёт результат
+        # в файле — сам процесс интерактивно ничего не показывает.
+        if len(argv) < 4:
+            print("использование: dualvpn admin-op ОП ФАЙЛ-ЗАПРОСА ФАЙЛ-ОТВЕТА")
+            return 1
+        op, payload_file, result_file = argv[1], argv[2], argv[3]
+        import json
+        try:
+            with open(payload_file, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError):
+            payload = {}
+        try:
+            r = ipc.call(op, **payload)
+        except ipc.NotRunning as exc:
+            r = {"ok": False, "error": str(exc)}
+        try:
+            with open(result_file, "w", encoding="utf-8") as fh:
+                json.dump(r, fh, ensure_ascii=False)
+        except OSError:
+            pass
         return 0
 
     if cmd == "status":

@@ -7,17 +7,35 @@
 
 Само окно систему не трогает: всё, что требует прав, уходит в службу через
 именованный канал. Поэтому окно запускается от обычного пользователя, и UAC
-на нём не появляется.
+на нём не появляется — кроме одного случая: запись конфигов (см. _admin_call).
 """
 
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 
 from . import ipc, paths
 
 POLL_EVERY = 2.0
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _is_admin():
+    """Уже ли этот процесс с правами администратора.
+
+    В портативной версии — да всегда, весь процесс поднят с правами при
+    первом запуске. В установленной — нет: окно намеренно живёт от обычного
+    пользователя, иначе UAC спрашивал бы себя на каждое открытие окна.
+    """
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 class Api:
@@ -53,7 +71,7 @@ class Api:
             self._guard(ipc.call("set-profile", profile=arg))
             self.refresh(full=True)
         elif name == "del_config":
-            self._guard(ipc.call("remove-config", name=arg))
+            self._guard(self._admin_call("remove-config", name=arg))
             self.js("closeSheet")
             self.refresh(full=True)
         elif name == "add_config":
@@ -61,11 +79,11 @@ class Api:
         elif name == "info":
             self._show_conf(arg)
         elif name == "site":
-            self.js("showSite", _parse_env(ipc.call("get-site").get("text", "")))
+            self.js("showSite", _parse_env(self._admin_call("get-site").get("text", "")))
         elif name == "load_site":
             self._load_site()
         elif name == "save_site":
-            self._guard(ipc.call("set-site", text=_format_env(arg or {})))
+            self._guard(self._admin_call("set-site", text=_format_env(arg or {})))
             self.js("closeSheet")
             self.js("restarting")
             ipc.call("stop")
@@ -85,6 +103,55 @@ class Api:
     def _guard(reply):
         if not reply.get("ok"):
             raise RuntimeError(reply.get("error") or "служба отказала")
+
+    # ------------------------------------------------------------- права
+
+    def _admin_call(self, op, **payload):
+        """Команда, которая пишет или читает conf\\ — там приватные ключи.
+
+        Канал (ipc.Server) требует для таких команд администратора: обычный
+        пользователь на многопользовательской машине не должен доставать чужие
+        ключи через именованный канал, даже если сам он умеет к нему постучаться.
+
+        Окно намеренно не элевировано целиком — иначе UAC спрашивал бы себя
+        при каждом открытии окна, хотя конфиги правят редко. Поэтому права
+        просим точечно, ровно на это одно действие: один короткий процесс,
+        одно окно UAC, готовый результат — и он сразу же завершается.
+        """
+        if _is_admin():
+            # Портативная версия элевирована с самого первого запуска —
+            # выпрашивать права ещё раз значит просто мучить пользователя
+            # лишним UAC-окном без всякой пользы.
+            return ipc.call(op, **payload)
+
+        with tempfile.TemporaryDirectory() as td:
+            payload_file = os.path.join(td, "payload.json")
+            result_file = os.path.join(td, "result.json")
+            with open(payload_file, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+
+            if getattr(sys, "frozen", False):
+                exe, base_args = sys.executable, []
+            else:
+                exe, base_args = sys.executable, ["-m", "dualvpn.cli"]
+            args = base_args + ["admin-op", op, payload_file, result_file]
+
+            def q(s):
+                return "'" + s.replace("'", "''") + "'"
+
+            ps_args = ",".join(q(a) for a in args)
+            ps_cmd = (f"Start-Process -FilePath {q(exe)} -ArgumentList {ps_args} "
+                      f"-Verb RunAs -Wait -WindowStyle Hidden")
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                creationflags=_NO_WINDOW)
+
+            if os.path.isfile(result_file):
+                with open(result_file, encoding="utf-8") as fh:
+                    return json.load(fh)
+            # UAC отменили или дочерний процесс не успел записать ответ —
+            # оба исхода снаружи выглядят одинаково: действие не выполнено.
+            return {"ok": False, "error": "запрос прав отменён или не выполнился"}
 
     # ------------------------------------------------------- вызовы в JS
 
@@ -186,7 +253,7 @@ class Api:
 
     def _show_conf(self, name):
         """Показывает содержимое конфига. Читает служба — каталог закрыт."""
-        reply = ipc.call("read-config", name=name)
+        reply = self._admin_call("read-config", name=name)
         if reply.get("ok"):
             self.jsn("showConf", [name, reply.get("text", "")])
         else:
@@ -214,7 +281,7 @@ class Api:
             # Имя решает, каким туннелем станет файл, поэтому подгоняем его,
             # а не полагаемся на то, что человек назвал файл правильно.
             name = "corp"
-        reply = ipc.call("add-config", name=name, text=text)
+        reply = self._admin_call("add-config", name=name, text=text)
         if not reply.get("ok"):
             self.js("failed", reply.get("error") or "не удалось добавить")
             return
@@ -293,8 +360,10 @@ def open_window():
 
     holder = {}
     api = Api(holder)
-    index = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "ui", "index.html")
+    # paths.UI_DIR, а не __file__: в собранном виде __file__ у модуля внутри
+    # PyInstaller-архива не указывает на реальный файл на диске, и index.html
+    # не находился — окно падало ещё до показа.
+    index = os.path.join(paths.UI_DIR, "index.html")
 
     holder["window"] = webview.create_window(
         f"DualVPN {paths.version()}", index,

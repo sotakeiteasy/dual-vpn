@@ -207,19 +207,40 @@ class Tray:
         import os
         import subprocess
         import sys
+
         if getattr(sys, "frozen", False):
-            # sys.executable здесь — сам трей, и запуск его без аргументов дал
-            # бы второй значок вместо окна.
-            sibling = os.path.join(os.path.dirname(sys.executable), "dualvpn.exe")
-            if os.path.isfile(sibling):
-                # Установленная версия: окно живёт в соседнем консольном exe.
-                cmd = [sibling, "window"]
-            else:
-                # Портативная: соседа нет, файл один — зовём его же с командой.
+            # sys.executable здесь — сам трей (DualVPN.exe). У портативной
+            # версии это же имя exe одно на всё, и у него есть ветка "window" —
+            # ею и пользуемся. У установленной версии трей и окно — разные
+            # exe, и окно живёт в соседнем dualvpn.exe.
+            name = os.path.basename(sys.executable).lower()
+            if name == "dualvpn-portable.exe":
                 cmd = [sys.executable, "window"]
+            else:
+                sibling = os.path.join(os.path.dirname(sys.executable), "dualvpn.exe")
+                if not os.path.isfile(sibling):
+                    # Раньше здесь тихо запускали сам трей ещё раз — снаружи
+                    # это выглядело как «нажал Окно, а появился второй значок».
+                    # Явное сообщение лучше молчаливого дубля: причина обычно —
+                    # антивирус, унёсший dualvpn.exe в карантин при установке.
+                    self._notify("не найден dualvpn.exe рядом с программой — "
+                                 "переустанови приложение или проверь карантин "
+                                 "антивируса")
+                    return
+                cmd = [sibling, "window"]
         else:
             cmd = [sys.executable, "-m", "dualvpn.cli", "window"]
-        subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+        # Раньше вывод окна уходил в никуда: при падении (например, из-за
+        # неверного пути к index.html) причину нельзя было увидеть нигде.
+        try:
+            paths.ensure_dirs()
+            log = open(os.path.join(paths.LOGS, "window-launch.log"),
+                      "a", encoding="utf-8", errors="replace")
+        except OSError:
+            log = subprocess.DEVNULL
+        subprocess.Popen(cmd, stdout=log, stderr=log,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     def on_quit(self):
         """Закрывает значок.
