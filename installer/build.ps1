@@ -39,19 +39,26 @@ $Py = Join-Path $Venv 'Scripts\python.exe'
 
 Push-Location $Root
 try {
-    Write-Host '-> собираю DualVPN.exe и dualvpn.exe...'
+    Write-Host '-> собираю exe (установочные + портативный)...'
     & $Py -m PyInstaller --noconfirm --clean `
         --distpath (Join-Path $Root 'dist') `
         --workpath (Join-Path $Root 'build') `
         (Join-Path $Inst 'dualvpn.spec')
 
-    # Бинарники кладём рядом с exe: paths.BIN у собранной версии — это папка
+    # Бинарники кладём рядом с exe: paths.BIN у обычной сборки — это папка
     # приложения, и sing-box ищет wintun.dll в своём каталоге.
+    # Портативному это не нужно: у него оба файла уже внутри.
     $Dist = Join-Path $Root 'dist\DualVPN'
     Copy-Item (Join-Path $Bin 'sing-box.exe') $Dist -Force
     Copy-Item (Join-Path $Bin 'wintun.dll') $Dist -Force
 } finally {
     Pop-Location
+}
+
+$Portable = Join-Path $Root 'dist\DualVPN-Portable.exe'
+if (Test-Path $Portable) {
+    $mb = [math]::Round((Get-Item $Portable).Length / 1MB)
+    Write-Host "-> портативный: dist\DualVPN-Portable.exe ($mb МБ)"
 }
 
 # --- Установщик

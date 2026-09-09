@@ -17,15 +17,23 @@ status.json и логи.
 import os
 import sys
 
-# Собранный .exe кладёт всё рядом с собой; из исходников поднимаемся от
-# lib/dualvpn/paths.py на два уровня до корня репозитория.
+# BASE — где лежит сам exe (или корень репозитория при запуске из исходников).
+# Из lib/dualvpn/paths.py до корня — два уровня вверх.
 if getattr(sys, "frozen", False):
     BASE = os.path.dirname(sys.executable)
 else:
     BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# DUALVPN_DATA перекрывает раскладку — этим пользуются прогоны из исходников и
-# selftest, чтобы не трогать настоящие данные в ProgramData.
+# BUNDLE — где лежат вложенные в сборку файлы: вёрстка окна, VERSION,
+# бинарники. У обычной сборки это та же папка, что и exe, а у однофайловой
+# (портативной) — временный каталог, куда PyInstaller всё распаковал.
+# Без этого различия портативная версия искала бы ui/index.html рядом с
+# собой и не находила: там лежит только сам exe.
+BUNDLE = getattr(sys, "_MEIPASS", BASE)
+
+# DUALVPN_DATA перекрывает раскладку. Этим пользуются и прогоны из исходников,
+# и портативная версия: она кладёт данные рядом с exe, а не в ProgramData,
+# чтобы папку можно было унести целиком вместе с конфигами.
 DATA = os.environ.get("DUALVPN_DATA") or os.path.join(
     os.environ.get("ProgramData", r"C:\ProgramData"), "DualVPN"
 )
@@ -34,8 +42,8 @@ CONF = os.path.join(DATA, "conf")
 STATE = os.path.join(DATA, "state")
 LOGS = os.path.join(STATE, "logs")
 
-# Бинарники лежат при коде: их version-lock'ает установщик вместе с ним.
-BIN = BASE if getattr(sys, "frozen", False) else os.path.join(BASE, "lib", "bin")
+# Бинарники едут внутри сборки, поэтому ищем их в BUNDLE, а не рядом с exe.
+BIN = BUNDLE if getattr(sys, "frozen", False) else os.path.join(BASE, "lib", "bin")
 SINGBOX = os.path.join(BIN, "sing-box.exe")
 WINTUN = os.path.join(BIN, "wintun.dll")
 
@@ -65,7 +73,7 @@ def ensure_dirs():
 
 def version():
     try:
-        with open(os.path.join(BASE, "VERSION"), encoding="utf-8") as fh:
+        with open(os.path.join(BUNDLE, "VERSION"), encoding="utf-8") as fh:
             return fh.read().strip()
     except OSError:
         return "?"

@@ -41,11 +41,15 @@ def _icon_image(state):
 
 
 class Tray:
-    def __init__(self):
+    def __init__(self, on_quit_stops_tunnel=False):
         self.icon = None
         self.state = "off"
         self.status = {}
         self.stop_event = threading.Event()
+        # В портативной версии туннель держит этот же процесс, и выход из трея
+        # обязан его опустить. В установленной — им владеет служба, и закрытие
+        # значка не должно выключать VPN.
+        self.quit_stops_tunnel = on_quit_stops_tunnel
 
     # ------------------------------------------------------------- статус
 
@@ -204,21 +208,37 @@ class Tray:
         import subprocess
         import sys
         if getattr(sys, "frozen", False):
-            # sys.executable здесь — сам трей (DualVPN.exe), и запуск его же
-            # дал бы второй значок вместо окна. Окно живёт в соседнем
-            # консольном exe, они лежат в одной папке.
-            cmd = [os.path.join(os.path.dirname(sys.executable), "dualvpn.exe"),
-                   "window"]
+            # sys.executable здесь — сам трей, и запуск его без аргументов дал
+            # бы второй значок вместо окна.
+            sibling = os.path.join(os.path.dirname(sys.executable), "dualvpn.exe")
+            if os.path.isfile(sibling):
+                # Установленная версия: окно живёт в соседнем консольном exe.
+                cmd = [sibling, "window"]
+            else:
+                # Портативная: соседа нет, файл один — зовём его же с командой.
+                cmd = [sys.executable, "window"]
         else:
             cmd = [sys.executable, "-m", "dualvpn.cli", "window"]
         subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     def on_quit(self):
-        """Закрывает значок. Туннель при этом остаётся поднятым.
+        """Закрывает значок.
 
-        Им владеет служба, и «закрыл окно» не должно означать «выключил VPN» —
-        это ровно то поведение, которого ждут от обычного VPN-клиента.
+        В установленной версии туннель при этом остаётся поднятым: им владеет
+        служба, и «закрыл значок» не должно означать «выключил VPN» — это ровно
+        то поведение, которого ждут от обычного VPN-клиента.
+
+        В портативной держать туннель после выхода некому, поэтому опускаем.
+        Сам вызов делаем здесь, а не только в portable.run(): пользователь ждёт,
+        что к моменту исчезновения значка сеть уже вернулась в норму.
         """
+        if self.quit_stops_tunnel and self.status.get("up"):
+            try:
+                ipc.call("stop")
+            except ipc.NotRunning:
+                # Ядро в этом же процессе, но канал мог не подняться. Уборку
+                # всё равно доделает portable.run() через core.shutdown().
+                pass
         self.stop_event.set()
         if self.icon is not None:
             self.icon.stop()

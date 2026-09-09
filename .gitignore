@@ -26,3 +26,8 @@ installer/Output/
 # Генерируется из icon.svg при сборке.
 lib/dualvpn/ui/icons/
 *.ico
+
+# Локальные индексы инструментов разработки — у каждого свои, в репозитории
+# им не место.
+.tokensave/
+.ragsave/

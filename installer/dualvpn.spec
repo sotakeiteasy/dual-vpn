@@ -1,11 +1,13 @@
-# PyInstaller: два exe, одна общая папка.
+# PyInstaller: три exe за один проход.
 #
-# Разными вызовами PyInstaller их собрать нельзя — каждый onedir-вызов делает
-# свой каталог со своей копией рантайма, и sing-box.exe с wintun.dll легли бы
-# в сборку дважды. Здесь два EXE и один COLLECT, поэтому общее лежит один раз.
+#   DualVPN.exe           оконный    значок в трее (установленная версия)
+#   dualvpn.exe           консольный CLI и хост службы
+#   DualVPN-Portable.exe  оконный    всё в одном файле, без установки
 #
-#   DualVPN.exe  оконный    значок в трее, обычный запуск пользователем
-#   dualvpn.exe  консольный CLI и хост службы
+# Первые два делят одну папку. Разными вызовами PyInstaller их собрать нельзя —
+# каждый onedir-вызов делает свой каталог со своей копией рантайма, и sing-box
+# с wintun лёг бы в сборку дважды. Здесь два EXE и один COLLECT, поэтому общее
+# лежит один раз.
 #
 # Служба обязана быть консольной: StartServiceCtrlDispatcher у оконного
 # процесса не поднимается, и диспетчер отваливается по таймауту (ошибка 1053).
@@ -59,4 +61,37 @@ COLLECT(
     cli_exe, cli_a.binaries, cli_a.datas,
     tray_exe, tray_a.binaries, tray_a.datas,
     name="DualVPN",
+)
+
+
+# --------------------------------------------------------- портативная версия
+#
+# Отдельный однофайловый exe: ни установки, ни службы, ни распакованной папки.
+# Внутрь кладём и sing-box.exe с wintun.dll — иначе «портативная» версия всё
+# равно требовала бы носить рядом два файла, и смысл терялся бы.
+#
+# В MERGE выше её включать нельзя: MERGE учит сборки брать общие модули друг у
+# друга, а onefile обязан быть самодостаточным.
+
+portable_datas = datas + [
+    (os.path.join(ROOT, "lib", "bin", "sing-box.exe"), "."),
+    (os.path.join(ROOT, "lib", "bin", "wintun.dll"), "."),
+]
+
+portable_a = Analysis(
+    [os.path.join(INST, "entry_portable.py")],
+    pathex=[os.path.join(ROOT, "lib")],
+    datas=portable_datas, hiddenimports=hidden,
+)
+portable_pyz = PYZ(portable_a.pure)
+
+portable_exe = EXE(
+    portable_pyz, portable_a.scripts,
+    portable_a.binaries, portable_a.datas, [],
+    name="DualVPN-Portable",
+    console=False, icon=ICON,
+    # Манифест requireAdministrator: UAC спрашивается один раз при запуске.
+    # Без него процесс не сможет ни создать адаптер, ни править маршруты, и
+    # приложение молча не заработало бы.
+    uac_admin=True,
 )
