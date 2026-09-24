@@ -53,6 +53,27 @@ def data_from_daemon():
         return ""
 
 
+def vpn_from_daemon():
+    """Путь к `vpn`, записанный в описании установленной службы.
+
+    Брать его из своего BASE нельзя: приложение живёт в /Applications, а
+    правило в sudoers установщик пишет на тот путь, из которого его запустили
+    (обычно репозиторий). Пути не совпадали, `sudo -n` требовал пароль, и
+    запасная уборка в stop_tunnel молча не срабатывала. В plist и в sudoers
+    путь один и тот же — значит, спрашивать надо у plist.
+    """
+    try:
+        with open(PLIST, "rb") as fh:
+            args = plistlib.load(fh).get("ProgramArguments") or []
+        # ["/bin/bash", "<base>/vpn", "daemon"] — нужен сам скрипт.
+        for a in args:
+            if a.endswith("/vpn"):
+                return a
+    except Exception:
+        pass
+    return ""
+
+
 def paths():
     """Куда смотреть за кодом и за данными.
 
@@ -121,7 +142,10 @@ def stop_tunnel():
     if not err:
         return ""
     log(f"служба не отозвалась ({err}) — убираю напрямую")
-    r = subprocess.run(["/usr/bin/sudo", "-n", os.path.join(BASE, "vpn"), "stop"],
+    # Путь берём из plist, а не из своего BASE: правило в sudoers выдано
+    # именно на него (см. vpn_from_daemon).
+    vpn = vpn_from_daemon() or os.path.join(BASE, "vpn")
+    r = subprocess.run(["/usr/bin/sudo", "-n", vpn, "stop"],
                        capture_output=True, text=True)
     for line in (r.stdout or "").strip().splitlines():
         log(f"vpn stop: {line}")
@@ -160,7 +184,7 @@ class App(rumps.App):
         self.menu.add(rumps.MenuItem("Выключить", callback=self.on_stop))
         self.menu.add(rumps.MenuItem("Перезапустить", callback=self.on_start))
         self.menu.add(rumps.separator)
-        self.menu.add(rumps.MenuItem("Выход", callback=rumps.quit_application))
+        self.menu.add(rumps.MenuItem("Выход", callback=self.on_quit))
 
         self.window = Window(BASE, tui.STATE, log, launchctl, DATA, stop_tunnel)
 
@@ -183,6 +207,23 @@ class App(rumps.App):
         err = stop_tunnel()
         if err:
             rumps.notification("DualVPN", "не удалось выключить", err)
+
+    def on_quit(self, _):
+        """Выход выключает туннель.
+
+        Раньше здесь стоял rumps.quit_application напрямую: приложение
+        закрывалось, а служба продолжала держать туннель и маршруты 0/1 и
+        128.0/1 на tun. Снаружи это выглядело как «выключил», хотя весь трафик
+        по-прежнему шёл через туннель, а значка, чтобы это увидеть или
+        выключить, уже не было.
+        """
+        err = stop_tunnel()
+        if err:
+            # Всё равно выходим — человек попросил именно это. Но молча уйти
+            # нельзя: туннель остался поднятым, и об этом надо сказать.
+            log(f"выход: выключить не вышло — {err}")
+            rumps.notification("DualVPN", "туннель остался поднятым", err)
+        rumps.quit_application()
 
     def on_window(self, _):
         try:
