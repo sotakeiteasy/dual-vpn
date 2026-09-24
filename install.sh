@@ -32,6 +32,13 @@ ls "$BASE"/conf/*.conf >/dev/null 2>&1 || {
   echo "в conf/ нет ни одного .conf — положи свои конфиги, см. README, шаг 3"
   exit 1; }
 
+# Пароль — сразу, а не после сборки. Иначе установка минутами стояла на
+# приглашении посреди вывода, а собранная копия в dist/ тем временем
+# находилась Spotlight'ом: её запускали вместо установленной и видели две
+# DualVPN разных версий. Кеш sudo живёт 5 минут — на сборку и проверки хватает.
+echo "→ нужен пароль администратора (служба и /Applications)…"
+sudo -v || { echo "без пароля не поставить"; exit 1; }
+
 # --- окружение и сборка (от пользователя, root тут не нужен) ---------------
 
 if [ ! -x "$VENV/bin/python" ]; then
@@ -76,7 +83,13 @@ sudo ditto "$BUILT" "/Applications/$APP_NAME"
 sudo chown -R root:wheel "/Applications/$APP_NAME"
 
 # Иначе рядом остаётся вторая копия приложения: Spotlight её индексирует,
-# и в Launchpad видно два DualVPN — установленный и сборочный.
+# и в Launchpad видно два DualVPN — установленный и сборочный. Одного
+# удаления мало: запись в LaunchServices переживает файл, снимаем явно.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+# `|| true`: под set -e любой отказ lsregister оборвал бы установку до
+# удаления dist/ — и в поиске осталась бы вторая DualVPN. Снятие с учёта —
+# уборка, а не условие успеха.
+if [ -x "$LSREGISTER" ]; then "$LSREGISTER" -u "$BUILT" >/dev/null 2>&1 || true; fi
 rm -rf "$BASE/lib/scripts/build" "$BASE/lib/scripts/dist"
 
 cat <<EOF

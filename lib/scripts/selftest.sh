@@ -61,9 +61,13 @@ w = window.Window.__new__(window.Window)
 w.base = w.data = base          # код и данные: в проекте это одно место
 w.state = os.path.join(base, "lib", "state")
 w.log = lambda *a: None
+w.ctrl = None                   # без контроллера статус обязан собираться сам
 c = w.configs()
 assert set(c) >= {"corp", "personal", "corp_ambiguous", "personal_ambiguous"}, c
-assert isinstance(w.status().get("up"), bool)
+st = w.status()
+assert isinstance(st.get("up"), bool)
+assert set(st["op"]) == {"phase", "step", "busy"}, st["op"]
+assert "error" in st and "error_log" in st
 assert isinstance(w.howto().get("corp_nets"), list)
 assert isinstance(w.tail(), list)
 assert isinstance(w.err_count(), int)
@@ -90,7 +94,7 @@ cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Wi
 have = {m.name for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}
 have |= {t.id for m in cls.body if isinstance(m, ast.Assign)
          for t in m.targets if isinstance(t, ast.Name)}
-have |= set(vars(window.Window)) | {"base", "data", "state", "log", "launchctl",
+have |= set(vars(window.Window)) | {"base", "data", "state", "log", "ctrl",
                                     "win", "view", "timer", "bridge"}
 called = {n.attr for n in ast.walk(cls)
           if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
@@ -102,6 +106,29 @@ for bad_name in ("../x", "a/b", "..", ""):
     assert not window.Window._safe(bad_name), bad_name
 assert window.Window._safe("personal")
 PYEOF
+
+# ---------------------------------------------------------------- тесты
+
+head "тесты (tests/)"
+# Логика кнопок, меню, сборки конфига и отказа старта — без root и без сети.
+UT=$(mktemp)
+if "$PY" -m unittest discover -s "$BASE/tests" >"$UT" 2>&1; then
+  ok "python: $(grep -Eo 'Ran [0-9]+ tests' "$UT"), $(tail -1 "$UT")"
+else
+  tail -30 "$UT"
+  bad "python-тесты упали"
+fi
+rm -f "$UT"
+# Логика окна — на JS; node есть не у всех, без него пропускаем.
+NODE=$(command -v node || true)
+if [ -z "$NODE" ]; then
+  echo "  (пропуск: нет node — тесты окна не гоняю)"
+elif "$NODE" --test "$BASE/tests/test_view.js" >/dev/null 2>&1; then
+  ok "js: логика окна"
+else
+  "$NODE" --test "$BASE/tests/test_view.js" 2>&1 | grep -E '✖|Error' | head -10
+  bad "js-тесты окна упали"
+fi
 
 # ---------------------------------------------------------------- plist
 
@@ -152,6 +179,8 @@ else
   codesign -v "$APP" 2>/dev/null && ok "подпись цела" || bad "подпись битая — Finder откажется открывать"
   [ -f "$APP/Contents/Resources/ui/index.html" ] \
     && ok "страница окна в бандле" || bad "ui/index.html не попал в бандл"
+  [ -f "$APP/Contents/Resources/ui/view.js" ] \
+    && ok "логика окна в бандле" || bad "ui/view.js не попал в бандл"
 
   LOG="$HOME/Library/Logs/singbox-lx-menubar.log"
   rm -f "$LOG"; ERR=$(mktemp)
@@ -194,7 +223,7 @@ else
 
   grep -q "значок не найден" "$LOG" 2>/dev/null \
     && bad "значок меню-бара не найден" || ok "значок меню-бара на месте"
-  for I in ok bad default; do
+  for I in off on busy-a busy-b bad; do
     [ -f "$APP/Contents/Resources/ui/icons/menubar-$I.png" ] \
       || bad "нет картинки состояния: $I"
   done
