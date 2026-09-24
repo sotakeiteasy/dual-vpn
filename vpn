@@ -53,6 +53,12 @@ STATE="$DATA/lib/state"
 # уборки: переживает и падение, и KILL, и перезагрузку, поэтому «аварийно
 # выключился» лечится следующим `stop` или `start`, а не руками.
 OWNED="$STATE/owned"
+# Почему последний старт не удался — одной-двумя строками, для окна.
+# Пишется перед выходом, стирается при следующем старте и приложением, когда
+# человек выключает туннель руками.
+LAST_ERROR="$STATE/last-error"
+# Запущены ли мы службой: от этого зависит код выхода при отказе (fail_start).
+DAEMON=0
 TUN_IP="172.19.0.1"     # адрес tun из build-config.py, по нему ищем интерфейс
 
 # Настройки рабочей сети — домены, проверочные хосты, исключения из
@@ -90,9 +96,8 @@ set_profile() {
   [ -z "$name" ] && return 0
   name="${name%.conf}"
   if [ ! -f "$CONF/$name.conf" ]; then
-    echo "нет профиля «${name}»: не найден $CONF/$name.conf"
     cmd_list
-    exit 1
+    fail_start "нет профиля «${name}»: не найден $CONF/$name.conf"
   fi
   SB_PERSONAL="$name"
   export SB_PERSONAL
@@ -380,6 +385,37 @@ v6_restore() {
 
 # --------------------------------------------------------------- start
 
+# Старт не удался. Причину — в лог и в LAST_ERROR, чтобы окно показало её
+# словами, а не «выключено».
+#
+# Служба выходит НУЛЁМ. launchd перезапускает её после любого ненулевого
+# выхода (KeepAlive/SuccessfulExit), и битый конфиг превращался в вечный
+# цикл: упал, через 10 с поднят снова, упал — а окно всё это время висело на
+# «включаю…». Повтор такой отказ не лечит; повторит человек, когда поправит.
+# Ненулевой выход остаётся для падения sing-box уже в работе — там
+# автоподъём и нужен.
+#
+# Из терминала код обычный, единица: там на него смотрят скрипты.
+#   $1 — что случилось, $2 — подробность (последняя строка вывода), необязательно
+fail_start() {
+  local detail="${2:-}"
+  # Раскраску sing-box в файл не несём: окно показывает текст как есть.
+  detail=$(printf '%s' "$detail" | sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g')
+  echo "$1"
+  [ -n "$detail" ] && echo "  $detail"
+  mkdir -p "$STATE"
+  {
+    echo "$1"
+    if [ -n "$detail" ]; then echo "$detail"; fi
+  } >"$LAST_ERROR.tmp" 2>/dev/null
+  # Через временный файл: окно не должно прочитать половину причины.
+  if [ -s "$LAST_ERROR.tmp" ]; then
+    chmod 644 "$LAST_ERROR.tmp" 2>/dev/null
+    mv -f "$LAST_ERROR.tmp" "$LAST_ERROR"
+  fi
+  if [ "$DAEMON" = 1 ]; then exit 0; else exit 1; fi
+}
+
 # Уборка идёт на любом выходе: по сигналу, по ошибке, по обычному завершению.
 # Раньше EXIT-ловушка ставилась второй и перекрывала первую, поэтому на выходе
 # по ошибке возвращался только IPv6, а маршруты оставались висеть.
@@ -419,6 +455,7 @@ cleanup() {
 cmd_start() {
   need_root start
   mkdir -p "$STATE"
+  rm -f "$LAST_ERROR"
 
   # Уборка за прошлым запуском — до того, как поднимем свой. Прошлый мог
   # уйти в KILL, упасть вместе с машиной или потерять питание: следы тогда
@@ -435,14 +472,19 @@ cmd_start() {
 
   # Пересобираем config.json из conf/*.conf: корп-конфиг ротируется,
   # достаточно положить новый файл — правки скриптов не нужны.
+  # Вывод перехватываем, чтобы последняя его строка — это и есть причина:
+  # sys.exit с текстом или последняя строка трейсбека — ушла в LAST_ERROR.
   echo "→ собираю конфиг из conf/…"
-  if ! python3 "$SCRIPTS/build-config.py"; then
-    echo "не удалось собрать конфиг — правь conf/*.conf"
-    exit 1
+  local out rc
+  out=$(python3 "$SCRIPTS/build-config.py" 2>&1); rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out"
+  if [ $rc != 0 ]; then
+    fail_start "не удалось собрать конфиг — правь conf/*.conf" "$(printf '%s\n' "$out" | tail -1)"
   fi
-  if ! "$BIN/sing-box" check -c "$STATE/config.json"; then
-    echo "конфиг не прошёл проверку"
-    exit 1
+  out=$("$BIN/sing-box" check -c "$STATE/config.json" 2>&1); rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out"
+  if [ $rc != 0 ]; then
+    fail_start "конфиг не прошёл проверку sing-box" "$(printf '%s\n' "$out" | tail -1)"
   fi
 
   # Шлюз по умолчанию: определяем ДО старта, пока туннель не перебил маршруты.
@@ -450,8 +492,7 @@ cmd_start() {
   GW=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2; exit}')
   IFACE=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')
   if [ -z "$GW" ]; then
-    echo "нет маршрута по умолчанию — сеть не поднята?"
-    exit 1
+    fail_start "нет маршрута по умолчанию — сеть не поднята?"
   fi
   echo "→ аплинк: $IFACE, шлюз $GW"
 
@@ -478,8 +519,8 @@ cmd_start() {
     [ -n "$IP" ] && PEERS="$PEERS $IP"
   done
   if [ -z "$PEERS" ]; then
-    echo "не удалось определить адреса пиров — прерываю, иначе будет петля"
-    exit 1
+    fail_start "не удалось определить адреса серверов — прерываю, иначе будет петля" \
+               "проверь Endpoint в конфигах и что есть интернет"
   fi
   echo "→ пиры (пойдут мимо туннеля):$PEERS"
 
@@ -499,12 +540,11 @@ cmd_start() {
   TUN=""
   for _ in $(seq 1 30); do
     TUN=$(find_tun) && break
-    kill -0 "$PID" 2>/dev/null || { echo "sing-box упал на старте, смотри вывод выше"; exit 1; }
+    kill -0 "$PID" 2>/dev/null || fail_start "sing-box упал на старте" "подробности — в логе выше"
     sleep 1
   done
   if [ -z "$TUN" ]; then
-    echo "tun не поднялся за 30с"
-    cleanup
+    fail_start "tun не поднялся за 30 с"
   fi
   echo "→ tun: $TUN"
 
@@ -688,6 +728,7 @@ KEEP_LOGS=10
 
 cmd_daemon() {
   need_root daemon
+  DAEMON=1
   mkdir -p "$STATE"
   DIR="$STATE/logs"
   mkdir -p "$DIR"
@@ -719,6 +760,9 @@ cmd_daemon() {
 
   echo "=== $(date '+%Y-%m-%d %H:%M:%S') vpn daemon ===" >>"$LOG"
   exec >>"$LOG" 2>&1
+  # Здесь, а не в cmd_start: set_profile ниже тоже может отказать и записать
+  # свою причину, а старую к этому моменту надо уже забыть.
+  rm -f "$LAST_ERROR"
   # Профиль выбираем уже после перенаправления: раньше set_profile вызывался
   # до него, и сообщение «нет профиля X» уходило в stdout, которого у службы
   # нет вовсе. Демон падал, launchd поднимал его по кругу, в логе — пусто.
@@ -727,6 +771,9 @@ cmd_daemon() {
 }
 
 # --------------------------------------------------------------- dispatch
+
+# Тесты подключают файл ради функций и команду не выполняют.
+[ -n "${VPN_SOURCE_ONLY:-}" ] && return 0
 
 case "${1:-start}" in
   start)      set_profile "${2:-}"; cmd_start ;;
