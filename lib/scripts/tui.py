@@ -56,6 +56,7 @@ CORP_PROBE = os.environ.get("CORP_PROBE") or SITE.get("CORP_PROBE", "")
 
 FAST_EVERY = 2.0    # локальные проверки: интерфейсы, маршруты, процесс
 SLOW_EVERY = 20.0   # сетевые: внешний IP, корп-DNS, корп-HTTPS
+CORP_MISSES = 2     # сколько промахов DNS подряд, чтобы счесть корп молчащим
 
 LOG = collections.deque(maxlen=4000)
 ST = {}             # состояние для панели, пишется пробером, читается отрисовкой
@@ -79,6 +80,23 @@ def set_st(**kw):
 
 # ----------------------------------------------------------------- пробы
 
+def route_on(routes, dest, tun):
+    """Есть ли маршрут dest именно на нашем tun.
+
+    Те же половинки 0/1 и 128.0/1 ставят себе Amnezia и WireGuard. Раньше
+    хватало любой строки 0/1, и поднятый соседний клиент засчитывался нам:
+    при своём tun без маршрутов туннель показывался поднятым.
+    Netif — четвёртая колонка netstat (по последней нельзя: бывает Expire).
+    """
+    if not tun:
+        return False
+    for line in routes.splitlines():
+        f = line.split()
+        if len(f) >= 4 and f[0] == dest and f[3] == tun:
+            return True
+    return False
+
+
 def probe_fast():
     iface = ""
     gw = ""
@@ -99,8 +117,8 @@ def probe_fast():
     routes = sh(["netstat", "-rn", "-f", "inet"], 6)
     set_st(
         iface=iface, gw=gw, tun=tun,
-        r_low=bool(re.search(r"^0/1\s", routes, re.M)),
-        r_high=bool(re.search(r"^128\.0/1\s", routes, re.M)),
+        r_low=route_on(routes, "0/1", tun),
+        r_high=route_on(routes, "128.0/1", tun),
         pid=sh(["pgrep", "-f", os.path.join(BASE, "lib", "bin", "sing-box")], 4).replace("\n", ","),
     )
 
@@ -141,6 +159,8 @@ def probe_slow():
     try:
         info = json.loads(raw)
         ip = info.get("ip", "")
+        if not ip:
+            raise ValueError("пустой ответ")
         # Сервер обычно одноногий, поэтому выходной адрес совпадает с адресом
         # пира — это и есть подтверждение, что трафик идёт через личный туннель.
         # Совпадение с адресом пира — обычный случай для одноногого сервера,
@@ -169,8 +189,15 @@ def probe_slow():
                exit_real=real, exit_state=state,
                exit_is_peer=(state == "tunnel"))
     except Exception:
-        set_st(exit_ip="", exit_country="", exit_city="", exit_org="",
-               exit_is_peer=False, exit_state="unknown")
+        # Один неответ ipinfo — не повод забывать, что было. Раньше каждый
+        # сбой стирал адрес, и строка «личный» раз в 20 секунд прыгала между
+        # «188.… через туннель» и «— проверяю…». Сбрасываем только при
+        # падении туннеля (см. prober) и пока ни одного ответа ещё не было.
+        with LOCK:
+            known = bool(ST.get("exit_ip"))
+        if not known:
+            set_st(exit_ip="", exit_country="", exit_city="", exit_org="",
+                   exit_is_peer=False, exit_state="unknown")
 
     # IPv6: любой ответ здесь означает, что трафик идёт мимо туннеля
     v6 = sh(["curl", "-6", "-s", "--max-time", "6", "https://ifconfig.me"], 8)
@@ -191,7 +218,13 @@ def probe_slow():
         got = sh(["dig", "+short", "+time=4", "+tries=1",
                   f"@{corp_dns}", CORP_PROBE], 8)
         ip = next((l for l in got.splitlines() if re.match(r"^[\d.]+$", l)), "")
-        set_st(corp_dns=corp_dns, corp_ip=ip)
+        # «Молчит» — только после двух промахов подряд. Один потерянный UDP-
+        # ответ DNS переключал корп в «не отвечает» на 20 секунд, и меню с
+        # окном, заглянувшие в разные моменты, противоречили друг другу.
+        with LOCK:
+            misses = 0 if ip else ST.get("corp_misses", 0) + 1
+            keep = ST.get("corp_ip", "") if not ip and misses < CORP_MISSES else ip
+        set_st(corp_dns=corp_dns, corp_ip=keep, corp_misses=misses)
     else:
         set_st(corp_dns="", corp_ip="")
 
@@ -245,8 +278,11 @@ def prober():
             # прыгала между «Включить» и «Выключить».
             threading.Thread(target=probe_slow, daemon=True).start()
         elif not up:
-            set_st(exit_ip="", corp_ip="", corp_http="", v6_leak="",
-                   exit_is_peer=False)
+            # exit_state тоже: иначе после следующего подъёма, до первого
+            # замера, строка показывала «— через туннель» от прошлого сеанса.
+            set_st(exit_ip="", exit_country="", exit_city="", corp_ip="",
+                   corp_http="", v6_leak="", exit_is_peer=False,
+                   exit_state="unknown", corp_misses=0)
         write_status()
         STOP.wait(FAST_EVERY)
 
