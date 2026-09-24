@@ -37,13 +37,13 @@
 ## Из исходников
 
 Нужен macOS 13+, Python 3.9+ и бинарник
-[sing-box-lx](https://github.com/Leadaxe/sing-box-lx) — форк с AmneziaWG,
+[sing-box-lx](https://github.com/Leadaxe/sing-box-lx) — форк с AmneziaWG (2.0 и 3.x — нужен lx.32 или новее),
 в основной сборке его нет.
 
 ```bash
 git clone git@github.com:sotakeiteasy/dual-vpn.git && cd dual-vpn
 
-VER=1.14.0-lx.22; ARCH=darwin-arm64
+VER=1.14.1-lx.12; ARCH=darwin-arm64
 mkdir -p lib/bin && cd lib/bin
 curl -LO https://github.com/Leadaxe/sing-box-lx/releases/download/v$VER/sing-box-$VER-$ARCH.tar.gz
 tar xzf sing-box-$VER-$ARCH.tar.gz --strip-components=1 sing-box-$VER-$ARCH/sing-box
