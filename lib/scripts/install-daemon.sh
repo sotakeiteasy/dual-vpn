@@ -20,8 +20,35 @@ else
   PLIST_SRC="$BASE/lib/launchd/$LABEL_FILE"
 fi
 SUDOERS=/etc/sudoers.d/singbox-lx
+APP=/Applications/DualVPN.app
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 [ "$(id -u)" = 0 ] || { echo "нужен root: sudo bash $0 ${1:-}"; exit 1; }
+
+# Убрать за установочным образом.
+#
+# Смонтированный DMG LaunchServices берёт на учёт, и запись переживает
+# отмонтирование: в Spotlight и Launchpad остаётся вторая «DualVPN»,
+# указывающая на /Volumes/DualVPN <версия>. Снять её потом нечем — lsregister
+# отвечает -10814 на путь, которого больше нет, и выручает только полная
+# перестройка базы. Поэтому снимаем с учёта и отмонтируем, пока том ещё на
+# месте: тогда мёртвой записи просто не возникает.
+#
+# lsregister — от имени человека, а не root: база у каждого своя.
+eject_images() {
+  local v
+  for v in /Volumes/DualVPN*; do
+    [ -d "$v" ] || continue
+    [ -x "$LSREGISTER" ] && sudo -u "$USER_NAME" "$LSREGISTER" -u "$v" >/dev/null 2>&1
+    if hdiutil detach "$v" -quiet 2>/dev/null; then
+      echo "→ образ отмонтирован: $v"
+    else
+      # Занят Finder'ом — не беда, но сказать надо: иначе запись останется.
+      echo "→ не смог отмонтировать $v — извлеки его сам, иначе в поиске"
+      echo "  останется вторая «DualVPN»"
+    fi
+  done
+}
 
 # Кому разрешаем кнопки: тот, кто вызвал sudo, а не root.
 USER_NAME=${SUDO_USER:-$(stat -f %Su /dev/console)}
@@ -30,6 +57,29 @@ if [ "${1:-}" = remove ]; then
   launchctl bootout system/$LABEL 2>/dev/null || true
   rm -f "$PLIST" "$SUDOERS"
   echo "снято: $PLIST, $SUDOERS"
+
+  # Приложение и его след в LaunchServices. Без снятия с учёта запись живёт
+  # дальше и продолжает показывать «DualVPN» в поиске уже после удаления.
+  if [ -d "$APP" ]; then
+    [ -x "$LSREGISTER" ] && sudo -u "$USER_NAME" "$LSREGISTER" -u "$APP" >/dev/null 2>&1
+    rm -rf "$APP"
+    echo "снято: $APP"
+  fi
+  eject_images
+
+  # Данные — только по явной просьбе: это конфиги, которые человек приносил
+  # руками, и восстановить их нам неоткуда.
+  if [ "${2:-}" = --all ]; then
+    # Только свой каталог в Application Support. Установку из исходников не
+    # трогаем ни при каких флагах: там рядом с данными лежит рабочая копия
+    # репозитория, и снести её этот скрипт права не имеет.
+    D="/Users/$USER_NAME/Library/Application Support/DualVPN"
+    [ -d "$D" ] && { rm -rf "$D"; echo "снято: $D"; }
+    rm -f "/Users/$USER_NAME/Library/Logs/singbox-lx-menubar.log"
+    echo "данные удалены"
+  else
+    echo "данные оставлены; чтобы снести и их: sudo bash $0 remove --all"
+  fi
   exit 0
 fi
 
@@ -86,6 +136,8 @@ else
   rm -f "$SUDOERS.tmp"
   echo "sudoers не прошёл проверку — права не выданы, кнопки будут спрашивать пароль"
 fi
+
+eject_images
 
 echo "готово."
 echo "  данные:     $DATA"
