@@ -15,20 +15,30 @@ import shutil
 import subprocess
 import sys
 
-from AppKit import (NSBitmapImageRep, NSColor, NSCompositeSourceOver, NSImage,
-                    NSGraphicsContext, NSMakeRect, NSPNGFileType, NSBezierPath)
+from AppKit import (NSBitmapImageRep, NSColor, NSCompositeClear,
+                    NSCompositeSourceOver, NSImage, NSGraphicsContext, NSMakeRect,
+                    NSPNGFileType, NSBezierPath)
 from Foundation import NSData
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(ROOT, "icon.svg")
 OUT = os.path.join(ROOT, "lib", "scripts", "ui", "icons")
 
-# Состояния значка в меню-баре. Чёрный — обычный: он рисуется как шаблон,
-# и macOS сама перекрашивает его под светлую и тёмную панель.
+# Состояния значка в меню-баре. Все — шаблоны: macOS берёт у шаблона только
+# прозрачность и красит его сама, как соседние значки (белым на тёмной панели,
+# чёрным на светлой). Цветные зелёный и красный выбивались из ряда, а на
+# цветных обоях терялись.
+#
+# Поэтому состояние передаётся прозрачностью, как у системных значков:
+# выключено — светло-серый, включено — сплошной. Ошибка — сплошной со значком
+# «!» в углу, переход — мигание между двумя кадрами.
+#   имя: (непрозрачность глифа, со значком ошибки)
 STATES = {
-    "default": "#000000",
-    "ok":      "#1a9c4b",
-    "bad":     "#d13b30",
+    "off":    (0.38, False),
+    "on":     (1.0,  False),
+    "busy-a": (0.38, False),
+    "busy-b": (0.8,  False),
+    "bad":    (1.0,  True),
 }
 BAR_PX = 44          # 22 точки при двойной плотности
 
@@ -38,11 +48,12 @@ def colored(svg_text, color):
                   lambda m: f'{m.group(1)}="{color}"', svg_text)
 
 
-def render(svg_text, px, inset=0.0, bg=None, radius=0.0):
+def render(svg_text, px, inset=0.0, bg=None, radius=0.0, alpha=1.0, badge=False):
     """SVG → NSBitmapImageRep нужного размера.
 
     inset — поля вокруг рисунка в долях размера: у значка приложения глиф
     не должен упираться в края, иначе он выглядит крупнее соседей в Dock.
+    alpha — непрозрачность глифа; badge — кружок с «!» в правом нижнем углу.
     """
     data = NSData.dataWithBytes_length_(svg_text.encode(), len(svg_text.encode()))
     img = NSImage.alloc().initWithData_(data)
@@ -63,10 +74,44 @@ def render(svg_text, px, inset=0.0, bg=None, radius=0.0):
     pad = px * inset
     img.drawInRect_fromRect_operation_fraction_(
         NSMakeRect(pad, pad, px - 2 * pad, px - 2 * pad),
-        NSMakeRect(0, 0, 0, 0), NSCompositeSourceOver, 1.0)
+        NSMakeRect(0, 0, 0, 0), NSCompositeSourceOver, alpha)
+
+    if badge:
+        draw_badge(ctx, px)
 
     NSGraphicsContext.restoreGraphicsState()
     return rep
+
+
+def draw_badge(ctx, px):
+    """Кружок с «!» в правом нижнем углу, вырезанный из глифа.
+
+    Всё одноцветное: вокруг кружка — прозрачный зазор, «!» — прорезь. Цвет у
+    шаблона всё равно один, поэтому форму создаёт только прозрачность.
+    Координаты AppKit: начало внизу слева.
+    """
+    r = px * 0.21                    # радиус кружка
+    gap = px * 0.06                  # прозрачное кольцо вокруг
+    cx, cy = px - r, r               # прижат к углу
+
+    def circle(rad):
+        return NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(cx - rad, cy - rad, 2 * rad, 2 * rad))
+
+    ctx.setCompositingOperation_(NSCompositeClear)
+    circle(r + gap).fill()
+    ctx.setCompositingOperation_(NSCompositeSourceOver)
+    NSColor.blackColor().set()
+    circle(r).fill()
+
+    # «!»: палочка и точка — прорезью
+    w = r * 0.34
+    ctx.setCompositingOperation_(NSCompositeClear)
+    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        NSMakeRect(cx - w / 2, cy - r * 0.12, w, r * 0.72), w / 2, w / 2).fill()
+    NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(cx - w / 2, cy - r * 0.62, w, w)).fill()
+    ctx.setCompositingOperation_(NSCompositeSourceOver)
 
 
 def save(rep, path):
@@ -81,8 +126,16 @@ def main():
     with open(SRC, encoding="utf-8") as fh:
         svg = fh.read()
 
-    for name, color in STATES.items():
-        save(render(colored(svg, color), BAR_PX), os.path.join(OUT, f"menubar-{name}.png"))
+    black = colored(svg, "#000000")
+    # Прошлые цветные картинки сносим, чтобы в бандл не уехало лишнее.
+    for old in ("default", "ok"):
+        try:
+            os.unlink(os.path.join(OUT, f"menubar-{old}.png"))
+        except OSError:
+            pass
+    for name, (alpha, badge) in STATES.items():
+        save(render(black, BAR_PX, alpha=alpha, badge=badge),
+             os.path.join(OUT, f"menubar-{name}.png"))
     print(f"значки меню-бара: {len(STATES)} шт. в {os.path.relpath(OUT, ROOT)}")
 
     # Значок приложения: белый глиф на тёмном скруглённом квадрате — иначе

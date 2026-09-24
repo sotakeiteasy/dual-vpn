@@ -17,6 +17,8 @@ import shutil
 import subprocess
 import time
 
+import control
+
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSMakePoint,
                     NSOpenPanel,
@@ -28,7 +30,6 @@ from WebKit import WKUserContentController, WKWebView, WKWebViewConfiguration
 LABEL = "local.singbox-lx"
 PLIST = f"/Library/LaunchDaemons/{LABEL}.plist"
 TAIL = 400          # сколько строк лога держим в окне
-ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 POLL = 2.0
 
 
@@ -64,17 +65,16 @@ class Bridge(NSObject):
 class Window:
     _ver_sent = False           # версия шлётся один раз: она не меняется
     data = None                 # каталог данных; задаётся в __init__
-    stop = None                 # как выключать; задаётся в __init__
+    ctrl = None                 # control.Controller; задаётся в __init__
 
-    def __init__(self, base, state, log, launchctl, data=None, stop=None):
+    def __init__(self, base, state, log, ctrl, data=None):
         self.base = base            # код: vpn, скрипты, sing-box
         self.data = data or base    # данные: conf/, lib/state
         self.state = state
         self.log = log
-        self.launchctl = launchctl
-        # Выключение идёт своим путём: у него есть запасной вариант на случай,
-        # когда службы нет, а маршруты остались (см. stop_tunnel в menubar.py).
-        self.stop = stop
+        # Включение, выключение и перезапуск — только через контроллер: он
+        # один на меню и окно, операции идут по одной и доводятся до конца.
+        self.ctrl = ctrl
         self.win = None
         self.view = None
         self.timer = None
@@ -139,6 +139,9 @@ class Window:
 
     # ------------------------------------------------------------ отправка
 
+    def visible(self):
+        return self.win is not None and bool(self.win.isVisible())
+
     def eval(self, script):
         if self.view is not None:
             self.view.evaluateJavaScript_completionHandler_(script, None)
@@ -157,45 +160,36 @@ class Window:
             self.eval(f"call('renderVersion', {_js(v)})")
 
     def status(self):
+        st = {}
         try:
             with open(os.path.join(self.state, "status.json"), encoding="utf-8") as fh:
                 st = json.load(fh)
+            # Пробер давно не писал — показаниям верить нельзя.
+            if time.time() - st.get("updated", 0) > 15:
+                st = {}
         except Exception:
-            # Пробер ещё не написал первый статус — это «пока не знаю»,
-            # а не «не запускается»: причину тут искать нельзя.
-            return {"up": False, "daemon": self.daemon_installed()}
-        if time.time() - st.get("updated", 0) > 15:
-            return {"up": False, "daemon": self.daemon_installed()}
-        if not st.get("up"):
-            st["why"] = self.why_down()
-        st["err_count"] = self.err_count()
+            st = {}             # пробер ещё не написал первый статус
+        st["up"] = bool(st.get("up"))
+        st["err_count"] = self.err_count() if st else 0
         st["daemon"] = self.daemon_installed()
+
+        # Операция и её исход. Раньше причину отказа угадывали по фразам в
+        # логе, и половины фраз в списке не было — окно писало «выключено»,
+        # когда служба падала на битом конфиге. Теперь служба пишет причину
+        # сама (vpn: fail_start), а контроллер добавляет свои таймауты.
+        op = (self.ctrl.snapshot() if self.ctrl is not None
+              else {"phase": "idle", "step": "", "busy": False,
+                    "error": "", "error_log": []})
+        st["op"] = {"phase": op["phase"], "step": op["step"], "busy": op["busy"]}
+        # Ошибку при поднятом туннеле не показываем: значит, его подняли
+        # уже после неё, и она устарела.
+        st["error"] = "" if st["up"] else op["error"]
+        st["error_log"] = op["error_log"] if st["error"] else []
         return st
 
-    # Строки, по которым видно, что туннель не поднялся, а не просто выключен.
-    FATAL = ("конфиг не прошёл проверку", "конфиг неоднозначен",
-             "не найден корпоративный", "не найден личный", "нет профиля",
-             "нет маршрута по умолчанию", "не удалось определить адреса пиров",
-             "упал на старте", "не поднялся за", "FATAL")
-
     def session(self):
-        """Строки только последнего запуска демона.
-
-        Демон дописывает свежий лог при перезапусках, поэтому в файле лежит
-        несколько попыток. Без отсечки причина от прошлой, неудачной, попадала
-        бы в окно поверх нормально работающего туннеля.
-        """
-        lines = self.tail()
-        for i in range(len(lines) - 1, -1, -1):
-            if lines[i].startswith("==="):
-                return lines[i:]
-        return lines
-
-    def why_down(self):
-        for line in reversed(self.session()):
-            if any(m in line for m in self.FATAL):
-                return line.strip()[:160]
-        return ""
+        """Строки только последнего запуска службы."""
+        return control.last_session(self.tail())
 
     def err_count(self):
         """Счётчик ошибок за текущий запуск.
@@ -345,21 +339,7 @@ class Window:
         return out
 
     def tail(self):
-        path = os.path.join(self.state, "ui.log")
-        try:
-            size = os.path.getsize(path)
-            with open(path, "rb") as fh:
-                # Читаем только хвост: sing-box пишет строку на соединение, за
-                # четверть часа набегают сотни килобайт, а перечитывается это
-                # каждые две секунды.
-                fh.seek(max(0, size - 220_000))
-                raw = fh.read().decode("utf-8", "replace")
-        except OSError:
-            return []
-        # Демон пишет лог через `exec >>`, без снятия раскраски: ANSI-коды
-        # оставались в строках, и фильтр «только ошибки» не находил ни одной,
-        # потому что перед словом ERROR стоял не пробел, а \x1b[31m.
-        return ANSI.sub("", raw).splitlines()[-TAIL:]
+        return control.read_tail(os.path.join(self.state, "ui.log"), TAIL)
 
     # -------------------------------------------------------------- приём
 
@@ -379,14 +359,13 @@ class Window:
         elif name == "rendered":
             self.log(f"окно: отрисовано {arg}")
         elif name == "start":
-            self.command("kickstart", "-k", "system/local.singbox-lx")
+            self.ctrl.start()
         elif name == "stop":
-            err = (self.stop() if self.stop
-                   else self.launchctl("kill", "INT", "system/local.singbox-lx"))
-            if err:
-                self.eval(f"failed({_js(err)})")
+            self.ctrl.stop()
         elif name == "restart":
-            self.command("kickstart", "-k", "system/local.singbox-lx")
+            self.ctrl.restart()
+        elif name == "dismiss_error":
+            self.ctrl.dismiss()
         elif name == "logs":
             self.eval(f"call('renderLogs', {_js(self.tail())})")
         elif name == "info":
@@ -464,18 +443,6 @@ class Window:
             return
         self.log("служба установлена")
         self.push()
-
-    def command(self, *args):
-        """Команда службе с показом ошибки в окне.
-
-        Прямой self.launchctl молча глотает отказ: без правила в sudoers кнопка
-        просто висела «включаю…» до таймаута и отпускалась без объяснений.
-        """
-        err = self.launchctl(*args)
-        if err:
-            self.eval(f"failed({_js(err)})")
-            return False
-        return True
 
     SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE")
 
@@ -561,8 +528,7 @@ class Window:
         self.eval("closeSheet()")
         # Домены попадают в конфиг при сборке, то есть при старте туннеля.
         if self.status().get("up"):
-            self.eval("restarting()")
-            self.command("kickstart", "-k", f"system/{LABEL}")
+            self.ctrl.restart()
         self.push()
 
     def show_info(self, key):
@@ -617,8 +583,7 @@ class Window:
             return
 
         if up:
-            self.eval("restarting()")
-            self.command("kickstart", "-k", "system/local.singbox-lx")
+            self.ctrl.restart()
         self.push()
 
     def add_config(self, kind):
@@ -679,8 +644,7 @@ class Window:
         active = [c["name"] for c in self.configs()["personal"] if c["active"]]
         touches_active = kind == "corp" or base[:-5] in active
         if touches_active and self.status().get("up"):
-            self.eval("restarting()")
-            self.command("kickstart", "-k", "system/local.singbox-lx")
+            self.ctrl.restart()
         self.push()
 
     def edit_config(self, name):

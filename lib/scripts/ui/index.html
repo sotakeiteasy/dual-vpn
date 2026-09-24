@@ -1,6 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>VPN-lx</title>
+<title>DualVPN</title>
 <style>
 :root {
   color-scheme: light dark;
@@ -214,6 +214,47 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
                -webkit-user-select: text; user-select: text; }
 .field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .fhint { display: block; color: var(--dim); font-size: 11px; margin-top: 3px; }
+
+/* Ошибка старта: причина словами и хвост лога прямо тут — искать её по
+   логу справа, среди сотен строк sing-box, никто не станет. */
+#errcard { padding: 11px 13px; display: flex; flex-direction: column; gap: 8px;
+           border-color: #d13b3040; }
+#err-more { white-space: pre-wrap; word-break: break-word;
+            -webkit-user-select: text; user-select: text; }
+#err-log { margin: 0; max-height: 150px; overflow: auto; padding: 7px 9px;
+           border-radius: 6px; background: var(--logbg); border: 1px solid var(--line);
+           font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+           /* Без переноса: трейсбек, порубленный по ширине колонки, не читается.
+              Длинная строка прокручивается вбок. */
+           white-space: pre; color: var(--dim);
+           -webkit-user-select: text; user-select: text; }
+#err-log .err { color: var(--bad); }
+.btnrow { display: flex; gap: 7px; }
+
+/* Операция идёт — окно закрыто целиком. Любое нажатие посреди выключения —
+   гонка с уборкой маршрутов, а кнопка, которая «не нажимается», хуже, чем
+   честное «подожди». Последние строки лога — чтобы было видно, что процесс
+   идёт, а не завис. */
+#busy { position: fixed; inset: 0; z-index: 50; display: flex;
+        align-items: center; justify-content: center;
+        background: color-mix(in srgb, var(--bg) 72%, transparent);
+        -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
+#busy-box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+            box-shadow: 0 12px 40px #00000030; padding: 18px 20px; width: 420px;
+            max-width: calc(100vw - 32px); display: flex; flex-direction: column;
+            align-items: center; gap: 8px; text-align: center; }
+#busy-title { font-size: 15px; font-weight: 600; }
+#busy-step { color: var(--dim); min-height: 1.45em; }
+#busy-log { align-self: stretch; margin: 6px 0 0; padding: 7px 9px; border-radius: 6px;
+            background: var(--logbg); border: 1px solid var(--line); text-align: left;
+            font: 10.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis;
+            min-height: calc(4 * 1.5em + 14px); }
+#busy-log:empty { display: none; }
+.spinner { width: 22px; height: 22px; border-radius: 50%;
+           border: 2.5px solid #80808040; border-top-color: var(--text);
+           animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>
 
 <div id="side">
@@ -226,6 +267,15 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
       </div>
     </div>
     <div id="tunnels"></div>
+  </div>
+
+  <div id="errcard" class="card" hidden>
+    <div id="err-more"></div>
+    <pre id="err-log"></pre>
+    <div class="btnrow">
+      <button id="err-open-log">Весь лог</button>
+      <button id="err-dismiss">Скрыть</button>
+    </div>
   </div>
 
   <button id="btn-install" class="primary" hidden>Установить службу…</button>
@@ -276,6 +326,16 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
   </div>
 </div>
 
+<div id="busy" hidden>
+  <div id="busy-box">
+    <div class="spinner"></div>
+    <div id="busy-title"></div>
+    <div id="busy-step"></div>
+    <pre id="busy-log"></pre>
+  </div>
+</div>
+
+<script src="view.js"></script>
 <script>
 // Мост в Python: сообщения туда, вызовы render/renderLogs — обратно.
 const send = (name, arg) =>
@@ -298,19 +358,7 @@ const esc = t => String(t).replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 let LAST = {};
-let PENDING = null;    // команда отправлена, состояние ещё не догнало
-
-// Рестарт нельзя ждать сравнением с желаемым состоянием: жмут его при поднятом
-// туннеле, и «уже как надо» получается сразу. Ждём полный цикл: упал и поднялся.
-function busyNow(s) {
-  if (!PENDING) return false;
-  if (Date.now() - PENDING.at > 25000) return false;   // страховка от залипания
-  if (PENDING.mode === 'restart') {
-    if (!s.up) PENDING.sawDown = true;
-    return !(PENDING.sawDown && s.up);
-  }
-  return s.up !== PENDING.want;
-}
+let LOGLINES = [];     // последние строки лога — для окна ожидания
 
 // Каждая ветка отрисовки отчитывается один раз: если в ней исключение,
 // сообщение не придёт, и selftest это увидит. Иначе «страница загрузилась»
@@ -319,88 +367,68 @@ const done = {};
 const prev = {};      // последняя отрисованная разметка, чтобы не топтать DOM
 const tick = w => { if (!done[w]) { done[w] = 1; send('rendered', w); } };
 
+const $ = id => document.getElementById(id);
+
 function render(s) {
   LAST = s;
-  const up = s.up, corp = !!s.corp_ip, leak = s.v6_leak;
+  const v = viewModel(s);
 
-  // Четыре состояния, а не два: «корп не отвечает» — отдельный случай,
-  // при котором личный туннель работает и интернет есть.
-  // Первый запуск: без службы кнопки бессмысленны, поэтому вместо них
-  // предложение её поставить — иначе человек нажимает «Включить» и ничего
-  // не происходит.
-  const noDaemon = s.daemon === false;
-
-  let cls = 'off', title = 'Выключено', sub = 'туннели не подняты';
-  if (noDaemon) { cls='warn'; title='Нужна установка';
-                  sub='фоновая служба ещё не поставлена'; }
-  else if (leak) { cls='bad';  title='Утечка IPv6';        sub='часть трафика идёт мимо туннеля: ' + leak; }
-  // Не поднялся и не просто выключен — показываем причину, а не пустоту.
-  else if (!up && s.why) { cls='bad'; title='Не запускается'; sub = s.why; }
-  else if (!up)  { cls='off';  title='Выключено';          sub='туннели не подняты'; }
-  // Заголовок обязан отражать все три строки ниже, иначе получается прямое
-  // противоречие: сверху «всё работает», а в личном — «мимо туннеля».
-  else if (s.exit_state === 'leak') { cls='bad'; title='Трафик мимо туннеля';
-                                      sub='тебя видно адресом провайдера ' + (s.exit_ip || ''); }
-  else if (!corp){ cls='warn'; title='Корп не отвечает';   sub='личный туннель работает, интернет есть'; }
-  else           { cls='ok';   title='Всё работает';       sub='оба туннеля подняты'; }
-
-  document.getElementById('dot').className = cls;
-  document.getElementById('state-title').textContent = title;
-  const subEl = document.getElementById('state-sub');
-  // Сообщения (ошибка команды, «перезапускаю») красят эту строку. Без явного
+  $('dot').className = v.cls;
+  $('state-title').textContent = v.title;
+  const subEl = $('state-sub');
+  // Сообщения (ошибка действия с файлом) красят эту строку. Без явного
   // сброса цвет оставался, и обычный текст показывался тревожным.
-  if (!NOTICE) { subEl.textContent = sub; subEl.style.color = ''; }
+  if (!NOTICE) { subEl.textContent = v.sub || '\u00a0'; subEl.style.color = ''; }
 
-  const row = (name, val, state, label) =>
-    `<div class="tun"><span class="tun-name">${name}</span>
-       <span class="tun-val">${val}</span>
-       <span class="chip ${state}">${label}</span></div>`;
+  const tunnels = v.rows.map(r =>
+    `<div class="tun"><span class="tun-name">${esc(r.name)}</span>
+       <span class="tun-val">${esc(r.value)}</span>
+       ${r.label ? `<span class="chip ${r.chip}">${esc(r.label)}</span>` : ''}</div>`).join('');
+  if (tunnels !== prev.tunnels) { prev.tunnels = tunnels; $('tunnels').innerHTML = tunnels; }
+  $('tunnels').hidden = !v.rows.length;
 
-  document.getElementById('tunnels').innerHTML =
-    row('личный', up ? (s.exit_ip || '—') : '—',
-        !up ? 'off' : s.exit_state === 'leak' ? 'bad'
-            : s.exit_state === 'tunnel' ? 'ok' : 'off',
-        !up ? 'выключен' : s.exit_state === 'leak' ? 'мимо туннеля'
-            : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
-    row('корп', up ? (s.corp_ip || '—') : '—',
-        !up ? 'off' : (corp ? 'ok' : 'bad'),
-        !up ? 'выключен' : (corp ? 'отвечает' : 'молчит')) +
-    row('выход', up ? [s.exit_country, s.exit_city].filter(Boolean).join(' ') || '—' : '—',
-        'off', s.err_count ? s.err_count + ' ошибок' : 'без ошибок');
+  renderError(v.error);
+  renderBusy(v.busy);
 
-  // Пока команда не отработала, состояние ещё старое. Без этого кнопка
-  // выглядела мёртвой: нажал — ничего не изменилось, и хочется нажать снова.
-  const t = document.getElementById('btn-toggle');
-  const r = document.getElementById('btn-restart');
-  const wasRestart = PENDING && PENDING.mode === 'restart';
-  const busy = busyNow(s);
-  if (PENDING && !busy) {
-    PENDING = null;
-    // Перезапуск закончился раньше таймаута — незачем держать подпись
-    // «применяю конфиг», пока заголовок говорит уже что-то другое.
-    if (wasRestart && NOTICE) { NOTICE = null; clearTimeout(notice.t); }
-  }
+  const t = $('btn-toggle'), r = $('btn-restart');
+  t.textContent = v.toggle.label;
+  t.classList.toggle('primary', v.toggle.primary);
+  t.disabled = v.toggle.disabled;
+  r.disabled = v.restart.disabled;
 
-  t.disabled = r.disabled = busy;
-  t.classList.toggle('busy', busy);
-  r.classList.toggle('busy', busy);
-  if (busy && wasRestart) {
-    t.textContent = up ? 'Выключить' : 'Включить';
-    r.textContent = 'перезапускаю…';
-  } else if (busy) {
-    t.textContent = PENDING.want ? 'включаю…' : 'выключаю…';
-    r.textContent = 'Перезапустить';
-  } else {
-    t.textContent = up ? 'Выключить' : 'Включить';
-    t.classList.toggle('primary', !up);
-    r.textContent = 'Перезапустить';
-    r.disabled = !up;
-  }
-  document.getElementById('btn-install').hidden = !noDaemon;
-  document.getElementById('actions').hidden = noDaemon;
-  document.getElementById('confs-wrap').classList.toggle('locked', up);
-  document.getElementById('lockhint').hidden = !up;
+  $('btn-install').hidden = !v.install;
+  $('actions').hidden = v.install;
+  $('confs-wrap').classList.toggle('locked', v.locked);
+  $('lockhint').hidden = !v.locked;
   tick('status');
+}
+
+function renderError(e) {
+  $('errcard').hidden = !e;
+  if (!e) return;
+  $('err-more').textContent = e.more;
+  $('err-more').hidden = !e.more;
+  const html = e.log.map(l => {
+    const bad = / ERROR |^ERROR|FATAL|Traceback|Error:/.test(l);
+    return `<div class="${bad ? 'err' : ''}">${esc(l)}</div>`;
+  }).join('');
+  if (html !== prev.errlog) {
+    prev.errlog = html;
+    $('err-log').innerHTML = html;
+    $('err-log').scrollTop = $('err-log').scrollHeight;
+  }
+  $('err-log').hidden = !e.log.length;
+}
+
+function renderBusy(b) {
+  const box = $('busy');
+  box.hidden = !b;
+  if (!b) return;
+  closeMenu();
+  closeSheet();
+  $('busy-title').textContent = b.title;
+  $('busy-step').textContent = b.step;
+  $('busy-log').textContent = LOGLINES.slice(-4).join('\n');
 }
 
 function renderConfs(d) {
@@ -488,6 +516,8 @@ function fmtLine(l) {
 }
 
 function renderLogs(lines) {
+  LOGLINES = lines;
+  if (LAST.op && LAST.op.busy) $('busy-log').textContent = lines.slice(-4).join('\n');
   const q = document.getElementById('search').value.toLowerCase();
   const onlyErr = document.getElementById('only-err').checked;
   const box = document.getElementById('lines');
@@ -601,14 +631,10 @@ function notice(msg, color, ms) {
   notice.t = setTimeout(() => { NOTICE = null; render(LAST); }, ms);
 }
 
+// Ошибки действий с файлами и диалогами. Ошибки включения/выключения идут
+// отдельным путём — через состояние контроллера и карточку ошибки.
 function failed(msg) {
-  PENDING = null;                     // операция не пошла, кнопки отпускаем
   notice(msg, 'var(--bad)', 7000);
-}
-
-function restarting() {
-  PENDING = {mode: 'restart', at: Date.now(), sawDown: false};
-  notice('применяю конфиг, туннель перезапускается…', 'var(--dim)', 25000);
 }
 
 function renderVersion(v) {
@@ -689,12 +715,9 @@ function showConf(name, text) {
   document.getElementById('sheet').dataset.name = name;
 }
 
-document.getElementById('btn-toggle').onclick = () => {
-  const want = !LAST.up;
-  PENDING = {want, at: Date.now()};
-  send(want ? 'start' : 'stop');
-  render(LAST);                       // мгновенная реакция, не ждём опроса
-};
+// Кнопки только отправляют команду. Окно ожидания появится по сигналу
+// контроллера — он же решает, можно ли сейчас что-то начинать.
+document.getElementById('btn-toggle').onclick = () => send(LAST.up ? 'stop' : 'start');
 document.getElementById('btn-install').onclick = () => send('install_daemon');
 document.getElementById('btn-site').onclick = () => send('site');
 document.getElementById('sheet-load').onclick = () => send('load_site');
@@ -703,10 +726,14 @@ document.getElementById('sheet-save').onclick = () => {
   SITE_FIELDS.forEach(([k]) => { v[k] = document.getElementById('f-' + k).value; });
   send('save_site', v);
 };
-document.getElementById('btn-restart').onclick = () => {
-  PENDING = {mode: 'restart', at: Date.now(), sawDown: false};
-  send('restart');
-  render(LAST);
+document.getElementById('btn-restart').onclick = () => send('restart');
+document.getElementById('err-dismiss').onclick = () => send('dismiss_error');
+document.getElementById('err-open-log').onclick = () => {
+  showTab('log');
+  const onlyErr = document.getElementById('only-err');
+  if (onlyErr.checked) { onlyErr.checked = false; send('logs'); }
+  const box = document.getElementById('lines');
+  box.scrollTop = box.scrollHeight;
 };
 
 document.getElementById('side').onclick = e => {
@@ -726,14 +753,17 @@ document.getElementById('sheet-del').onclick =
 // он проверяет всю цепочку от ресурса в бандле до моста обратно.
 send('ready');
 
-document.getElementById('tabs').onclick = e => {
-  const t = e.target.closest('.tab');
-  if (!t) return;
-  const log = t.dataset.tab === 'log';
-  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
+function showTab(name) {
+  const log = name === 'log';
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x.dataset.tab === name));
   document.getElementById('logbar').hidden = !log;
   document.getElementById('lines').hidden = !log;
   document.getElementById('how').hidden = log;
+}
+
+document.getElementById('tabs').onclick = e => {
+  const t = e.target.closest('.tab');
+  if (t) showTab(t.dataset.tab);
 };
 
 document.getElementById('side').addEventListener('click', e => {
