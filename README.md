@@ -115,7 +115,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 Скрипт сам создаёт окружение, ставит зависимости, рисует значок и собирает:
 
 * `dist\DualVPN-Portable.exe` — портативная версия, один файл;
-* `dist\DualVPN\` — установочная пара `DualVPN.exe` (трей) и `dualvpn.exe`
+* `dist\DualVPN\` — установочная пара `DualVPN-Tray.exe` (трей) и `dualvpn.exe`
   (CLI и служба);
 * `installer\Output\DualVPN-<версия>-setup.exe` — если найден
   [Inno Setup](https://jrsoftware.org/isdl.php). Без него сборка

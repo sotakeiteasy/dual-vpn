@@ -1,6 +1,6 @@
 # PyInstaller: три exe за один проход.
 #
-#   DualVPN.exe           оконный    значок в трее (установленная версия)
+#   DualVPN-Tray.exe      оконный    значок в трее (установленная версия)
 #   dualvpn.exe           консольный CLI и хост службы
 #   DualVPN-Portable.exe  оконный    всё в одном файле, без установки
 #
@@ -57,9 +57,12 @@ cli_exe = EXE(
     cli_pyz, cli_a.scripts, [], exclude_binaries=True,
     name="dualvpn", console=True, icon=ICON,
 )
+# Имя трея обязано отличаться от CLI не только регистром: в Windows
+# DualVPN.exe и dualvpn.exe — один файл, трей ложился поверх CLI, и установщик,
+# звавший «dualvpn.exe service install», запускал трей и висел на нём.
 tray_exe = EXE(
     tray_pyz, tray_a.scripts, [], exclude_binaries=True,
-    name="DualVPN", console=False, icon=ICON,
+    name="DualVPN-Tray", console=False, icon=ICON,
 )
 
 COLLECT(

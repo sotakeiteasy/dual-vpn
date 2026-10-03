@@ -14,7 +14,7 @@
 #endif
 
 #define MyName "DualVPN"
-#define MyExe "DualVPN.exe"
+#define MyExe "DualVPN-Tray.exe"
 #define MyCli "dualvpn.exe"
 
 [Setup]

@@ -57,6 +57,24 @@ try {
     $Dist = Join-Path $Root 'dist\DualVPN'
     Copy-Item (Join-Path $Bin 'sing-box.exe') $Dist -Force
     Copy-Item (Join-Path $Bin 'wintun.dll') $Dist -Force
+
+    # Дымовая проверка: установщик зовёт dualvpn.exe для службы, и если под
+    # этим именем окажется не CLI (так было, когда трей назывался DualVPN.exe
+    # и ложился поверх), установка зависает намертво. Лучше упасть здесь.
+    $Cli = Join-Path $Dist 'dualvpn.exe'
+    $p = Start-Process $Cli -ArgumentList 'version' -NoNewWindow -PassThru `
+        -RedirectStandardOutput (Join-Path $Root 'build\cli-version.txt')
+    if (-not $p.WaitForExit(30000)) {
+        Stop-Process -Id $p.Id -Force
+        throw 'dualvpn.exe version не ответил за 30 с — под этим именем не CLI?'
+    }
+    $out = Get-Content (Join-Path $Root 'build\cli-version.txt') -Raw
+    if ($out -notmatch [regex]::Escape($Version)) {
+        throw "dualvpn.exe version: ждали $Version, получили: $out"
+    }
+    if (-not (Test-Path (Join-Path $Dist 'DualVPN-Tray.exe'))) {
+        throw 'нет DualVPN-Tray.exe в dist\DualVPN'
+    }
 } finally {
     Pop-Location
 }

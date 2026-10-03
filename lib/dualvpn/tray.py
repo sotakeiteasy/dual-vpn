@@ -230,7 +230,7 @@ class Tray:
         import sys
 
         if getattr(sys, "frozen", False):
-            # sys.executable здесь — сам трей (DualVPN.exe). У портативной
+            # sys.executable здесь — сам трей (DualVPN-Tray.exe). У портативной
             # версии это же имя exe одно на всё, и у него есть ветка "window" —
             # ею и пользуемся. У установленной версии трей и окно — разные
             # exe, и окно живёт в соседнем dualvpn.exe.
