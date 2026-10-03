@@ -518,15 +518,27 @@ def v6_blocked():
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
-# Свой экземпляр kernel32 с прописанными типами: по умолчанию ctypes считает
-# результат int, и 64-битный дескриптор процесса мог бы обрезаться.
-_k32 = ctypes.WinDLL("kernel32")
-_k32.OpenProcess.restype = ctypes.c_void_p
-_k32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
-_k32.QueryFullProcessImageNameW.argtypes = (
-    ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p,
-    ctypes.POINTER(ctypes.c_ulong))
-_k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+_k32 = None
+
+
+def _kernel32():
+    """Свой экземпляр kernel32 с прописанными типами: по умолчанию ctypes
+    считает результат int, и 64-битный дескриптор процесса мог бы обрезаться.
+
+    Загружается при первом вызове, а не при импорте: тесты гоняются на Linux,
+    где ctypes.WinDLL нет, и модуль должен импортироваться и там.
+    """
+    global _k32
+    if _k32 is None:
+        k32 = ctypes.WinDLL("kernel32")
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+        k32.QueryFullProcessImageNameW.argtypes = (
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_ulong))
+        k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        _k32 = k32
+    return _k32
 
 
 def pids_of(exe_path):
@@ -542,9 +554,9 @@ def pids_of(exe_path):
     try:
         import win32process
         pids = win32process.EnumProcesses()
+        k32 = _kernel32()
     except Exception:                                      # noqa: BLE001
         return _pids_of_ps(target)
-    k32 = _k32
     out = []
     for pid in pids:
         h = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
