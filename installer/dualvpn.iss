@@ -68,7 +68,12 @@ Name: "{commonappdata}\{#MyName}\state\logs"; Flags: uninsneveruninstall
 Name: "{group}\{#MyName}"; Filename: "{app}\{#MyExe}"
 Name: "{group}\Удалить {#MyName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyName}"; Filename: "{app}\{#MyExe}"; Tasks: desktopicon
-Name: "{userstartup}\{#MyName}"; Filename: "{app}\{#MyExe}"; Tasks: autorun
+; Автозапуск трея — задачей планировщика (см. RegisterTrayTask в [Code]).
+
+[InstallDelete]
+; Ярлык автозапуска из прошлых версий: трей теперь требует администратора,
+; и из «Автозагрузки» Windows его просто не запустит.
+Type: files; Name: "{userstartup}\{#MyName}.lnk"
 
 [Run]
 ; --- Права на данные.
@@ -105,8 +110,11 @@ Filename: "{sys}\sc.exe"; \
 Filename: "{app}\{#MyCli}"; Parameters: "service start"; \
   Flags: runhidden waituntilterminated
 
+; runascurrentuser: трей требует администратора, а установщик уже с правами.
+; По умолчанию postinstall запускает от исходного пользователя без прав, и
+; CreateProcess на exe с requireAdministrator падает с ошибкой 740.
 Filename: "{app}\{#MyExe}"; Description: "Запустить {#MyName}"; \
-  Flags: nowait postinstall skipifsilent
+  Flags: nowait postinstall skipifsilent runascurrentuser
 
 [UninstallRun]
 ; Трей — отдельный процесс со своим списком открытых файлов в _internal\
@@ -115,6 +123,8 @@ Filename: "{app}\{#MyExe}"; Description: "Запустить {#MyName}"; \
 ; и трей друг с другом никак не связаны. Убиваем первым делом, до всего.
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#MyExe} /F"; \
   Flags: runhidden waituntilterminated; RunOnceId: "KillTray"
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyName} Tray"" /F"; \
+  Flags: runhidden waituntilterminated; RunOnceId: "DelTrayTask"
 ; Порядок важен: сначала опустить туннель, потом снимать службу. Иначе
 ; маршруты и правило брандмауэра останутся висеть, и сеть будет смотреть
 ; в удалённый адаптер.
@@ -131,13 +141,53 @@ Filename: "{app}\{#MyCli}"; Parameters: "service remove"; \
 Type: filesandordirs; Name: "{commonappdata}\{#MyName}\state"
 
 [Code]
-// Перед установкой закрываем трей: иначе файлы заняты и обновление падает
-// на середине, оставляя половину старой версии.
+// Перед установкой закрываем трей и останавливаем службу: иначе файлы заняты
+// (служба работает из {app}\dualvpn.exe) и обновление падает на середине,
+// оставляя половину старой версии. net stop, а не sc stop: ждёт, пока служба
+// действительно остановится и опустит туннель.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#MyExe} /F',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\net.exe'), 'stop {#MyName}',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
+end;
+
+// Автозапуск трея при входе. Задача планировщика с наивысшими правами, а не
+// ярлык в «Автозагрузке»: трей требует администратора, и оттуда Windows его
+// не запускает. Без ограничения по времени (по умолчанию задачу снимают
+// через 72 часа) и без остановки при переходе на батарею.
+procedure RegisterTrayTask;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -ExecutionPolicy Bypass -Command "' +
+    '$u = [Security.Principal.WindowsIdentity]::GetCurrent().Name; ' +
+    '$a = New-ScheduledTaskAction -Execute ''' + ExpandConstant('{app}\{#MyExe}') + '''; ' +
+    '$t = New-ScheduledTaskTrigger -AtLogOn -User $u; ' +
+    '$p = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest; ' +
+    '$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) ' +
+    '-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew; ' +
+    'Register-ScheduledTask -TaskName ''{#MyName} Tray'' -Action $a -Trigger $t ' +
+    '-Principal $p -Settings $s -Force | Out-Null"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if WizardIsTaskSelected('autorun') then
+      RegisterTrayTask
+    else
+      // Галочку сняли при обновлении — убираем задачу прошлой установки.
+      Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "{#MyName} Tray" /F',
+           '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
 end;

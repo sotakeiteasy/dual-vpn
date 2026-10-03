@@ -63,6 +63,11 @@ cli_exe = EXE(
 tray_exe = EXE(
     tray_pyz, tray_a.scripts, [], exclude_binaries=True,
     name="DualVPN-Tray", console=False, icon=ICON,
+    # Трей всегда от администратора: UAC один раз при запуске, а не на
+    # каждое добавление конфига. Окно запускается из трея и наследует права.
+    # Автозапуск поэтому — задачей планировщика, а не папкой «Автозагрузка»:
+    # оттуда Windows программы с requireAdministrator не запускает.
+    uac_admin=True,
 )
 
 COLLECT(
