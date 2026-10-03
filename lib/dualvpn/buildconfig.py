@@ -54,6 +54,45 @@ PERSONAL_PAT = (r"^personal\.conf$", r"^(awg|amnezia).*\.conf$")
 CORP_PAT = (r"^corp\.conf$", r"^wg[-_0-9].*\.conf$", r"^wg\.conf$")
 
 
+def is_corp_name(name):
+    """Примет ли сборка файл с таким именем (с .conf или без) за рабочий."""
+    fname = name if name.lower().endswith(".conf") else f"{name}.conf"
+    return any(re.match(p, fname, re.IGNORECASE) for p in CORP_PAT)
+
+
+def stored_name(kind, name):
+    """Под каким именем сохранить добавленный конфиг, чтобы сборка поняла его
+    правильно. Имя решает, каким туннелем станет файл, поэтому подгоняем его,
+    а не полагаемся на то, что человек назвал файл как надо.
+
+    corp     — всегда corp: рабочий один, и замена должна его перезаписать.
+    personal — как назван, но не похожим на рабочий: wg-home стал бы вторым
+               рабочим и сборка не прошла бы. Такому даём приставку personal-.
+    """
+    stem = (name or "").strip()
+    if stem.lower().endswith(".conf"):
+        stem = stem[:-5]
+    if kind == "corp":
+        return "corp"
+    if not stem:
+        return "personal"
+    if is_corp_name(stem):
+        return f"personal-{stem}"
+    return stem
+
+
+def check_conf_text(text):
+    """Похож ли текст на конфиг WireGuard. None — да, иначе причина отказа.
+
+    Ловит случайно выбранный не тот файл (site.env, пустой) до того, как он
+    ляжет в conf\\ вместо ключей.
+    """
+    sections = {line.strip().lower() for line in (text or "").splitlines()}
+    if "[interface]" not in sections or "[peer]" not in sections:
+        return "это не конфиг WireGuard: нет секции [Interface] или [Peer]"
+    return None
+
+
 def personal_patterns():
     """Шаблоны для личного конфига.
 

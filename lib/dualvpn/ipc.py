@@ -122,15 +122,22 @@ class Server:
         # Кто спрашивает, выясняем строго на этом соединении: олицетворяем
         # клиента и смотрим его токен. Судить по чему-то, что прислал он сам,
         # нельзя — это он и подделает.
+        #
+        # ImpersonateNamedPipeClient живёт в win32security, не в win32pipe.
+        # Вызов через win32pipe падал с AttributeError, тихий except делал из
+        # этого «не администратор», и команды с правами отклонялись всем.
+        # Поэтому сбой проверки теперь пишем в лог: отказ остаётся отказом,
+        # но причину видно.
+        import win32security
         is_admin = False
         try:
-            win32pipe.ImpersonateNamedPipeClient(pipe)
+            win32security.ImpersonateNamedPipeClient(pipe)
             is_admin = _client_is_admin()
-        except Exception:
+        except Exception as exc:
             is_admin = False
+            self.log(f"канал: не проверить права клиента: {exc!r}")
         finally:
             try:
-                import win32security
                 win32security.RevertToSelf()
             except Exception:
                 pass

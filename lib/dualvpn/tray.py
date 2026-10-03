@@ -1,7 +1,9 @@
 """Значок в трее: включить, выключить, выбрать профиль, открыть окно.
 
-Обычный пользовательский процесс. Всё, что требует прав, уходит в службу через
-именованный канал, поэтому UAC здесь не появляется никогда.
+Туннелем владеет служба, трей шлёт ей команды через именованный канал.
+Установленный трей запускается от администратора (манифест, см. dualvpn.spec):
+конфиги с ключами служба принимает только от администратора, и так UAC
+спрашивается один раз при запуске, а не на каждое добавление конфига.
 
 Значок рисуется кодом, а не берётся из файла: он маленький, состояний у него
 четыре, и держать четыре .ico в сборке ради этого незачем. Заодно он сам
@@ -10,7 +12,7 @@
 
 import threading
 
-from . import ipc, paths
+from . import buildconfig, ipc, paths
 
 POLL_EVERY = 3.0
 
@@ -146,6 +148,19 @@ class Tray:
                 "Включать при старте", self.on_autostart,
                 checked=lambda _i: bool(self.status.get("autostart"))),
             pystray.Menu.SEPARATOR,
+            # Как и в окне, при поднятом туннеле конфиги не меняем: новый файл
+            # подействовал бы только после перезапуска, а до того работал бы
+            # старый — «поменял, а ничего не изменилось».
+            pystray.MenuItem(
+                "Добавить рабочий конфиг…", lambda: self.on_add_config("corp"),
+                enabled=self._can_edit),
+            pystray.MenuItem(
+                "Добавить личный конфиг…", lambda: self.on_add_config("personal"),
+                enabled=self._can_edit),
+            pystray.MenuItem(
+                "Загрузить site.env…", self.on_load_site,
+                enabled=self._can_edit),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Окно…", self.on_window),
             pystray.MenuItem("Выход", self.on_quit),
         )
@@ -157,7 +172,7 @@ class Tray:
         # Рабочий конфиг подключается всегда и выбора не требует — в списке
         # только личные, иначе выбрать «corp» личным туннелем было бы можно.
         names = [n for n in (self.status.get("profiles") or [])
-                 if not _looks_corp(n)]
+                 if not buildconfig.is_corp_name(n)]
         if not names:
             yield pystray.MenuItem("(конфигов нет)", None, enabled=False)
             return
@@ -217,6 +232,61 @@ class Tray:
 
     def on_autostart(self):
         self._do("set-autostart", on=not self.status.get("autostart"))
+
+    # ---------------------------------------------------------------- конфиги
+
+    def _can_edit(self, _item=None):
+        return (bool(self.status) and not self.status.get("up")
+                and not self.status.get("busy"))
+
+    def on_add_config(self, kind):
+        """Файл .conf в службу. Имя под тип туннеля подгоняет служба: рабочий
+        ложится как corp.conf и заменяет прежние, личный становится активным."""
+        def work():
+            picked = _pick_file(
+                "Рабочий конфиг WireGuard" if kind == "corp"
+                else "Личный конфиг WireGuard / AmneziaWG",
+                "Конфиги WireGuard (*.conf)\0*.conf\0Все файлы\0*.*\0")
+            if not picked:
+                return
+            path, text = picked
+            import os
+            name = os.path.splitext(os.path.basename(path))[0]
+            reply = self._call("add-config", name=name, text=text, kind=kind)
+            if reply is not None:
+                what = "рабочий" if kind == "corp" else "личный"
+                self._notify(f"{what} конфиг добавлен: {reply.get('name')}.conf")
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_load_site(self):
+        """site.env — домены и DNS рабочей сети — целиком из файла."""
+        def work():
+            picked = _pick_file(
+                "Настройки рабочей сети (site.env)",
+                "site.env\0*.env\0Все файлы\0*.*\0")
+            if not picked:
+                return
+            _path, text = picked
+            if "[interface]" in text.lower():
+                self._notify("это конфиг WireGuard, а не site.env — "
+                             "добавь его пунктом «Добавить … конфиг»")
+                return
+            if self._call("set-site", text=text) is not None:
+                self._notify("настройки рабочей сети обновлены")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _call(self, op, **payload):
+        """Команда в службу с уведомлением об ошибке. None — не вышло."""
+        try:
+            reply = ipc.call(op, **payload)
+        except ipc.NotRunning as exc:
+            self._notify(str(exc))
+            return None
+        if not reply.get("ok"):
+            self._notify(reply.get("error") or "не вышло")
+            return None
+        self._poll_once()
+        return reply
 
     def on_window(self):
         """Окно — в отдельном процессе.
@@ -312,10 +382,31 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def _looks_corp(name):
-    low = name.lower()
-    return (low in ("corp", "wg") or low.startswith("wg-")
-            or low.startswith("wg0-"))
+def _pick_file(title, filters):
+    """Стандартный диалог «Открыть». (путь, текст) или None, если отменили.
+
+    Зовётся из рабочего потока, а не из потока значка: диалог модальный, и
+    меню на всё время выбора иначе застыло бы. COM диалогу нужен свой на поток.
+    utf-8-sig: Блокнот сохраняет с BOM, и без этого «[Interface]» в первой
+    строке не узнавался бы.
+    """
+    import pythoncom
+    import pywintypes
+    import win32con
+    import win32gui
+
+    pythoncom.CoInitialize()
+    try:
+        path, _filter, _flags = win32gui.GetOpenFileNameW(
+            Title=title, Filter=filters,
+            Flags=win32con.OFN_EXPLORER | win32con.OFN_FILEMUSTEXIST
+            | win32con.OFN_HIDEREADONLY)
+    except pywintypes.error:
+        return None                     # отмена — это тоже error, с кодом 0
+    finally:
+        pythoncom.CoUninitialize()
+    with open(path, encoding="utf-8-sig", errors="replace") as fh:
+        return path, fh.read()
 
 
 def run():

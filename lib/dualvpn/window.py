@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from . import ipc, paths
+from . import buildconfig, ipc, paths
 
 POLL_EVERY = 2.0
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -207,10 +207,9 @@ class Api:
         active = st.get("profile") or "personal"
         corp, personal = [], []
         for n in names:
-            low = n.lower()
-            is_corp = (low in ("corp", "wg")
-                       or low.startswith("wg-") or low.startswith("wg0-")
-                       or (low.startswith("wg") and low[2:3].isdigit()))
+            # Те же правила, что у сборки: иначе окно показывало бы файл
+            # личным, а sing-box собирал бы его рабочим.
+            is_corp = buildconfig.is_corp_name(n)
             (corp if is_corp else personal).append(
                 {"name": n, "active": (not is_corp and n == active)})
         # Если активный профиль не выбран явно, подсвечиваем personal.
@@ -282,12 +281,10 @@ class Api:
         path = picked[0]
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
+        # Имя под тип туннеля подгоняет служба (buildconfig.stored_name):
+        # там же удаляются прежние рабочие и выбирается новый личный.
         name = os.path.splitext(os.path.basename(path))[0]
-        if kind == "corp" and not _looks_corp(name):
-            # Имя решает, каким туннелем станет файл, поэтому подгоняем его,
-            # а не полагаемся на то, что человек назвал файл правильно.
-            name = "corp"
-        reply = self._admin_call("add-config", name=name, text=text)
+        reply = self._admin_call("add-config", name=name, text=text, kind=kind)
         if not reply.get("ok"):
             self.js("failed", reply.get("error") or "не удалось добавить")
             return
@@ -349,12 +346,6 @@ def _format_env(values):
         if val:
             lines.append(f'{key}="{val}"')
     return "\n".join(lines) + "\n"
-
-
-def _looks_corp(name):
-    low = name.lower()
-    return (low in ("corp", "wg") or low.startswith("wg-")
-            or low.startswith("wg0-"))
 
 
 # ---------------------------------------------------------------- запуск

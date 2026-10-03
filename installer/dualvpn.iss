@@ -49,8 +49,11 @@ Name: "desktopicon"; Description: "Значок на рабочем столе";
   GroupDescription: "Дополнительно:"; Flags: unchecked
 
 [Files]
+; uninsrestartdelete: файл, который при удалении занят (служба журнала событий
+; держит servicemanager.pyd, если хоть раз показывала записи службы), удаляется
+; при перезагрузке, а не остаётся в Program Files навсегда.
 Source: "..\dist\DualVPN\*"; DestDir: "{app}"; \
-  Flags: ignoreversion recursesubdirs createallsubdirs
+  Flags: ignoreversion recursesubdirs createallsubdirs uninsrestartdelete
 ; Образцы конфигов кладём рядом с программой, а не в conf\: в conf\ лежат
 ; настоящие ключи, и подмешивать туда примеры при обновлении незачем.
 Source: "..\conf\*.example"; DestDir: "{app}\examples"; Flags: ignoreversion
@@ -130,7 +133,9 @@ Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyName} Tray"" /F";
 ; в удалённый адаптер.
 Filename: "{app}\{#MyCli}"; Parameters: "stop"; \
   Flags: runhidden waituntilterminated; RunOnceId: "StopTunnel"
-Filename: "{app}\{#MyCli}"; Parameters: "service stop"; \
+; net stop, а не «dualvpn service stop»: тот только посылает команду и сразу
+; выходит, и файлы ещё заняты процессом службы, когда их начинают удалять.
+Filename: "{sys}\net.exe"; Parameters: "stop {#MyName}"; \
   Flags: runhidden waituntilterminated; RunOnceId: "StopService"
 Filename: "{app}\{#MyCli}"; Parameters: "service remove"; \
   Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
@@ -139,6 +144,8 @@ Filename: "{app}\{#MyCli}"; Parameters: "service remove"; \
 ; Логи и рабочее состояние уносим, конфиги — нет: их клали руками, и
 ; восстанавливать ключи после переустановки человек не обязан.
 Type: filesandordirs; Name: "{commonappdata}\{#MyName}\state"
+; Всё, что появилось в папке программы уже после установки, — её же мусор.
+Type: filesandordirs; Name: "{app}"
 
 [Code]
 // Перед установкой закрываем трей и останавливаем службу: иначе файлы заняты
@@ -148,11 +155,32 @@ Type: filesandordirs; Name: "{commonappdata}\{#MyName}\state"
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
+  SmPyd, Old: String;
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#MyExe} /F',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\net.exe'), 'stop {#MyName}',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // Версии до 0.2.7 писали в журнал событий, и служба журнала держит
+  // servicemanager.pyd загруженным до перезагрузки: перезаписать его нельзя,
+  // и установка встала бы на «файл занят». Загруженную DLL можно
+  // переименовать — убираем её с дороги, а старую копию удалит перезагрузка.
+  SmPyd := ExpandConstant('{app}\_internal\win32\servicemanager.pyd');
+  if FileExists(SmPyd) and not DeleteFile(SmPyd) then
+  begin
+    Old := SmPyd + '.old';
+    DeleteFile(Old);
+    if RenameFile(SmPyd, Old) then
+    begin
+      RestartReplace(Old, '');
+      // И папки за ним — иначе после удаления программы и перезагрузки
+      // оставались бы пустые _internal\win32. Непустые Windows не тронет.
+      RestartReplace(ExtractFileDir(SmPyd), '');
+      RestartReplace(ExtractFileDir(ExtractFileDir(SmPyd)), '');
+      RestartReplace(ExpandConstant('{app}'), '');
+    end;
+  end;
   Result := '';
 end;
 
@@ -175,6 +203,20 @@ begin
     'Register-ScheduledTask -TaskName ''{#MyName} Tray'' -Action $a -Trigger $t ' +
     '-Principal $p -Settings $s -Force | Out-Null"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// Конфиги по умолчанию переживают удаление: в них ключи, и после
+// переустановки человек не обязан их восстанавливать. Но если удаляют совсем,
+// оставлять каталог молча — это мусор. Спрашиваем; по умолчанию «Нет».
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usPostUninstall) and not UninstallSilent then
+    if MsgBox('Удалить также конфиги и ключи VPN?' + #13#10 + #13#10 +
+              ExpandConstant('{commonappdata}\{#MyName}') + #13#10 + #13#10 +
+              'Если собираешься поставить DualVPN заново, ответь «Нет» — ' +
+              'конфиги останутся и подхватятся.',
+              mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+      DelTree(ExpandConstant('{commonappdata}\{#MyName}'), True, True, True);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

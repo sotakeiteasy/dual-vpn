@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 
-from . import ipc, paths, probe, tunnel, winnet
+from . import buildconfig, ipc, paths, probe, tunnel, winnet
 
 AUTOSTART_FILE = os.path.join(paths.STATE, "autostart")
 SERVICE_LOG = os.path.join(paths.LOGS, "service.log")
@@ -109,7 +109,8 @@ class Core:
             return {"ok": True, "autostart": self.autostart_enabled()}
         if op == "add-config":
             return self._add_config(payload.get("name", ""),
-                                    payload.get("text", ""))
+                                    payload.get("text", ""),
+                                    payload.get("kind", ""))
         if op == "remove-config":
             return self._remove_config(payload.get("name", ""))
         if op == "read-config":
@@ -215,14 +216,43 @@ class Core:
             raise ValueError(f"недопустимое имя конфига: {name!r}")
         return name
 
-    def _add_config(self, name, text):
+    def _add_config(self, name, text, kind=""):
+        """Кладёт конфиг в conf\\.
+
+        kind — corp или personal (окно и трей передают его всегда). С ним имя
+        подгоняется под то, как сборка различает туннели (buildconfig.stored_name):
+        рабочий заменяет все прежние рабочие, личный сразу становится активным.
+        Без kind — как есть, под переданным именем.
+        """
+        # BOM от Блокнота: с ним «[Interface]» в первой строке не узнаётся.
+        text = (text or "").lstrip("\ufeff")
+        bad = buildconfig.check_conf_text(text)
+        if bad:
+            return {"ok": False, "error": bad}
+        if kind in ("corp", "personal"):
+            name = buildconfig.stored_name(kind, name)
         name = self._safe_name(name)
         paths.ensure_dirs()
         path = os.path.join(paths.CONF, f"{name}.conf")
-        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        # Через временный файл: оборванная запись не оставит полконфига.
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
+        os.replace(tmp, path)
         self.log(f"→ добавлен конфиг {name}.conf")
-        return {"ok": True, "profiles": self._profiles()}
+
+        if kind == "corp":
+            # Рабочий может быть только один: при двух сборка не пройдёт.
+            for old in self._profiles():
+                if old != name and buildconfig.is_corp_name(old):
+                    try:
+                        os.remove(os.path.join(paths.CONF, f"{old}.conf"))
+                        self.log(f"→ удалён прежний рабочий конфиг {old}.conf")
+                    except OSError as exc:
+                        self.log(f"→ не удалить {old}.conf: {exc}")
+        elif kind == "personal":
+            self._set_profile(name)
+        return {"ok": True, "name": name, "profiles": self._profiles()}
 
     def _read_config(self, name):
         """Отдаёт конфиг целиком, вместе с ключами.
@@ -267,6 +297,7 @@ class Core:
             return ""
 
     def _set_site(self, text):
+        text = (text or "").lstrip("\ufeff")
         paths.ensure_dirs()
         with open(os.path.join(paths.CONF, "site.env"), "w",
                   encoding="utf-8", newline="\n") as fh:
@@ -293,7 +324,6 @@ class Core:
 
 def _service_class():
     """Класс службы собираем лениво: pywin32 нужен только здесь."""
-    import servicemanager
     import win32event
     import win32service
     import win32serviceutil
@@ -329,10 +359,11 @@ def _service_class():
                 win32event.SetEvent(self.wait_stop)
 
         def SvcDoRun(self):
-            servicemanager.LogMsg(
-                servicemanager.EVENTLOG_INFORMATION_TYPE,
-                servicemanager.PYS_SERVICE_STARTED,
-                (self._svc_name_, ""))
+            # В журнал событий Windows не пишем: источником сообщений там
+            # прописан _internal\win32\servicemanager.pyd, и служба журнала,
+            # показав запись, держит его загруженным до перезагрузки — после
+            # удаления программы в Program Files оставалась папка с ним.
+            # Запуск и так виден в нашем логе (Core.start).
             self.core.start()
             win32event.WaitForSingleObject(self.wait_stop, win32event.INFINITE)
 
