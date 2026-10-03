@@ -54,6 +54,7 @@ class Tray:
         self.icon = None
         self.state = "off"
         self.status = {}
+        self._last_menu_sig = None
         self.stop_event = threading.Event()
         # В портативной версии туннель держит этот же процесс, и выход из трея
         # обязан его опустить. В установленной — им владеет служба, и закрытие
@@ -92,13 +93,29 @@ class Tray:
         else:
             # Подпись меняется и без смены цвета: профиль, адрес выхода.
             self._refresh_title()
+        # pystray на Windows собирает меню один раз, в update_menu(), и потом
+        # показывает готовое. Перестраивать только при смене цвета мало: меню
+        # строилось до первого ответа службы, первый опрос давал тот же цвет
+        # «выключен», и пункты, зависящие от статуса, так и оставались серыми.
+        sig = self._menu_sig()
+        if sig != self._last_menu_sig:
+            self._last_menu_sig = sig
+            if self.icon is not None:
+                self.icon.update_menu()
+
+    def _menu_sig(self):
+        """То, от чего зависят подписи, галочки и доступность пунктов меню."""
+        st = self.status
+        return (bool(st), bool(st.get("up")), bool(st.get("busy")),
+                bool(st.get("autostart")), st.get("profile") or "",
+                tuple(st.get("profiles") or ()))
 
     def _refresh_icon(self):
         if self.icon is None:
             return
         self.icon.icon = _icon_image(self.state)
         self._refresh_title()
-        self.icon.update_menu()
+        # Меню перестраивает _poll_once по _menu_sig — здесь не нужно.
 
     def _refresh_title(self):
         if self.icon is None:

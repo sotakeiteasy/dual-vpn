@@ -25,6 +25,7 @@
 Команды туннеля идут в службу через канал — сами они систему не трогают.
 """
 
+import os
 import sys
 
 from . import ipc, paths
@@ -82,6 +83,10 @@ def main(argv=None):
 
     if cmd in ("version", "-v", "--version"):
         print(f"DualVPN {paths.version()}")
+        # Где ищем бинарники — по этим строкам build.ps1 проверяет сборку.
+        # MISSING латиницей: вывод читает PowerShell, кодировки там разные.
+        for f in (paths.SINGBOX, paths.WINTUN):
+            print(f + ("" if os.path.isfile(f) else "  MISSING"))
         return 0
 
     if cmd == "service":

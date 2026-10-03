@@ -72,6 +72,12 @@ try {
     if ($out -notmatch [regex]::Escape($Version)) {
         throw "dualvpn.exe version: ждали $Version, получили: $out"
     }
+    # Служба ищет sing-box.exe и wintun.dll там же, где их видит version.
+    # Раз они уже не там, где их кладёт сборка, — установленная версия не
+    # поднимет туннель, хотя всё остальное в ней работает.
+    if ($out -match 'MISSING') {
+        throw "dualvpn.exe не находит бинарники:`n$out"
+    }
     if (-not (Test-Path (Join-Path $Dist 'DualVPN-Tray.exe'))) {
         throw 'нет DualVPN-Tray.exe в dist\DualVPN'
     }

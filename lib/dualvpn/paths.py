@@ -42,8 +42,13 @@ CONF = os.path.join(DATA, "conf")
 STATE = os.path.join(DATA, "state")
 LOGS = os.path.join(STATE, "logs")
 
-# Бинарники едут внутри сборки, поэтому ищем их в BUNDLE, а не рядом с exe.
-BIN = BUNDLE if getattr(sys, "frozen", False) else os.path.join(BASE, "lib", "bin")
+# Бинарники. У установленной версии build.ps1 кладёт их рядом с exe (BASE),
+# а BUNDLE у onedir-сборки PyInstaller 6 — это _internal\: искали там и
+# писали «нет sing-box.exe». У портативной они внутри сборки, то есть в BUNDLE.
+if getattr(sys, "frozen", False):
+    BIN = BASE if os.path.isfile(os.path.join(BASE, "sing-box.exe")) else BUNDLE
+else:
+    BIN = os.path.join(BASE, "lib", "bin")
 SINGBOX = os.path.join(BIN, "sing-box.exe")
 WINTUN = os.path.join(BIN, "wintun.dll")
 
