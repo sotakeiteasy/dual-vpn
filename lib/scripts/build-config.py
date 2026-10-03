@@ -447,6 +447,20 @@ def main():
         })
         dns_rules.append({"domain_suffix": domains, "server": "dns-corp"})
 
+    tun = {
+        "type": "tun", "tag": "tun-in",
+        "mtu": int(os.environ.get("SB_TUN_MTU", ep_personal["mtu"])),
+        "address": tun_address,
+        "auto_route": True,
+        "stack": stack,
+    }
+    # SB_STRICT_ROUTE=1 — ставит windows/vpn.ps1. Windows шлёт DNS-запрос во
+    # все адаптеры сразу и берёт первый ответ; обычно это DNS провайдера, и
+    # корп-домены резолвятся мимо корп-DNS. strict_route закрывает DNS на
+    # остальных адаптерах правилами брандмауэра.
+    if os.environ.get("SB_STRICT_ROUTE") == "1":
+        tun["strict_route"] = True
+
     config = {
         "log": {"level": "info", "timestamp": True},
         "dns": {
@@ -456,13 +470,7 @@ def main():
             "strategy": "ipv4_only",
         },
         "endpoints": [ep_personal, ep_corp],
-        "inbounds": [{
-            "type": "tun", "tag": "tun-in",
-            "mtu": int(os.environ.get("SB_TUN_MTU", ep_personal["mtu"])),
-            "address": tun_address,
-            "auto_route": True,
-            "stack": stack,
-        }],
+        "inbounds": [tun],
         "outbounds": [{"type": "direct", "tag": "direct"}],
         "route": {
             "rules": [
