@@ -32,6 +32,8 @@ hidden = [
     "win32timezone", "servicemanager", "win32serviceutil",
     "win32service", "win32event", "win32pipe", "win32file",
     "win32security", "ntsecuritycon", "win32api",
+    # WMI в winnet: импортируются внутри функций.
+    "pythoncom", "win32com.client", "win32process",
 ]
 
 cli_a = Analysis(

@@ -24,6 +24,9 @@ from . import buildconfig, paths, winnet
 
 KEEP_LOGS = 10
 
+# Ключи conf\site.env, которые читает buildconfig.
+SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE")
+
 # Обе половины адресного пространства. Пишем именно так, а не 0.0.0.0/0:
 # более специфичный префикс выигрывает у маршрута по умолчанию, не удаляя его,
 # и исходная картина сети возвращается сама, как только мы уберём свои строки.
@@ -185,6 +188,15 @@ class Tunnel:
         """Поднимает туннель. Возвращает '' или текст ошибки."""
         paths.ensure_dirs()
 
+        # Уже работает: второе «Включить» (двойной клик по значку, окно и
+        # трей разом) раньше принимало свой же живой туннель за следы
+        # прошлого запуска, сносило его и поднимало заново.
+        if (self.proc is not None and self.proc.poll() is None
+                and profile == os.environ.get("SB_PERSONAL", "")
+                and winnet.tun_index(paths.TUN_IP) is not None):
+            self.log("→ уже работает")
+            return ""
+
         # Уборка за прошлым запуском — до того, как поднимем свой. Прошлый мог
         # уйти в KILL, упасть вместе с машиной или потерять питание: следы
         # тогда остаются, и разгрести их некому, кроме нас.
@@ -199,10 +211,21 @@ class Tunnel:
                 return f"нет профиля «{profile}»: не найден {conf}"
             os.environ["SB_PERSONAL"] = profile
             self.log(f"→ личный профиль: {profile}")
+        else:
+            # Окружение у службы одно на всю жизнь: без этого после
+            # «nl-1» возврат к personal собирал всё равно nl-1.
+            os.environ.pop("SB_PERSONAL", None)
 
         # Настройки рабочей сети — в окружение: buildconfig читает их оттуда.
-        for k, v in paths.site_env().items():
-            os.environ.setdefault(k, v)
+        # Перезаписываем каждый раз, а не setdefault: окружение живёт, пока
+        # жива служба, и правка в окне «Настроить рабочую сеть» иначе
+        # не действовала до её перезапуска.
+        site = paths.site_env()
+        for k in SITE_KEYS:
+            if site.get(k):
+                os.environ[k] = site[k]
+            else:
+                os.environ.pop(k, None)
 
         if not os.path.isfile(paths.SINGBOX):
             return f"нет {paths.SINGBOX} — переустанови приложение"
@@ -242,8 +265,10 @@ class Tunnel:
 
         # До старта туннеля: иначе первые же запросы браузера уйдут по v6 мимо.
         self.own("v6block")
-        winnet.v6_block()
-        self.log("→ исходящий IPv6 заблокирован на время сеанса")
+        if winnet.v6_block(up_idx):
+            self.log("→ исходящий IPv6 мимо туннеля заблокирован на время сеанса")
+        else:
+            self.log(f"!! IPv6 заблокировать не вышло: {winnet.last_error or 'без причины'}")
 
         peers = self._peer_ips()
         if not peers:
@@ -254,23 +279,26 @@ class Tunnel:
         # половинки. Иначе трафик к серверу сам уходит в туннель — петля.
         for ip in peers:
             self.own("host", ip, gw, up_idx)
-            winnet.add_route(f"{ip}/32", up_idx, gw, metric=1)
+        winnet.add_routes([(f"{ip}/32", up_idx, gw, 1) for ip in peers])
 
         log_path = self.open_log()
         self.log(f"→ журнал sing-box: {log_path}")
         self.log("→ запускаю sing-box…")
         self.proc = subprocess.Popen(
-            [paths.SINGBOX, "run", "-c", paths.CONFIG_JSON],
+            # --disable-color: лог читает окно, а не терминал. С цветом каждая
+            # строка в окне шла с мусором вида «[36mINFO[0m».
+            [paths.SINGBOX, "run", "-c", paths.CONFIG_JSON, "--disable-color"],
             cwd=paths.BIN,          # рядом лежит wintun.dll, его ищут здесь
             stdout=self.logfile, stderr=subprocess.STDOUT,
             creationflags=_NO_WINDOW,
         )
 
         tun_idx = None
-        for _ in range(30):
-            time.sleep(1)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(0.25)
             if self.proc.poll() is not None:
-                return f"sing-box упал на старте, смотри {log_path}"
+                return f"sing-box упал на старте: {_fatal_line(log_path)}"
             tun_idx = winnet.tun_index(paths.TUN_IP)
             if tun_idx is not None:
                 break
@@ -284,11 +312,13 @@ class Tunnel:
         # Половинки ставит и сам sing-box через auto_route. Записываем их как
         # своё в любом случае: снимать их всё равно нам, иначе половина
         # интернета останется смотреть в мёртвый tun.
+        missing = []
         for half in HALVES:
             self.own("net", half, tun_idx)
             if not any(r.get("InterfaceIndex") == tun_idx
                        for r in winnet.routes_for(half)):
-                winnet.add_route(half, tun_idx, "0.0.0.0", metric=1)
+                missing.append((half, tun_idx, "0.0.0.0", 1))
+        winnet.add_routes(missing)
         self.log("→ маршруты выставлены")
 
         self._keep_awake(True)
@@ -479,3 +509,22 @@ class Tunnel:
             self.log(f"→ готово, сеть вернулась в исходное состояние (шлюз {gw})")
         else:
             self.log("!! маршрут по умолчанию отсутствует — сеть не поднята?")
+
+
+def _fatal_line(log_path):
+    """Причина падения sing-box из его лога — одной строкой, для окна и трея.
+
+    Раньше в статус уходил только путь к логу: человек видел «упал, смотри
+    vpn-<дата>.log», а сам лог в ProgramData из-под обычного пользователя
+    ещё и не открыть.
+    """
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()[-40:]
+    except OSError:
+        return f"смотри {log_path}"
+    for word in ("FATAL", "ERROR"):
+        for line in reversed(lines):
+            if word in line:
+                return line.split(word, 1)[1].strip(" []:")[:200]
+    return f"смотри {log_path}"

@@ -33,6 +33,19 @@ STATE = paths.STATE
 AWG_INT = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4")
 AWG_HDR = ("h1", "h2", "h3", "h4")
 AWG_CPS = ("i1", "i2", "i3", "i4", "i5")
+# AWG 3.x: ключ шифрования заголовков, паддинг и тайминги-диапазоны "min-max".
+# В .conf — CamelCase без разделителей, в sing-box — snake_case.
+AWG3_STR = {"headerprotectionkey": "header_protection_key"}
+AWG3_RANGE = {
+    "contentpaddingaddition": "content_padding_addition",
+    "rekeyaftertime": "rekey_after_time",
+    "rekeytimeout": "rekey_timeout",
+    "rejectaftertime": "reject_after_time",
+    "keepalivetimeout": "keepalive_timeout",
+    "maxhandshakeattempts": "max_handshake_attempts",
+}
+AWG3_BOOL = {"randomtrailers": "random_trailers",
+             "disablecookies": "disable_cookies"}
 
 
 # Как называются конфиги в conf/. Регистр не важен.
@@ -171,7 +184,7 @@ def endpoint(conf, tag, default_mtu):
     ep = {
         "type": "wireguard",
         "tag": tag,
-        "mtu": int(iface.get("mtu", default_mtu)),
+        "mtu": as_int(iface.get("mtu", default_mtu), tag, "MTU"),
         "address": split_list(iface.get("address", "")),
         "private_key": iface["privatekey"],
         "peers": [{
@@ -184,20 +197,53 @@ def endpoint(conf, tag, default_mtu):
     if "presharedkey" in peer:
         ep["peers"][0]["pre_shared_key"] = peer["presharedkey"]
     if "persistentkeepalive" in peer:
-        ep["peers"][0]["persistent_keepalive_interval"] = int(peer["persistentkeepalive"])
+        ep["peers"][0]["persistent_keepalive_interval"] = num_or_range(
+            peer["persistentkeepalive"], tag, "PersistentKeepalive")
 
     # AWG-обфускация: числа как числа, magic-заголовки-диапазоны как строки.
     for k in AWG_INT:
         if k in iface:
-            ep[k] = int(iface[k])
+            ep[k] = as_int(iface[k], tag, k.capitalize())
     for k in AWG_HDR:
         if k in iface:
-            v = iface[k]
-            ep[k] = v if "-" in v else int(v)
+            ep[k] = num_or_range(iface[k], tag, k.upper())
     for k in AWG_CPS:
         if k in iface:
             ep[k] = iface[k]
+    for k, key in AWG3_STR.items():
+        if k in iface:
+            ep[key] = iface[k]
+    for k, key in AWG3_RANGE.items():
+        if k in iface:
+            ep[key] = num_or_range(iface[k], tag, key)
+    for k, key in AWG3_BOOL.items():
+        if k in iface:
+            ep[key] = iface[k].lower() in ("1", "true", "yes", "on")
     return ep
+
+
+def as_int(value, tag, field):
+    """Число из .conf. Опечатка — внятная ошибка с именем поля, а не трейсбек:
+    последняя строка вывода уходит в окно как причина отказа."""
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        sys.exit(f"[{tag}] {field} = {value!r}: ожидаю целое число")
+
+
+def num_or_range(value, tag, field):
+    """Число или диапазон "min-max": "25" -> 25, "25-35" -> "25-35".
+
+    Диапазоны пришли с AmneziaWG 2.0 (H1–H4) и 3.x (тайминги, keepalive).
+    sing-box-lx принимает их строкой, а число — числом.
+    """
+    v = str(value).strip()
+    lo, sep, hi = v.partition("-")
+    if not sep:
+        return as_int(v, tag, field)
+    as_int(lo, tag, field)
+    as_int(hi, tag, field)
+    return f"{lo.strip()}-{hi.strip()}"
 
 
 def corp_routes(conf):
@@ -406,6 +452,11 @@ def main():
             "mtu": int(os.environ.get("SB_TUN_MTU", ep_personal["mtu"])),
             "address": tun_address,
             "auto_route": True,
+            # Windows шлёт DNS-запрос во все адаптеры сразу и берёт первый
+            # ответ — обычно от DNS провайдера, и корп-домены резолвились
+            # мимо корп-DNS. strict_route закрывает DNS на остальных
+            # адаптерах правилами брандмауэра. Выключить: SB_STRICT_ROUTE=0.
+            "strict_route": os.environ.get("SB_STRICT_ROUTE") != "0",
             "stack": stack,
         }],
         "outbounds": [{"type": "direct", "tag": "direct"}],

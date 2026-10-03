@@ -21,10 +21,9 @@ import urllib.request
 
 from . import paths, winnet
 
-# Каждый быстрый опрос — это несколько запусков powershell (см. winnet), а
-# запуск стоит около секунды. Две секунды на цикл машина ощущала заметно;
-# четыре — предел, за которым кнопка в трее начинает казаться «залипшей».
-FAST_EVERY = 4.0
+# Быстрый опрос — несколько WMI-запросов по 10–20 мс (см. winnet). Пока они
+# шли через запуск PowerShell, цикл стоил секунды и приходилось реже.
+FAST_EVERY = 2.0
 SLOW_EVERY = 20.0
 
 
@@ -105,11 +104,37 @@ class Prober:
             pass
         return ""
 
+    def _exit_info(self):
+        """Внешний адрес и страна. Несколько сервисов по очереди.
+
+        Выход VPN — общий адрес на многих клиентов, и ipinfo.io с него быстро
+        начинает отвечать 429 Too Many Requests. С одним сервисом адрес выхода
+        тогда не определялся никогда, и окно вечно показывало «проверяю».
+        """
+        try:
+            info = json.loads(self._get("https://ipinfo.io/json", 8) or "{}")
+            if info.get("ip"):
+                return info
+        except ValueError:
+            pass
+        try:
+            raw = json.loads(self._get("https://ipwho.is/", 8) or "{}")
+            if raw.get("ip"):
+                return {"ip": raw["ip"], "country": raw.get("country_code", ""),
+                        "city": raw.get("city", ""),
+                        "org": (raw.get("connection") or {}).get("org", "")}
+        except ValueError:
+            pass
+        for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+            ip = self._get(url, 6)
+            if re.match(r"^[\d.]+$", ip or ""):
+                return {"ip": ip}
+        return {}
+
     def probe_slow(self):
-        raw = self._get("https://ipinfo.io/json", 12)
         peers = self.peer_addrs()
         try:
-            info = json.loads(raw)
+            info = self._exit_info()
             ip = info.get("ip", "")
             real = ""
             try:

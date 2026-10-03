@@ -20,7 +20,7 @@ permissions:
 
 env:
   # Форк sing-box с поддержкой AmneziaWG — в основной сборке её нет.
-  SINGBOX_VERSION: "1.14.0-lx.35"
+  SINGBOX_VERSION: "1.14.2-lx.11"
   WINTUN_VERSION: "0.14.1"
 
 jobs:

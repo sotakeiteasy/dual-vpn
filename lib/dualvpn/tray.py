@@ -14,6 +14,13 @@ from . import ipc, paths
 
 POLL_EVERY = 3.0
 
+# Пределы полей NOTIFYICONDATA с завершающим нулём. pystray их не обрезает:
+# строка длиннее — ValueError, и падает тот поток, который менял подпись.
+# Раньше это был поток опроса: длинная ошибка в статусе (путь к логу)
+# убивала его, и значок навсегда застывал в последнем цвете.
+TIP_MAX = 127
+INFO_MAX = 255
+
 # Цвета состояний. Взяты такими, чтобы отличаться и на светлой, и на тёмной
 # панели: серый заметно темнее любой из них, зелёный и красный — насыщенные.
 COLORS = {
@@ -56,25 +63,33 @@ class Tray:
     def poll(self):
         while not self.stop_event.is_set():
             try:
-                self.status = ipc.call("status").get("status", {})
-                if self.status.get("busy"):
-                    new = "busy"
-                elif self.status.get("up"):
-                    new = "up"
-                elif self.status.get("last_error"):
-                    new = "error"
-                else:
-                    new = "off"
-            except ipc.NotRunning:
-                self.status = {}
-                new = "error"
-            if new != self.state:
-                self.state = new
-                self._refresh_icon()
-            else:
-                # Подпись меняется и без смены цвета: профиль, адрес выхода.
-                self._refresh_title()
+                self._poll_once()
+            except Exception:                              # noqa: BLE001
+                # Поток опроса один, и умереть ему нельзя: без него значок
+                # перестаёт отражать состояние, а меню — включать и выключать.
+                pass
             self.stop_event.wait(POLL_EVERY)
+
+    def _poll_once(self):
+        try:
+            self.status = ipc.call("status").get("status", {})
+            if self.status.get("busy"):
+                new = "busy"
+            elif self.status.get("up"):
+                new = "up"
+            elif self.status.get("last_error"):
+                new = "error"
+            else:
+                new = "off"
+        except ipc.NotRunning:
+            self.status = {}
+            new = "error"
+        if new != self.state:
+            self.state = new
+            self._refresh_icon()
+        else:
+            # Подпись меняется и без смены цвета: профиль, адрес выхода.
+            self._refresh_title()
 
     def _refresh_icon(self):
         if self.icon is None:
@@ -86,7 +101,7 @@ class Tray:
     def _refresh_title(self):
         if self.icon is None:
             return
-        self.icon.title = self._title()
+        self.icon.title = _clip(self._title(), TIP_MAX)
 
     def _title(self):
         st = self.status
@@ -148,13 +163,19 @@ class Tray:
             return
         for name in names:
             yield pystray.MenuItem(
-                name,
-                # name связываем значением, а не замыканием по переменной цикла:
-                # иначе все пункты меню выбирали бы последний профиль.
-                lambda _i, _it, n=name: self.on_profile(n),
+                name, self._pick(name),
                 checked=lambda _it, n=name: n == (self.status.get("profile")
                                                   or "personal"),
                 radio=True)
+
+    def _pick(self, name):
+        """Обработчик пункта профиля, с именем, связанным через замыкание.
+
+        Не `lambda _i, _it, n=name`: pystray считает аргументы по co_argcount,
+        и параметр по умолчанию для него третий аргумент — ValueError прямо
+        при построении меню. Падало и открытие меню, и поток опроса.
+        """
+        return lambda: self.on_profile(name)
 
     # -------------------------------------------------------------- команды
 
@@ -268,7 +289,7 @@ class Tray:
         if self.icon is None:
             return
         try:
-            self.icon.notify(text, "DualVPN")
+            self.icon.notify(_clip(text, INFO_MAX), "DualVPN")
         except Exception:
             # Уведомления есть не во всех сборках Windows; молчать тут можно —
             # ошибка всё равно видна в подписи значка и в окне.
@@ -284,6 +305,11 @@ class Tray:
             menu=self._menu())
         threading.Thread(target=self.poll, daemon=True).start()
         self.icon.run()
+
+
+def _clip(text, limit):
+    text = str(text or "")
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def _looks_corp(name):

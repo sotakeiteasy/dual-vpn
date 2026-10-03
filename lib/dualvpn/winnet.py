@@ -1,23 +1,29 @@
 """Сеть Windows: маршруты, интерфейсы, IPv6, кеш DNS.
 
-Всё идёт через командлеты NetTCPIP (`Get-NetRoute`, `New-NetRoute`, ...), а не
-через `route.exe` и `netsh`. Причина одна: вывод командлетов структурирован и
-не зависит от языка системы, а `route print` на русской Windows печатает
-«Сетевой адрес» и разбирается только угадыванием колонок.
+Чтение состояния идёт через WMI (root/StandardCimv2: MSFT_NetRoute,
+MSFT_NetIPAddress, ...) — это ровно те классы, поверх которых построены
+командлеты Get-NetRoute и компания. Вывод структурирован и от языка системы не
+зависит, как и у командлетов (`route print` на русской Windows печатает
+«Сетевой адрес» и разбирается только угадыванием колонок), а запрос стоит
+10–20 мс.
 
-На один запрос — один запуск powershell.exe. Раньше здесь жил долгоживущий
-хост (`powershell.exe -Command -`, команды в stdin, ответы через маркер) ради
-экономии на старте процесса. Идея не работает: в режиме `-Command -`
-PowerShell читает stdin ДО КОНЦА ПОТОКА и только потом что-то выполняет. Пока
-хост жив и stdin открыт, ответа нет вовсе — каждый вызов упирался в таймаут,
-а из shutdown это исключение вылетало наружу и роняло приложение на выходе.
-Плата за надёжность — около секунды на вызов; поэтому пробер опрашивает
-состояние пореже (см. probe.FAST_EVERY), а не по четыре раза в секунду.
+Раньше каждое чтение запускало отдельный powershell.exe — 2–4 секунды на
+вызов. Пробер делал их по шесть за цикл, включение — несколько десятков:
+«Включить» шло полторы минуты, статус отставал на десятки секунд, а машина
+постоянно молотила PowerShell в фоне.
+
+PowerShell остался для изменений (New-NetRoute, правило брандмауэра) — их
+мало и они редкие — и запасным путём, если WMI вдруг не ответит.
 """
 
+import ctypes
 import json
 import os
+import random
+import socket
+import struct
 import subprocess
+import threading
 
 _PS_ARGS = [
     "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
@@ -38,6 +44,10 @@ class PowerShell:
 
     Потокобезопасен без замков: у каждого вызова свой процесс, общего
     состояния между вызовами нет.
+
+    Долгоживущий хост (`powershell.exe -Command -`, команды в stdin) здесь
+    пробовали: в этом режиме PowerShell читает stdin до конца потока и только
+    потом что-то выполняет, так что ответа не было вовсе.
     """
 
     def run(self, script, timeout=30):
@@ -55,8 +65,15 @@ class PowerShell:
         global last_error
         # Первая же ошибка не должна прекращать скрипт: «нет такого маршрута»
         # здесь ожидаемый ответ, а не повод бросать остальное.
-        wrapped = ("$ErrorActionPreference='SilentlyContinue'\n"
-                   "try {\n" + script + "\n} catch { }\n")
+        #
+        # OutputEncoding: читаем вывод как UTF-8, а PowerShell в канал пишет
+        # в кодировке консоли — на русской Windows это cp866, и кириллица
+        # (имена адаптеров вроде «Беспроводная сеть») приходила кашей.
+        # catch пишет причину в stderr: без этого сбой (как с правилом IPv6)
+        # не оставлял следа нигде, и last_error оставался пустым.
+        wrapped = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8\n"
+                   "$ErrorActionPreference='SilentlyContinue'\n"
+                   "try {\n" + script + "\n} catch { [Console]::Error.WriteLine($_) }\n")
         try:
             r = subprocess.run(
                 _PS_ARGS + [wrapped],
@@ -71,9 +88,10 @@ class PowerShell:
             last_error = f"powershell не запустился: {exc}"
             return ""
         out = (r.stdout or "").strip()
-        if not out and r.returncode != 0:
-            last_error = ((r.stderr or "").strip()[:200]
-                          or f"код возврата {r.returncode}")
+        if (r.stderr or "").strip():
+            last_error = r.stderr.strip()[:200]
+        elif not out and r.returncode != 0:
+            last_error = f"код возврата {r.returncode}"
         return out
 
     def json(self, script, timeout=30, default=None):
@@ -102,24 +120,100 @@ class PowerShell:
 PS = PowerShell()
 
 
+# ------------------------------------------------------------------- WMI
+
+_tls = threading.local()
+
+
+def _wmi():
+    """Подключение к root/StandardCimv2, своё на каждый поток.
+
+    COM требует инициализации в каждом потоке, а у службы их много: пробер,
+    поток на каждое соединение канала, медленные проверки.
+    """
+    svc = getattr(_tls, "wmi", None)
+    if svc is None:
+        import pythoncom
+        import win32com.client
+        pythoncom.CoInitialize()
+        # Прямой слэш вместо обратных: моникер одинаково понимает оба, а
+        # прямой не зависит от того, как по дороге экранировали строку.
+        svc = win32com.client.GetObject("winmgmts:root/StandardCimv2")
+        _tls.wmi = svc
+    return svc
+
+
+def _instances(wql):
+    """Объекты WQL-запроса списком, или None, если WMI не ответил."""
+    global last_error
+    try:
+        return list(_wmi().ExecQuery(wql))
+    except Exception as exc:                               # noqa: BLE001
+        last_error = f"WMI: {exc}"
+        _tls.wmi = None
+        return None
+
+
+def _query(wql, props):
+    """Строки WQL-запроса как список словарей, или None, если WMI не ответил.
+
+    None, а не пустой список: «ничего не нашлось» и «спросить не удалось» —
+    разные ответы, и на втором вызывающий уходит в PowerShell.
+    """
+    rows = _instances(wql)
+    if rows is None:
+        return None
+    try:
+        return [{p: getattr(r, p) for p in props} for r in rows]
+    except Exception:                                      # noqa: BLE001
+        return None
+
+
+def _q(value):
+    """Строка для WQL в одинарных кавычках. Наши значения — адреса и имена
+    без кавычек, но экранируем на всякий случай."""
+    return "'" + str(value).replace("'", "") + "'"
+
+
+def _is_tun_hop(next_hop):
+    """Шлюз нашего же tun (172.19.0.2 из 172.19.0.1/30). sing-box ставит
+    через него свой маршрут по умолчанию, и аплинком он быть не может."""
+    return str(next_hop or "").startswith("172.19.0.")
+
+
 # ------------------------------------------------------------- маршруты
 
 def default_route():
     """(индекс интерфейса, шлюз) активного аплинка, или (None, '').
 
-    Берём маршрут по умолчанию с настоящим следующим узлом: у tun-интерфейса
-    NextHop нулевой, и без этого условия после подъёма туннеля «аплинком»
-    оказывался бы сам туннель.
+    Берём маршрут по умолчанию с настоящим следующим узлом: у туннелей
+    NextHop нулевой или это шлюз нашего tun, и без этого условия после
+    подъёма туннеля «аплинком» оказывался бы сам туннель. Из нескольких
+    аплинков (Wi-Fi и кабель) — тот, у кого меньше сумма метрик маршрута и
+    интерфейса: так выбирает и сама Windows.
     """
-    rows = PS.json(
-        "Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |"
-        " Where-Object { $_.NextHop -ne '0.0.0.0' } |"
-        " Sort-Object RouteMetric |"
-        " Select-Object -First 1 InterfaceIndex,NextHop"
-    )
+    rows = _query("SELECT InterfaceIndex,NextHop,RouteMetric FROM MSFT_NetRoute"
+                  " WHERE DestinationPrefix='0.0.0.0/0'",
+                  ("InterfaceIndex", "NextHop", "RouteMetric"))
+    if rows is None:
+        rows = PS.json(
+            "Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |"
+            " Select-Object InterfaceIndex,NextHop,RouteMetric")
+    rows = [r for r in rows
+            if r.get("NextHop") not in (None, "", "0.0.0.0")
+            and not _is_tun_hop(r.get("NextHop"))]
     if not rows:
         return None, ""
-    return rows[0].get("InterfaceIndex"), rows[0].get("NextHop", "")
+    metrics = _interface_metrics()
+    best = min(rows, key=lambda r: (r.get("RouteMetric") or 0)
+               + metrics.get(r.get("InterfaceIndex"), 0))
+    return best.get("InterfaceIndex"), best.get("NextHop", "")
+
+
+def _interface_metrics():
+    rows = _query("SELECT InterfaceIndex,InterfaceMetric FROM MSFT_NetIPInterface"
+                  " WHERE AddressFamily=2", ("InterfaceIndex", "InterfaceMetric"))
+    return {r["InterfaceIndex"]: r.get("InterfaceMetric") or 0 for r in rows or []}
 
 
 def tun_index(tun_ip):
@@ -129,20 +223,26 @@ def tun_index(tun_ip):
     задаёт sing-box, оно повторяется у других клиентов на том же движке, и
     уборка по имени попадала бы по чужому туннелю.
     """
-    rows = PS.json(
-        "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |"
-        f" Where-Object {{ $_.IPAddress -eq '{tun_ip}' }} |"
-        " Select-Object -First 1 InterfaceIndex"
-    )
+    rows = _query("SELECT InterfaceIndex FROM MSFT_NetIPAddress"
+                  f" WHERE IPAddress={_q(tun_ip)}", ("InterfaceIndex",))
+    if rows is None:
+        rows = PS.json(
+            "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |"
+            f" Where-Object {{ $_.IPAddress -eq '{tun_ip}' }} |"
+            " Select-Object -First 1 InterfaceIndex")
     return rows[0].get("InterfaceIndex") if rows else None
 
 
 def interface_exists(if_index):
     """Жив ли ещё интерфейс с таким индексом."""
-    return bool(PS.json(
-        f"Get-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4"
-        " -ErrorAction SilentlyContinue | Select-Object InterfaceIndex"
-    ))
+    rows = _query("SELECT InterfaceIndex FROM MSFT_NetIPInterface"
+                  f" WHERE InterfaceIndex={int(if_index)} AND AddressFamily=2",
+                  ("InterfaceIndex",))
+    if rows is None:
+        rows = PS.json(
+            f"Get-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4"
+            " -ErrorAction SilentlyContinue | Select-Object InterfaceIndex")
+    return bool(rows)
 
 
 def routes_for(prefix):
@@ -151,19 +251,34 @@ def routes_for(prefix):
     Их бывает несколько — по одной на интерфейс, и как раз этим отличается
     «наш маршрут» от «такой же маршрут соседнего VPN-клиента».
     """
-    return PS.json(
-        f"Get-NetRoute -DestinationPrefix '{prefix}' -ErrorAction SilentlyContinue |"
-        " Select-Object InterfaceIndex,NextHop,RouteMetric"
-    )
+    rows = _query("SELECT InterfaceIndex,NextHop,RouteMetric FROM MSFT_NetRoute"
+                  f" WHERE DestinationPrefix={_q(prefix)}",
+                  ("InterfaceIndex", "NextHop", "RouteMetric"))
+    if rows is None:
+        rows = PS.json(
+            f"Get-NetRoute -DestinationPrefix '{prefix}' -ErrorAction SilentlyContinue |"
+            " Select-Object InterfaceIndex,NextHop,RouteMetric")
+    return rows
 
 
 def add_route(prefix, if_index, next_hop="0.0.0.0", metric=1):
-    PS.run(
-        f"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {if_index}"
-        f" -NextHop '{next_hop}' -RouteMetric {metric}"
+    add_routes([(prefix, if_index, next_hop, metric)])
+
+
+def add_routes(routes):
+    """Ставит несколько маршрутов одним запуском PowerShell.
+
+    routes — [(prefix, if_index, next_hop, metric)]. Запуск PowerShell стоит
+    секунды, поэтому пиры и половинки ставятся пачкой, а не по одному.
+    """
+    if not routes:
+        return
+    PS.run("\n".join(
+        f"New-NetRoute -DestinationPrefix '{prefix}' -InterfaceIndex {int(idx)}"
+        f" -NextHop '{hop}' -RouteMetric {int(metric)}"
         " -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue"
         " | Out-Null"
-    )
+        for prefix, idx, hop, metric in routes))
 
 
 def del_route(prefix, if_index=None):
@@ -172,7 +287,22 @@ def del_route(prefix, if_index=None):
     Без if_index удаление снимает все строки на этот destination, включая
     чужие. Вызывающий обязан сначала убедиться, что чужих там нет — этим
     занимается tunnel.py, здесь только механика.
+
+    Удаляем экземпляр MSFT_NetRoute напрямую — это и есть Remove-NetRoute,
+    только без запуска PowerShell. Не вышло — тем же командлетом.
     """
+    wql = f"SELECT * FROM MSFT_NetRoute WHERE DestinationPrefix={_q(prefix)}"
+    if if_index is not None:
+        wql += f" AND InterfaceIndex={int(if_index)}"
+    rows = _instances(wql)
+    if rows is not None:
+        try:
+            for r in rows:
+                r.Delete_()
+            return
+        except Exception as exc:                           # noqa: BLE001
+            global last_error
+            last_error = f"WMI: {exc}"
     scope = f" -InterfaceIndex {if_index}" if if_index is not None else ""
     PS.run(
         f"Remove-NetRoute -DestinationPrefix '{prefix}'{scope}"
@@ -182,90 +312,256 @@ def del_route(prefix, if_index=None):
 
 def routes_on_interface(if_index):
     """Все IPv4-маршруты, висящие на интерфейсе. Для финальной уборки."""
-    rows = PS.json(
-        f"Get-NetRoute -InterfaceIndex {if_index} -AddressFamily IPv4"
-        " -ErrorAction SilentlyContinue | Select-Object DestinationPrefix"
-    )
+    rows = _query("SELECT DestinationPrefix FROM MSFT_NetRoute"
+                  f" WHERE InterfaceIndex={int(if_index)} AND AddressFamily=2",
+                  ("DestinationPrefix",))
+    if rows is None:
+        rows = PS.json(
+            f"Get-NetRoute -InterfaceIndex {if_index} -AddressFamily IPv4"
+            " -ErrorAction SilentlyContinue | Select-Object DestinationPrefix")
     return [r.get("DestinationPrefix", "") for r in rows if r.get("DestinationPrefix")]
 
 
+# ------------------------------------------------------------------ DNS
+
 def resolve4(name):
     """A-запись имени, или ''. Резолвим до подъёма туннеля, пока DNS ещё свой."""
-    rows = PS.json(
-        f"Resolve-DnsName -Name '{name}' -Type A -ErrorAction SilentlyContinue |"
-        " Where-Object { $_.IPAddress } | Select-Object -First 1 IPAddress"
-    )
-    return rows[0].get("IPAddress", "") if rows else ""
+    try:
+        return socket.getaddrinfo(name, None, socket.AF_INET)[0][4][0]
+    except (OSError, IndexError):
+        return ""
 
 
-def resolve4_via(name, server):
-    """То же, но у конкретного DNS-сервера, в обход системного."""
-    rows = PS.json(
-        f"Resolve-DnsName -Name '{name}' -Type A -Server '{server}'"
-        " -DnsOnly -ErrorAction SilentlyContinue |"
-        " Where-Object { $_.IPAddress } | Select-Object -First 1 IPAddress"
-    )
-    return rows[0].get("IPAddress", "") if rows else ""
+def resolve4_via(name, server, timeout=4.0):
+    """То же, но у конкретного DNS-сервера, в обход системного.
+
+    Свой минимальный DNS-запрос по UDP вместо Resolve-DnsName -Server: тот
+    стоил запуска PowerShell, а пробер спрашивает корп-DNS постоянно.
+    """
+    qid = random.randint(0, 0xFFFF)
+    try:
+        labels = [p.encode("idna") for p in name.strip(".").split(".")]
+    except UnicodeError:
+        return ""
+    qname = b"".join(bytes([len(p)]) + p for p in labels) + bytes([0])
+    packet = (struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + qname
+              + struct.pack(">HH", 1, 1))
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            sock.sendto(packet, (server, 53))
+            data, _ = sock.recvfrom(4096)
+    except OSError:
+        return ""
+    return _first_a(data, qid)
+
+
+def _first_a(data, qid):
+    """Первая A-запись из DNS-ответа, или ''."""
+    try:
+        rid, flags, qd, an = struct.unpack(">HHHH", data[:8])
+        if rid != qid or flags & 0x000F:
+            return ""
+        pos = 12
+        for _ in range(qd):
+            pos = _skip_name(data, pos) + 4
+        for _ in range(an):
+            pos = _skip_name(data, pos)
+            rtype, _cls, _ttl, rdlen = struct.unpack(">HHIH", data[pos:pos + 10])
+            pos += 10
+            if rtype == 1 and rdlen == 4:
+                return socket.inet_ntoa(data[pos:pos + 4])
+            pos += rdlen
+    except (struct.error, IndexError, OSError):
+        pass
+    return ""
+
+
+def _skip_name(data, pos):
+    while True:
+        n = data[pos]
+        if n == 0:
+            return pos + 1
+        if n & 0xC0 == 0xC0:          # ссылка на имя выше — два байта
+            return pos + 2
+        pos += n + 1
+
+
+def flush_dns():
+    """Кеш резолвера: в нём оседают ответы корп-DNS, недоступного без туннеля."""
+    try:
+        if ctypes.windll.dnsapi.DnsFlushResolverCache():
+            return
+    except Exception:                                      # noqa: BLE001
+        pass
+    PS.run("Clear-DnsClientCache -ErrorAction SilentlyContinue")
 
 
 # ----------------------------------------------------------------- IPv6
 #
-# Личный сервер v6-адрес не выдаёт, нести v6 в туннель нечем. Оставить как
+# Если личный сервер v6 не выдаёт, нести его в туннель нечем, а оставить как
 # есть — значит гнать v6-трафик мимо туннеля, с настоящего адреса.
 #
 # На macOS для этого выключали IPv6 на сетевом сервисе. На Windows тот же приём
 # (Disable-NetAdapterBinding ms_tcpip6) передёргивает адаптер, рвёт все
 # соединения и на некоторых драйверах не возвращается без перезагрузки.
-# Правило брандмауэра делает то же самое обратимо и мгновенно: исходящий v6
-# блокируется целиком, а снятие правила возвращает всё как было.
+# Правило брандмауэра делает то же самое обратимо и мгновенно, а снятие
+# правила возвращает всё как было.
 
 V6_RULE = "DualVPN-block-IPv6"
 
+# Весь глобальный IPv6. Не '::/0': брандмауэр такую запись не принимает
+# («префиксы адресов недопустимы»), правило не создавалось вовсе, а ошибку
+# глотал PS.run — IPv6 всё это время шёл мимо туннеля.
+V6_GLOBAL = "2000::/3"
 
-def v6_block():
-    """Блокирует исходящий IPv6. Идемпотентно."""
-    PS.run(
-        f"if (-not (Get-NetFirewallRule -DisplayName '{V6_RULE}'"
-        " -ErrorAction SilentlyContinue)) {"
-        f" New-NetFirewallRule -DisplayName '{V6_RULE}' -Direction Outbound"
-        " -Action Block -RemoteAddress '::/0' -Profile Any"
-        " -Description 'Пока поднят туннель DualVPN. Снимается при выключении.'"
-        " | Out-Null }"
+
+def _firewall():
+    """Политика брандмауэра через COM (HNetCfg.FwPolicy2).
+
+    Правило ищется по имени за миллисекунды. WMI (MSFT_NetFirewallRule)
+    перебирает все правила системы даже при поиске по ключу — около секунды,
+    а проверка идёт в каждом цикле пробера.
+    """
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    return win32com.client.Dispatch("HNetCfg.FwPolicy2")
+
+
+def _interface_alias(if_index):
+    rows = _query("SELECT InterfaceAlias FROM MSFT_NetIPInterface"
+                  f" WHERE InterfaceIndex={int(if_index)}", ("InterfaceAlias",))
+    return rows[0].get("InterfaceAlias", "") if rows else ""
+
+
+def v6_block(uplink_index):
+    """Блокирует исходящий IPv6 через физический аплинк. Идемпотентно.
+
+    Только на аплинке, а не на всех интерфейсах: если личный сервер выдал
+    v6-адрес, IPv6 законно идёт через tun, и общий запрет сломал бы его.
+    Возвращает, стоит ли правило после вызова.
+    """
+    global last_error
+    last_error = ""
+    if v6_blocked():
+        return True
+    alias = _interface_alias(uplink_index)
+    try:
+        import win32com.client
+        fw = _firewall()
+        rule = win32com.client.Dispatch("HNetCfg.FWRule")
+        rule.Name = V6_RULE
+        rule.Description = "Пока поднят туннель DualVPN. Снимается при выключении."
+        rule.Direction = 2                    # исходящие
+        rule.Action = 0                       # запретить
+        rule.RemoteAddresses = V6_GLOBAL
+        if alias:
+            rule.Interfaces = [alias]
+        rule.Profiles = 0x7FFFFFFF            # все профили сети
+        rule.Enabled = True
+        fw.Rules.Add(rule)
+    except Exception as exc:                               # noqa: BLE001
+        last_error = f"брандмауэр: {exc}"
+    if v6_blocked():
+        return True
+    # Запасной путь — тем же правилом через командлет.
+    out = PS.run(
+        "$ErrorActionPreference='Stop'\n"
+        f"New-NetFirewallRule -DisplayName '{V6_RULE}'"
+        f" -Direction Outbound -Action Block -RemoteAddress '{V6_GLOBAL}'"
+        + (f" -InterfaceAlias '{alias}'" if alias else "") +
+        " -Profile Any | Out-Null\n"
+        "'ok'"
     )
+    if out.endswith("ok"):
+        return True
+    last_error = last_error or "New-NetFirewallRule не создал правило"
+    return False
 
 
 def v6_unblock():
+    try:
+        fw = _firewall()
+        # Remove снимает одно правило с этим именем; дублей могло накопиться
+        # несколько, поэтому — пока находится.
+        for _ in range(20):
+            if not _has_rule(fw):
+                return
+            fw.Rules.Remove(V6_RULE)
+    except Exception:                                      # noqa: BLE001
+        pass
     PS.run(
         f"Remove-NetFirewallRule -DisplayName '{V6_RULE}'"
         " -ErrorAction SilentlyContinue"
     )
 
 
+def _has_rule(fw):
+    try:
+        fw.Rules.Item(V6_RULE)
+        return True
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
 def v6_blocked():
-    return bool(PS.json(
-        f"Get-NetFirewallRule -DisplayName '{V6_RULE}' -ErrorAction SilentlyContinue"
-        " | Select-Object DisplayName"
-    ))
-
-
-# ------------------------------------------------------------------ DNS
-
-def flush_dns():
-    """Кеш резолвера: в нём оседают ответы корп-DNS, недоступного без туннеля."""
-    PS.run("Clear-DnsClientCache -ErrorAction SilentlyContinue")
+    try:
+        return _has_rule(_firewall())
+    except Exception:                                      # noqa: BLE001
+        return bool(PS.json(
+            f"Get-NetFirewallRule -DisplayName '{V6_RULE}' -ErrorAction SilentlyContinue"
+            " | Select-Object DisplayName"))
 
 
 # -------------------------------------------------------------- процесс
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+# Свой экземпляр kernel32 с прописанными типами: по умолчанию ctypes считает
+# результат int, и 64-битный дескриптор процесса мог бы обрезаться.
+_k32 = ctypes.WinDLL("kernel32")
+_k32.OpenProcess.restype = ctypes.c_void_p
+_k32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+_k32.QueryFullProcessImageNameW.argtypes = (
+    ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p,
+    ctypes.POINTER(ctypes.c_ulong))
+_k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+
 
 def pids_of(exe_path):
     """PID'ы процессов, запущенных ровно из этого файла.
 
     Сравниваем полный путь, а не имя: у пользователя может быть свой sing-box
     из другого клиента, и снимать его мы не имеем права.
+
+    Через WinAPI (EnumProcesses + QueryFullProcessImageName): миллисекунды
+    вместо запуска PowerShell, а вызов идёт в каждом цикле пробера.
     """
     target = os.path.normcase(os.path.abspath(exe_path))
-    # Get-Process, а не Get-CimInstance Win32_Process: WMI-запрос стоит
-    # секунду с лишним, а этот вызов идёт в каждом цикле пробера.
+    try:
+        import win32process
+        pids = win32process.EnumProcesses()
+    except Exception:                                      # noqa: BLE001
+        return _pids_of_ps(target)
+    k32 = _k32
+    out = []
+    for pid in pids:
+        h = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            continue
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_ulong(len(buf))
+            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                if os.path.normcase(buf.value) == target:
+                    out.append(int(pid))
+        finally:
+            k32.CloseHandle(h)
+    return out
+
+
+def _pids_of_ps(target):
     rows = PS.json(
         "Get-Process -Name sing-box -ErrorAction SilentlyContinue |"
         " Select-Object Id,Path"
