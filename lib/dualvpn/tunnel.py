@@ -211,9 +211,11 @@ class Tunnel:
             self.log("")
 
         if profile:
-            conf = os.path.join(paths.CONF, f"{profile}.conf")
-            if not os.path.isfile(conf):
-                return f"нет профиля «{profile}»: не найден {conf}"
+            # Имя приходит через канал — сравниваем со списком, а не склеиваем
+            # в путь: «..\\» здесь вывел бы за пределы conf\.
+            if profile not in buildconfig.list_confs("personal"):
+                return (f"нет профиля «{profile}»: не найден в "
+                        f"{paths.CONF_PERSONAL}")
             os.environ["SB_PERSONAL"] = profile
             self.log(f"→ личный профиль: {profile}")
         else:

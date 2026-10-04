@@ -25,6 +25,8 @@ from . import paths, winnet
 # шли через запуск PowerShell, цикл стоил секунды и приходилось реже.
 FAST_EVERY = 2.0
 SLOW_EVERY = 20.0
+# Сколько check_now ждёт уже идущую проверку: при плохой сети она до ~50 с.
+CHECK_WAIT = 60.0
 
 
 class Prober:
@@ -36,6 +38,9 @@ class Prober:
         # запускается раз в SLOW_EVERY. Без флага потоки множились бы и
         # наперегонки писали exit_ip — следующий ждёт, пока закончится этот.
         self.slow_busy = threading.Event()
+        # Проверку по запросу (check_now) и плановую запускают разные потоки:
+        # «свободен ли» и «занял» должны быть одним шагом.
+        self._slow_gate = threading.Lock()
 
     def set(self, **kw):
         with self.lock:
@@ -243,9 +248,8 @@ class Prober:
             if up and time.time() - last_slow > SLOW_EVERY:
                 # last_slow не сдвигаем, пока занято: новая проверка
                 # стартует на первом же круге после окончания текущей.
-                if not self.slow_busy.is_set():
+                if self._take_slow():
                     last_slow = time.time()
-                    self.slow_busy.set()
                     threading.Thread(target=self._slow_guarded,
                                      daemon=True).start()
             elif not up:
@@ -253,6 +257,28 @@ class Prober:
                          exit_is_peer=False, exit_state="unknown")
             self.write_status()
             self.stop_event.wait(FAST_EVERY)
+
+    def _take_slow(self):
+        """Занимает сетевую проверку. False — она уже идёт."""
+        with self._slow_gate:
+            if self.slow_busy.is_set():
+                return False
+            self.slow_busy.set()
+            return True
+
+    def check_now(self, wait=CHECK_WAIT):
+        """Сетевая проверка сейчас, а не через SLOW_EVERY — трей зовёт её при
+        открытии меню, окно при открытии и по кнопке.
+
+        Если проверка уже идёт, вторую не запускаем, а ждём её конца: ответ
+        будет таким же свежим, а сервисы адреса выхода реже отвечают 429.
+        """
+        if self._take_slow():
+            self._slow_guarded()
+            return
+        deadline = time.monotonic() + wait
+        while self.slow_busy.is_set() and time.monotonic() < deadline:
+            time.sleep(0.1)
 
     def _slow_guarded(self):
         try:

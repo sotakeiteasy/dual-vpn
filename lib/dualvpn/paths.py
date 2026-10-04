@@ -39,6 +39,10 @@ DATA = os.environ.get("DUALVPN_DATA") or os.path.join(
 )
 
 CONF = os.path.join(DATA, "conf")
+# Тип туннеля задаёт папка, а не имя файла: человек сам выбирает, рабочий
+# это конфиг или личный, и файл сохраняет своё имя каким пришёл.
+CONF_CORP = os.path.join(CONF, "corp")
+CONF_PERSONAL = os.path.join(CONF, "personal")
 STATE = os.path.join(DATA, "state")
 LOGS = os.path.join(STATE, "logs")
 
@@ -81,7 +85,7 @@ PIPE_NAME = r"\\.\pipe\DualVPN"
 
 def ensure_dirs():
     """Создаёт каталоги данных. Зовётся и службой, и установщиком."""
-    for d in (DATA, CONF, STATE, LOGS):
+    for d in (DATA, CONF, CONF_CORP, CONF_PERSONAL, STATE, LOGS):
         os.makedirs(d, exist_ok=True)
 
 

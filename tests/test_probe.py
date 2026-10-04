@@ -49,3 +49,39 @@ def test_второй_probe_slow_не_стартует_пока_идёт_пер�
         deadline = time.monotonic() + 2
         while p.slow_busy.is_set() and time.monotonic() < deadline:
             time.sleep(0.01)
+
+
+def test_check_now_при_идущей_проверке_ждёт_её_а_не_запускает_вторую(monkeypatch):
+    release = threading.Event()
+    calls = []
+
+    def slow(self):
+        calls.append(1)
+        release.wait(5)
+
+    monkeypatch.setattr(probe.Prober, "probe_slow", slow)
+    p = probe.Prober()
+
+    first = threading.Thread(target=p.check_now, daemon=True)
+    first.start()
+    time.sleep(0.1)
+    second = threading.Thread(target=p.check_now, daemon=True)
+    second.start()
+    time.sleep(0.3)
+    # Второй вызов ждёт первую проверку, своей не запускает.
+    assert calls == [1] and second.is_alive()
+
+    release.set()
+    first.join(2)
+    second.join(2)
+    assert not second.is_alive() and calls == [1]
+    assert not p.slow_busy.is_set()
+
+
+def test_check_now_без_идущей_проверки_проверяет_сразу(monkeypatch):
+    calls = []
+    monkeypatch.setattr(probe.Prober, "probe_slow", lambda self: calls.append(1))
+    p = probe.Prober()
+    p.check_now()
+    p.check_now()
+    assert calls == [1, 1]

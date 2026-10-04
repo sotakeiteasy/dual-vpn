@@ -163,12 +163,13 @@ def main(argv=None):
 
     if cmd == "list":
         r = _call("list-profiles")
-        profiles = r.get("profiles") or []
-        print(f"конфиги в {paths.CONF}:")
-        for name in profiles:
-            print(f"  {name}")
-        if not profiles:
-            print("  (пусто)")
+        for title, names in (("рабочий", r.get("corp") or []),
+                             ("личные", r.get("profiles") or [])):
+            print(f"{title}:")
+            for name in names:
+                print(f"  {name}")
+            if not names:
+                print("  (нет)")
         return 0
 
     if cmd == "profile":

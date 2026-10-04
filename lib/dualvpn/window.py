@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from . import buildconfig, ipc, paths
+from . import ipc, paths
 
 POLL_EVERY = 2.0
 
@@ -96,6 +96,11 @@ class Api:
         if name == "ready":
             self.ready.set()
             self.refresh(full=True)
+            # Статус туннелей сразу при открытии, а не со следующей плановой
+            # проверкой службы — до неё бывает двадцать секунд.
+            threading.Thread(target=self._check, daemon=True).start()
+        elif name == "check":
+            threading.Thread(target=self._check, daemon=True).start()
         elif name == "start":
             self._guard(ipc.call("start", profile=""))
         elif name == "stop":
@@ -116,13 +121,21 @@ class Api:
             self._guard(ipc.call("set-profile", profile=arg))
             self.refresh(full=True)
         elif name == "del_config":
-            self._guard(self._admin_call("remove-config", name=arg))
+            self._guard(self._admin_call("remove-config", name=arg["name"],
+                                         kind=arg["kind"]))
             self.js("closeSheet")
             self.refresh(full=True)
         elif name == "add_config":
             self._add_config(arg)
+        elif name == "show_config":
+            self._show_conf(arg["name"], arg["kind"])
         elif name == "info":
-            self._show_conf(arg)
+            # «i» у колонки показывает тот конфиг, что пойдёт в сборку.
+            st = ipc.call("status").get("status", {})
+            conf = self._confs(st).get(arg) or []
+            chosen = [c for c in conf if c["active"]] or conf[:1]
+            if chosen:
+                self._show_conf(chosen[0]["name"], arg)
         elif name == "site":
             self.js("showSite", _parse_env(self._admin_call("get-site").get("text", "")))
         elif name == "load_site":
@@ -229,27 +242,33 @@ class Api:
             self.js("renderHowto", self._howto(st))
             self._push_logs()
 
-    def _confs(self, st):
+    @staticmethod
+    def _confs(st):
         """Раскладка конфигов по колонкам — ровно та, что ждёт renderConfs."""
         names = st.get("profiles") or []
-        active = st.get("profile") or "personal"
-        corp, personal = [], []
-        for n in names:
-            # Те же правила, что у сборки: иначе окно показывало бы файл
-            # личным, а sing-box собирал бы его рабочим.
-            is_corp = buildconfig.is_corp_name(n)
-            (corp if is_corp else personal).append(
-                {"name": n, "active": (not is_corp and n == active)})
-        # Если активный профиль не выбран явно, подсвечиваем personal.
-        if personal and not any(c["active"] for c in personal):
-            for c in personal:
-                if c["name"] == "personal":
-                    c["active"] = True
+        # Без выбранного профиля сборка берёт единственный личный — его и
+        # подсвечиваем. Из нескольких без выбора не подсвечен ни один.
+        active = st.get("profile") or (names[0] if len(names) == 1 else "")
+        personal = [{"name": n, "active": n == active} for n in names]
+        corp = [{"name": n, "active": False} for n in st.get("corp") or []]
         return {
             "corp": corp, "personal": personal,
             "corp_ambiguous": len(corp) > 1,
-            "personal_ambiguous": False,
+            "personal_ambiguous": len(names) > 1 and active not in names,
         }
+
+    def _check(self):
+        """Проверка туннелей службой сейчас; страница на это время пишет
+        «проверяю…»."""
+        self.js("checkStart")
+        try:
+            st = ipc.call("check").get("status")
+            if st:
+                self.js("render", st)
+        except ipc.NotRunning:
+            pass                       # опрос и так покажет «служба не отвечает»
+        finally:
+            self.js("checkDone")
 
     @staticmethod
     def _howto(st):
@@ -285,11 +304,11 @@ class Api:
 
     # ------------------------------------------------------------ конфиги
 
-    def _show_conf(self, name):
+    def _show_conf(self, name, kind):
         """Показывает содержимое конфига. Читает служба — каталог закрыт."""
-        reply = self._admin_call("read-config", name=name)
+        reply = self._admin_call("read-config", name=name, kind=kind)
         if reply.get("ok"):
-            self.jsn("showConf", [name, reply.get("text", "")])
+            self.jsn("showConf", [name, kind, reply.get("text", "")])
         else:
             self.js("failed", reply.get("error") or "не прочитать конфиг")
 
@@ -309,8 +328,8 @@ class Api:
         path = picked[0]
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
-        # Имя под тип туннеля подгоняет служба (buildconfig.stored_name):
-        # там же удаляются прежние рабочие и выбирается новый личный.
+        # Тип задаёт кнопка, имя чистит служба (buildconfig.safe_name):
+        # там же удаляется прежний рабочий и выбирается новый личный.
         name = os.path.splitext(os.path.basename(path))[0]
         reply = self._admin_call("add-config", name=name, text=text, kind=kind)
         if not reply.get("ok"):

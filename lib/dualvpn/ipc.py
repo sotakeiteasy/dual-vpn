@@ -28,7 +28,7 @@ from . import paths
 
 # Команды, которые только читают. Остальные требуют администратора, кроме
 # явно перечисленных в USER_OPS.
-READ_OPS = frozenset({"status", "list-profiles", "log"})
+READ_OPS = frozenset({"status", "list-profiles", "log", "check"})
 # Команды управления туннелем: их разрешаем любому вошедшему пользователю.
 USER_OPS = frozenset({"start", "stop", "set-profile"})
 

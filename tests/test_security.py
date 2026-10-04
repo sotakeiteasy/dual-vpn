@@ -8,15 +8,15 @@
 
 import pytest
 
-from dualvpn import ipc
-from dualvpn.service import Core
+from dualvpn import buildconfig, ipc
 
 
 # ---------------------------------------------------- кому что разрешено
 
-@pytest.mark.parametrize("op", ["status", "list-profiles", "log"])
+@pytest.mark.parametrize("op", ["status", "list-profiles", "log", "check"])
 def test_чтение_состояния_доступно_всем(op):
-    """Трей опрашивает статус от обычного пользователя, без всякого UAC."""
+    """Трей опрашивает статус и просит проверку от обычного пользователя,
+    без всякого UAC."""
     assert not ipc.requires_admin(op)
 
 
@@ -61,23 +61,25 @@ def test_незнакомая_команда_закрыта_по_умолчан�
     "na>me",
     "",
     "   ",
+    "  corp  ",
+    "personal.conf",
+    "nl.",
+    "CON",
 ])
 def test_подозрительное_имя_конфига_отклоняется(name):
     """Через канал сюда приходит текст от пользователя, а пишем мы от SYSTEM.
 
     Без этой проверки «..\\..\\Windows\\System32» был бы обычной записью
-    файла с правами системы.
+    файла с правами системы. Имя из канала должно быть уже чистым —
+    тем, что служба сама отдала в списке; чистить его здесь значило бы
+    удалить или прочитать соседний файл.
     """
     with pytest.raises(ValueError):
-        Core._safe_name(name)
+        buildconfig.check_name(name)
 
 
-@pytest.mark.parametrize("given,expected", [
-    ("personal", "personal"),
-    ("personal.conf", "personal"),
-    ("nl-1", "nl-1"),
-    ("wg0-ivanov.conf", "wg0-ivanov"),
-    ("  corp  ", "corp"),
+@pytest.mark.parametrize("name", [
+    "personal", "nl-1", "wg0-ivanov", "Офис Иванов", "my_vpn_", "_CON",
 ])
-def test_нормальное_имя_проходит_и_чистится(given, expected):
-    assert Core._safe_name(given) == expected
+def test_чистое_имя_проходит_как_есть(name):
+    assert buildconfig.check_name(name) == name

@@ -70,6 +70,11 @@ body {
 .chip.ok  { color: var(--ok);   background: color-mix(in srgb, var(--ok) 14%, transparent); }
 .chip.bad { color: var(--bad);  background: color-mix(in srgb, var(--bad) 14%, transparent); }
 .chip.off { color: var(--dim);  background: color-mix(in srgb, var(--off) 20%, transparent); }
+.chip.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+#btn-check { flex: none; padding-inline: 9px; }
+#btn-check svg { width: 14px; height: 14px; display: block; }
+#btn-check.spin svg { animation: check-spin .9s linear infinite; }
+@keyframes check-spin { to { transform: rotate(360deg); } }
 
 #actions { display: flex; gap: 7px; }
 /* flex:1 у button задумано для строк кнопок; прямой потомок колонки от него
@@ -246,6 +251,11 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
   <div id="actions">
     <button id="btn-toggle" class="primary">Включить</button>
     <button id="btn-restart">Перезапустить</button>
+    <button id="btn-check" title="Проверить туннели сейчас" aria-label="Проверить туннели">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/>
+      </svg></button>
   </div>
   <label id="autostart-row"><input type="checkbox" id="autostart">
     Включать VPN при запуске компьютера</label>
@@ -340,6 +350,7 @@ const esc = t => String(t).replace(/[&<>"']/g, c =>
 let LAST = {};
 let PENDING = null;    // команда отправлена, состояние ещё не догнало
 let AUTOSTART_PENDING = false;
+let CHECKING = false;  // идёт проверка туннелей по кнопке или при открытии
 
 // Рестарт нельзя ждать сравнением с желаемым состоянием: жмут его при поднятом
 // туннеле, и «уже как надо» получается сразу. Ждём полный цикл: упал и поднялся.
@@ -397,15 +408,18 @@ function render(s) {
        <span class="tun-val">${val}</span>
        <span class="chip ${state}">${label}</span></div>`;
 
+  // Пока идёт проверка по кнопке или при открытии окна, прежний ответ
+  // устарел: «молчит» от прошлой проверки читалось бы как свежий результат.
+  const checking = up && CHECKING;
   document.getElementById('tunnels').innerHTML =
     row('личный', up ? (s.exit_ip || '—') : '—',
-        !up ? 'off' : s.exit_state === 'leak' ? 'bad'
+        !up ? 'off' : checking ? 'warn' : s.exit_state === 'leak' ? 'bad'
             : s.exit_state === 'tunnel' ? 'ok' : 'off',
-        !up ? 'выключен' : s.exit_state === 'leak' ? 'мимо туннеля'
+        !up ? 'выключен' : checking ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
             : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
     row('корп', up ? (s.corp_ip || '—') : '—',
-        !up ? 'off' : (corp ? 'ok' : 'bad'),
-        !up ? 'выключен' : (corp ? 'отвечает' : 'молчит')) +
+        !up ? 'off' : checking ? 'warn' : (corp ? 'ok' : 'bad'),
+        !up ? 'выключен' : checking ? 'проверяю…' : (corp ? 'отвечает' : 'молчит')) +
     row('выход', up ? [s.exit_country, s.exit_city].filter(Boolean).join(' ') || '—' : '—',
         'off', s.err_count ? s.err_count + ' ошибок' : 'без ошибок');
 
@@ -437,6 +451,9 @@ function render(s) {
     r.textContent = 'Перезапустить';
     r.disabled = !up;
   }
+  const c = document.getElementById('btn-check');
+  c.disabled = !up || busy || CHECKING;
+  c.classList.toggle('spin', CHECKING);
   document.getElementById('btn-install').hidden = !noDaemon;
   document.getElementById('actions').hidden = noDaemon;
   document.getElementById('autostart-row').hidden = noDaemon || s.no_service;
@@ -463,7 +480,8 @@ function renderConfs(d) {
          data-pick="${pick ? 1 : 0}">
       <div class="conf-radio ${pick ? '' : 'fixed'}"></div>
       <span class="conf-name">${esc(c.name)}</span>
-      <button class="conf-menu" data-menu="${esc(c.name)}" title="Действия">⋯</button>
+      <button class="conf-menu" data-menu="${esc(c.name)}"
+              data-kind="${pick ? 'personal' : 'corp'}" title="Действия">⋯</button>
     </div>`).join('');
 
   document.getElementById('confs-corp').innerHTML =
@@ -488,7 +506,7 @@ function renderConfs(d) {
 
 // Выпадающее меню строки: удаление должно быть в одном клике, а не прятаться
 // внутри просмотра — там его никто не найдёт.
-function openMenu(name, near) {
+function openMenu(name, kind, near) {
   closeMenu();
   const m = document.createElement('div');
   m.id = 'rowmenu';
@@ -504,7 +522,8 @@ function openMenu(name, near) {
     if (!b) return;
     const act = b.dataset.act;
     closeMenu();
-    send(act === 'show' ? 'show_config' : act === 'edit' ? 'edit_config' : 'del_config', name);
+    send(act === 'show' ? 'show_config' : act === 'edit' ? 'edit_config' : 'del_config',
+         {name, kind});
   };
 }
 
@@ -733,7 +752,7 @@ function showInfo(title, paras) {
   document.getElementById('sheet').classList.add('on');
 }
 
-function showConf(name, text) {
+function showConf(name, kind, text) {
   document.getElementById('sheet-save').hidden = true;
   document.getElementById('sheet-load').hidden = true;
   document.getElementById('sheet-del').hidden = false;
@@ -744,6 +763,7 @@ function showConf(name, text) {
   document.getElementById('sheet-body').textContent = text;
   document.getElementById('sheet').classList.add('on');
   document.getElementById('sheet').dataset.name = name;
+  document.getElementById('sheet').dataset.kind = kind;
 }
 
 document.getElementById('btn-toggle').onclick = () => {
@@ -785,7 +805,16 @@ document.getElementById('search').oninput = () => renderLogs(logLines);
 document.getElementById('only-err').onchange = () => renderLogs(logLines);
 document.getElementById('sheet-close').onclick = closeSheet;
 document.getElementById('sheet-del').onclick =
-  () => send('del_config', document.getElementById('sheet').dataset.name);
+  () => send('del_config', {name: document.getElementById('sheet').dataset.name,
+                            kind: document.getElementById('sheet').dataset.kind});
+document.getElementById('btn-check').onclick = () => {
+  CHECKING = true;
+  send('check');
+  render(LAST);
+};
+// Ответ на check — и при успехе, и при сбое: кнопка не должна застрять.
+function checkStart() { CHECKING = true; render(LAST); }
+function checkDone() { CHECKING = false; render(LAST); }
 
 // Сообщаем Python, что страница поднялась: на этом держится сквозной тест —
 // он проверяет всю цепочку от ресурса в бандле до моста обратно.
@@ -803,7 +832,7 @@ document.getElementById('tabs').onclick = e => {
 
 document.getElementById('side').addEventListener('click', e => {
   const mb = e.target.closest('[data-menu]');
-  if (mb) { openMenu(mb.dataset.menu, mb); return; }
+  if (mb) { openMenu(mb.dataset.menu, mb.dataset.kind, mb); return; }
   const row = e.target.closest('.conf');
   if (row && row.dataset.pick === '1') send('use_config', row.dataset.name);
 });

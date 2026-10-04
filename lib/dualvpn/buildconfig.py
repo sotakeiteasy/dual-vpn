@@ -2,12 +2,13 @@
 """
 Собирает config.json для sing-box-lx из обычных WireGuard/AmneziaWG .conf файлов.
 
-    conf/personal.conf   личный AmneziaWG  -> весь остальной трафик
-    conf/corp.conf       корпоративный WG  -> подсети из его AllowedIPs
+    conf/personal/<имя>.conf   личный AmneziaWG  -> весь остальной трафик
+    conf/corp/<имя>.conf       корпоративный WG  -> подсети из его AllowedIPs
 
-Вместо personal.conf можно взять любой другой файл из conf\\ — профиль:
+Рабочий ровно один. Личных сколько угодно, нужный выбирает профиль:
     set SB_PERSONAL=nl-1 && python -m dualvpn.buildconfig
     python -m dualvpn.buildconfig --personal nl-1
+Без профиля берётся единственный личный.
 
 Корп-маршруты берутся ИЗ AllowedIPs корп-конфига, поэтому при ротации
 достаточно положить новый файл — правки скрипта не нужны.
@@ -27,7 +28,10 @@ from . import paths, winnet
 
 BASE = paths.BASE
 CONF = paths.CONF
+CONF_CORP = paths.CONF_CORP
+CONF_PERSONAL = paths.CONF_PERSONAL
 STATE = paths.STATE
+KINDS = ("corp", "personal")
 
 # Поля [Interface], которые sing-box ждёт как AWG-параметры (в нижнем регистре).
 AWG_INT = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4")
@@ -48,37 +52,99 @@ AWG3_BOOL = {"randomtrailers": "random_trailers",
              "disablecookies": "disable_cookies"}
 
 
-# Как называются конфиги в conf/. Регистр не важен.
-# Корп-файл обычно приходит от админов как wg0-<фамилия>.conf — берём и такой.
-PERSONAL_PAT = (r"^personal\.conf$", r"^(awg|amnezia).*\.conf$")
-CORP_PAT = (r"^corp\.conf$", r"^wg[-_0-9].*\.conf$", r"^wg\.conf$")
+# Раньше тип туннеля решало имя файла в плоском conf\. Эти шаблоны остались
+# только для переезда старых установок в conf\corp и conf\personal.
+_LEGACY_CORP_PAT = (r"^corp\.conf$", r"^wg[-_0-9].*\.conf$", r"^wg\.conf$")
+_LEGACY_PERSONAL_PAT = (r"^personal\.conf$", r"^(awg|amnezia).*\.conf$")
+
+# Имя конфига — это имя файла. В Windows в нём запрещены эти знаки и
+# управляющие символы, а CON, NUL, COM1… — имена устройств: файл nul.conf
+# не создать вовсе. Длину режем, чтобы путь в ProgramData не упёрся в MAX_PATH.
+_BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED = {"CON", "PRN", "AUX", "NUL",
+             *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+NAME_MAX = 80
 
 
-def is_corp_name(name):
-    """Примет ли сборка файл с таким именем (с .conf или без) за рабочий."""
-    fname = name if name.lower().endswith(".conf") else f"{name}.conf"
-    return any(re.match(p, fname, re.IGNORECASE) for p in CORP_PAT)
+def conf_dir(kind):
+    if kind not in KINDS:
+        raise ValueError(f"неизвестный тип конфига: {kind!r}")
+    return CONF_CORP if kind == "corp" else CONF_PERSONAL
 
 
-def stored_name(kind, name):
-    """Под каким именем сохранить добавленный конфиг, чтобы сборка поняла его
-    правильно. Имя решает, каким туннелем станет файл, поэтому подгоняем его,
-    а не полагаемся на то, что человек назвал файл как надо.
+def safe_name(name):
+    """Имя, под которым конфиг ляжет в conf\\<тип>\\, из имени файла человека.
 
-    corp     — всегда corp: рабочий один, и замена должна его перезаписать.
-    personal — как назван, но не похожим на рабочий: wg-home стал бы вторым
-               рабочим и сборка не прошла бы. Такому даём приставку personal-.
+    Не отказывает никогда: недопустимые знаки становятся «_», пустое имя —
+    «config». Так добавление не ломается из-за имени, как у wg-quick, где
+    неподходящее имя файла — это ошибка.
     """
     stem = (name or "").strip()
     if stem.lower().endswith(".conf"):
         stem = stem[:-5]
-    if kind == "corp":
-        return "corp"
-    if not stem:
-        return "personal"
-    if is_corp_name(stem):
-        return f"personal-{stem}"
-    return stem
+    stem = _BAD_CHARS.sub("_", stem)
+    # Точка и пробел в конце Windows молча отрезает: «nl.» и «nl» стали бы
+    # одним файлом, а ссылка в профиле — на несуществующий.
+    stem = stem[:NAME_MAX].strip(" .")
+    if stem.split(".")[0].upper() in _RESERVED:
+        stem = f"_{stem}"
+    return stem or "config"
+
+
+def check_name(name):
+    """Имя, пришедшее через канал, должно быть уже безопасным — то, что мы
+    сами отдали в списке. Иначе «..\\..\\Windows» стал бы записью с правами
+    системы."""
+    if not name or safe_name(name) != name:
+        raise ValueError(f"недопустимое имя конфига: {name!r}")
+    return name
+
+
+def list_confs(kind):
+    """Имена конфигов этого типа, без .conf."""
+    try:
+        return sorted(f[:-5] for f in os.listdir(conf_dir(kind))
+                      if f.lower().endswith(".conf"))
+    except OSError:
+        return []
+
+
+def conf_path(kind, name):
+    return os.path.join(conf_dir(kind), f"{check_name(name)}.conf")
+
+
+def migrate_flat():
+    """Переносит конфиги из плоского conf\\ (до 0.3) по папкам типов.
+
+    Тип берём по старым правилам имени — ровно так, как их понимала прежняя
+    сборка, — поэтому после обновления включается то же, что и до него.
+    Возвращает [(имя, тип)] перенесённых.
+    """
+    moved = []
+    try:
+        files = sorted(os.listdir(CONF))
+    except OSError:
+        return moved
+    for f in files:
+        src = os.path.join(CONF, f)
+        if not f.lower().endswith(".conf") or not os.path.isfile(src):
+            continue
+        kind = ("corp" if any(re.match(p, f, re.IGNORECASE)
+                              for p in _LEGACY_CORP_PAT) else "personal")
+        name = safe_name(f)
+        os.makedirs(conf_dir(kind), exist_ok=True)
+        os.replace(src, os.path.join(conf_dir(kind), f"{name}.conf"))
+        moved.append((name, kind))
+    return moved
+
+
+def legacy_default_personal(names):
+    """Какой личный сборка брала без профиля до 0.3: personal.conf, потом awg*."""
+    for pat in _LEGACY_PERSONAL_PAT:
+        found = [n for n in names if re.match(pat, f"{n}.conf", re.IGNORECASE)]
+        if found:
+            return found[0]
+    return ""
 
 
 def check_conf_text(text):
@@ -93,59 +159,35 @@ def check_conf_text(text):
     return None
 
 
-def personal_patterns():
-    """Шаблоны для личного конфига.
+def pick_corp():
+    """Единственный рабочий конфиг."""
+    have = list_confs("corp")
+    if not have:
+        sys.exit("рабочий конфиг не добавлен")
+    if len(have) > 1:
+        sys.exit(f"рабочих конфигов несколько: {', '.join(have)}\n"
+                 f"оставь в {CONF_CORP} только один")
+    return conf_path("corp", have[0])
 
-    По умолчанию — personal.conf / awg*.conf. Если задан профиль
-    (SB_PERSONAL=nl-1 или --personal nl-1), берём ровно этот файл: так рядом
-    с personal.conf можно держать сколько угодно других серверов и
-    переключаться между ними без переименований.
-    """
+
+def pick_personal():
+    """Личный по профилю (SB_PERSONAL=nl-1 или --personal nl-1), а без
+    профиля — единственный."""
     name = os.environ.get("SB_PERSONAL", "")
     if "--personal" in sys.argv:
         name = sys.argv[sys.argv.index("--personal") + 1]
     name = name.strip()
-    if not name:
-        return PERSONAL_PAT
-    if os.sep in name:
-        sys.exit(f"профиль — это имя файла в conf/, без путей: получено {name!r}")
-    stem = re.escape(name[:-5] if name.lower().endswith(".conf") else name)
-    return (rf"^{stem}\.conf$",)
-
-
-def list_profiles():
-    """Имена всех .conf в conf/ — для подсказки в сообщениях об ошибке."""
-    try:
-        return sorted(f[:-5] for f in os.listdir(CONF)
-                      if f.lower().endswith(".conf"))
-    except OSError:
-        return []
-
-
-def pick_conf(what, patterns, exclude=None):
-    """Ищет в conf/ файл по шаблонам: сперва точное имя, потом общее."""
-    try:
-        files = sorted(os.listdir(CONF))
-    except OSError:
-        sys.exit(f"нет каталога {CONF}\nсоздай его и положи туда .conf")
-
-    for pat in patterns:
-        found = [
-            os.path.join(CONF, f) for f in files
-            if re.match(pat, f, re.IGNORECASE)
-            and os.path.join(CONF, f) != exclude
-        ]
-        if len(found) > 1:
-            names = ", ".join(os.path.basename(f) for f in found)
-            sys.exit(f"{what} конфиг неоднозначен: подходят {names}\n"
-                     f"оставь в {CONF} только один")
-        if found:
-            return found[0]
-
-    have = list_profiles()
-    sys.exit(f"в {CONF} не найден {what} конфиг\n"
-             f"ожидаю имя вида: {', '.join(p.strip('^$') for p in patterns)}\n"
-             f"есть: {', '.join(have) if have else '(пусто)'}")
+    have = list_confs("personal")
+    if name:
+        if name not in have:
+            sys.exit(f"нет личного конфига «{name}»\n"
+                     f"есть: {', '.join(have) if have else '(пусто)'}")
+        return conf_path("personal", name)
+    if not have:
+        sys.exit("личный конфиг не добавлен")
+    if len(have) > 1:
+        sys.exit(f"личных конфигов несколько: {', '.join(have)} — выбери один")
+    return conf_path("personal", have[0])
 
 
 def parse_conf(path):
@@ -342,8 +384,8 @@ def main():
     if "--out" in sys.argv:
         out_path = sys.argv[sys.argv.index("--out") + 1]
 
-    p_path = pick_conf("личный", personal_patterns())
-    c_path = pick_conf("корпоративный", CORP_PAT, exclude=p_path)
+    p_path = pick_personal()
+    c_path = pick_corp()
 
     personal = parse_conf(p_path)
     corp = parse_conf(c_path)

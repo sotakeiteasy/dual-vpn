@@ -58,6 +58,7 @@ class Core:
     def start(self):
         paths.ensure_dirs()
         self.log(f"=== служба запущена, версия {paths.version()} ===")
+        self._migrate()
         threading.Thread(target=self.prober.run, daemon=True).start()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         if self.autostart_enabled():
@@ -108,7 +109,9 @@ class Core:
         if op == "set-profile":
             return self._set_profile(payload.get("profile", ""))
         if op == "list-profiles":
-            return {"ok": True, "profiles": self._profiles()}
+            return {"ok": True, "profiles": self._profiles(), "corp": self._corp()}
+        if op == "check":
+            return self._check()
         if op == "set-autostart":
             self.set_autostart(bool(payload.get("on")))
             return {"ok": True, "autostart": self.autostart_enabled()}
@@ -117,9 +120,11 @@ class Core:
                                     payload.get("text", ""),
                                     payload.get("kind", ""))
         if op == "remove-config":
-            return self._remove_config(payload.get("name", ""))
+            return self._remove_config(payload.get("name", ""),
+                                       payload.get("kind", ""))
         if op == "read-config":
-            return self._read_config(payload.get("name", ""))
+            return self._read_config(payload.get("name", ""),
+                                     payload.get("kind", ""))
         if op == "set-site":
             return self._set_site(payload.get("text", ""))
         if op == "get-site":
@@ -137,7 +142,21 @@ class Core:
         st["version"] = paths.version()
         st["singbox"] = self._singbox_version()
         st["profiles"] = self._profiles()
+        st["corp"] = self._corp()
         return st
+
+    def _check(self):
+        """Проверяет туннели сейчас и отдаёт статус.
+
+        При выключенном VPN проверять нечем: WireGuard без рукопожатия не
+        отвечает. corp_probe — задан ли хост проверки рабочей сети: без него
+        «корп молчит» значит «не с чем сравнить», а не «не работает».
+        """
+        st = self.prober.snapshot()
+        if st.get("tun") and st.get("r_low") and not self.busy:
+            self.prober.check_now()
+        return {"ok": True, "status": self._status(),
+                "corp_probe": bool(paths.site_env().get("CORP_PROBE"))}
 
     _singbox_cached = None
 
@@ -212,102 +231,101 @@ class Core:
 
     @staticmethod
     def _profiles():
-        try:
-            return sorted(f[:-5] for f in os.listdir(paths.CONF)
-                          if f.lower().endswith(".conf"))
-        except OSError:
-            return []
+        """Личные конфиги — из них выбирают профиль."""
+        return buildconfig.list_confs("personal")
 
     @staticmethod
-    def _safe_name(name):
-        """Имя конфига — это имя файла, и ничего кроме.
+    def _corp():
+        """Рабочие конфиги. Больше одного бывает только после переезда
+        старой установки — сборка тогда попросит оставить один."""
+        return buildconfig.list_confs("corp")
 
-        Через канал сюда приходит текст от пользователя, а пишем мы в каталог,
-        доступный только SYSTEM. Без этой проверки «..\\..\\Windows\\System32»
-        был бы обычной записью файла с правами системы.
-        """
-        name = (name or "").strip()
-        if name.lower().endswith(".conf"):
-            name = name[:-5]
-        if not name or os.path.sep in name or "/" in name or name in (".", ".."):
-            raise ValueError(f"недопустимое имя конфига: {name!r}")
-        if any(c in name for c in '<>:"|?*\\'):
-            raise ValueError(f"недопустимое имя конфига: {name!r}")
-        return name
+    def _migrate(self):
+        """Конфиги из плоского conf\\ — по папкам типов, один раз после
+        обновления. Профиль, если он был пуст, — тот, что сборка брала сама."""
+        try:
+            moved = buildconfig.migrate_flat()
+        except OSError as exc:
+            self.log(f"!! не перенести конфиги по папкам: {exc}")
+            return
+        for name, kind in moved:
+            self.log(f"→ {name}.conf перенесён в conf\\{kind}")
+        cur = probe.Prober.current_profile()
+        personal = self._profiles()
+        if moved and cur not in personal:
+            self._set_profile(buildconfig.legacy_default_personal(personal))
 
-    def _add_config(self, name, text, kind=""):
+    def _add_config(self, name, text, kind):
         """Кладёт конфиг в conf\\.
 
-        kind — corp или personal (окно и трей передают его всегда). С ним имя
-        подгоняется под то, как сборка различает туннели (buildconfig.stored_name):
-        рабочий заменяет все прежние рабочие, личный сразу становится активным.
-        Без kind — как есть, под переданным именем.
+        Тип задаёт пункт, через который конфиг добавили, а не имя: файл
+        ложится в папку своего типа под именем файла человека, очищенным от
+        недопустимых знаков (buildconfig.safe_name), а не отклонённым из-за них.
+        Рабочий заменяет прежний, личный ложится рядом с другими и выбирается.
         """
+        if kind not in buildconfig.KINDS:
+            return {"ok": False, "error": f"неизвестный тип конфига: {kind!r}"}
         # BOM от Блокнота: с ним «[Interface]» в первой строке не узнаётся.
         text = (text or "").lstrip("\ufeff")
         bad = buildconfig.check_conf_text(text)
         if bad:
             return {"ok": False, "error": bad}
-        if kind in ("corp", "personal"):
-            name = buildconfig.stored_name(kind, name)
-        name = self._safe_name(name)
+        name = buildconfig.safe_name(name)
         paths.ensure_dirs()
-        path = os.path.join(paths.CONF, f"{name}.conf")
+        path = buildconfig.conf_path(kind, name)
         # Через временный файл: оборванная запись не оставит полконфига.
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
         os.replace(tmp, path)
-        self.log(f"→ добавлен конфиг {name}.conf")
+        self.log(f"→ добавлен {kind} конфиг {name}.conf")
 
         if kind == "corp":
             # Рабочий может быть только один: при двух сборка не пройдёт.
-            for old in self._profiles():
-                if old != name and buildconfig.is_corp_name(old):
-                    try:
-                        os.remove(os.path.join(paths.CONF, f"{old}.conf"))
-                        self.log(f"→ удалён прежний рабочий конфиг {old}.conf")
-                    except OSError as exc:
-                        self.log(f"→ не удалить {old}.conf: {exc}")
-        elif kind == "personal":
+            for old in self._corp():
+                if old == name:
+                    continue
+                try:
+                    os.remove(buildconfig.conf_path("corp", old))
+                    self.log(f"→ удалён прежний рабочий конфиг {old}.conf")
+                except OSError as exc:
+                    self.log(f"→ не удалить {old}.conf: {exc}")
+        else:
             self._set_profile(name)
-        return {"ok": True, "name": name, "profiles": self._profiles()}
+        return {"ok": True, "name": name, "profiles": self._profiles(),
+                "corp": self._corp()}
 
-    def _read_config(self, name):
+    def _read_config(self, name, kind):
         """Отдаёт конфиг целиком, вместе с ключами.
 
         Каталог conf\\ закрыт от обычного пользователя, поэтому прочитать файл
         может только служба. Права проверяет ipc.Server: команды нет ни в
         READ_OPS, ни в USER_OPS, значит нужен администратор.
         """
-        name = self._safe_name(name)
         try:
-            with open(os.path.join(paths.CONF, f"{name}.conf"),
+            with open(buildconfig.conf_path(kind, name),
                       encoding="utf-8", errors="replace") as fh:
                 return {"ok": True, "text": fh.read()}
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
 
-    def _remove_config(self, name):
-        name = self._safe_name(name)
+    def _remove_config(self, name, kind):
         try:
-            os.remove(os.path.join(paths.CONF, f"{name}.conf"))
+            os.remove(buildconfig.conf_path(kind, name))
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
-        self.log(f"→ удалён конфиг {name}.conf")
-        if name == probe.Prober.current_profile():
+        self.log(f"→ удалён {kind} конфиг {name}.conf")
+        if kind == "personal" and name == probe.Prober.current_profile():
             # Выбранный профиль указывал бы на удалённый файл, и следующее
             # «Включить» падало бы с «нет профиля». Берём другой личный, а без
-            # него — пусто: сборка тогда ищет personal.conf / awg*.conf.
-            rest = [p for p in self._profiles() if not buildconfig.is_corp_name(p)]
+            # него — пусто: сборка тогда попросит добавить личный.
+            rest = self._profiles()
             self._set_profile(rest[0] if rest else "")
-        return {"ok": True, "profiles": self._profiles()}
+        return {"ok": True, "profiles": self._profiles(), "corp": self._corp()}
 
     def _set_profile(self, name):
-        if name:
-            name = self._safe_name(name)
-            if not os.path.isfile(os.path.join(paths.CONF, f"{name}.conf")):
-                return {"ok": False, "error": f"нет конфига {name}.conf"}
+        if name and name not in self._profiles():
+            return {"ok": False, "error": f"нет личного конфига {name}.conf"}
         paths.ensure_dirs()
         with open(paths.PROFILE_FILE, "w", encoding="utf-8") as fh:
             fh.write(name)
