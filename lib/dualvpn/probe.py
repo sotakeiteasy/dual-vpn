@@ -25,8 +25,9 @@ from . import paths, winnet
 # шли через запуск PowerShell, цикл стоил секунды и приходилось реже.
 FAST_EVERY = 2.0
 SLOW_EVERY = 20.0
-# Сколько check_now ждёт уже идущую проверку: при плохой сети она до ~50 с.
-CHECK_WAIT = 60.0
+# Сколько check_now ждёт уже идущую проверку: при плохой сети она до ~30 с —
+# столько стоит адрес выхода со всеми запасными сервисами.
+CHECK_WAIT = 40.0
 
 
 class Prober:
@@ -34,7 +35,7 @@ class Prober:
         self.st = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        # При плохой сети probe_slow идёт до ~50 с (сумма таймаутов), а
+        # При плохой сети probe_slow идёт до ~30 с (самая долгая часть), а
         # запускается раз в SLOW_EVERY. Без флага потоки множились бы и
         # наперегонки писали exit_ip — следующий ждёт, пока закончится этот.
         self.slow_busy = threading.Event()
@@ -141,6 +142,18 @@ class Prober:
         return {}
 
     def probe_slow(self):
+        """Сетевая проверка. Части независимы и идут параллельно: по очереди
+        их таймауты складывались, и проверка «висела» до минуты, хотя каждая
+        часть по отдельности укладывается в секунды."""
+        parts = [threading.Thread(target=fn, daemon=True)
+                 for fn in (self._slow_exit, self._slow_v6,
+                            self._slow_corp_dns, self._slow_corp_http)]
+        for t in parts:
+            t.start()
+        for t in parts:
+            t.join()
+
+    def _slow_exit(self):
         peers = self.peer_addrs()
         try:
             info = self._exit_info()
@@ -171,10 +184,12 @@ class Prober:
             self.set(exit_ip="", exit_country="", exit_city="", exit_org="",
                      exit_is_peer=False, exit_state="unknown")
 
+    def _slow_v6(self):
         # IPv6: любой ответ здесь означает, что трафик идёт мимо туннеля.
         v6 = self._get("https://api6.ipify.org", 6)
         self.set(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
 
+    def _slow_corp_dns(self):
         probe_host = paths.site_env().get("CORP_PROBE", "")
         dns = self.corp_dns()
         if dns and probe_host:
@@ -182,6 +197,8 @@ class Prober:
         else:
             self.set(corp_dns=dns, corp_ip="")
 
+    def _slow_corp_http(self):
+        probe_host = paths.site_env().get("CORP_PROBE", "")
         if probe_host:
             self.set(corp_http=self._http_code(f"https://{probe_host}"))
         else:

@@ -85,3 +85,23 @@ def test_check_now_без_идущей_проверки_проверяет_ср�
     p.check_now()
     p.check_now()
     assert calls == [1, 1]
+
+
+def test_части_probe_slow_идут_параллельно_а_не_складываются(monkeypatch):
+    started = []
+
+    def part(name):
+        def run(self):
+            started.append(name)
+            time.sleep(0.3)
+        return run
+
+    for name in ("_slow_exit", "_slow_v6", "_slow_corp_dns", "_slow_corp_http"):
+        monkeypatch.setattr(probe.Prober, name, part(name))
+
+    t0 = time.monotonic()
+    probe.Prober().probe_slow()
+
+    assert time.monotonic() - t0 < 0.9
+    assert sorted(started) == ["_slow_corp_dns", "_slow_corp_http",
+                               "_slow_exit", "_slow_v6"]

@@ -411,15 +411,21 @@ function render(s) {
   // Пока идёт проверка по кнопке или при открытии окна, прежний ответ
   // устарел: «молчит» от прошлой проверки читалось бы как свежий результат.
   const checking = up && CHECKING;
+  // Без VPN мерить нечем — показываем, как этот же файл конфига отработал в
+  // прошлый раз: сломанный заменяют до включения, а не после.
+  const last = s.last || {};
+  const offChip = k => last[k] === 'up' ? 'ok' : last[k] === 'error' ? 'bad' : 'off';
+  const offLabel = k => last[k] === 'up' ? 'выключен · работал'
+                      : last[k] === 'error' ? 'выключен · не работал' : 'выключен';
   document.getElementById('tunnels').innerHTML =
     row('личный', up ? (s.exit_ip || '—') : '—',
-        !up ? 'off' : checking ? 'warn' : s.exit_state === 'leak' ? 'bad'
+        !up ? offChip('personal') : checking ? 'warn' : s.exit_state === 'leak' ? 'bad'
             : s.exit_state === 'tunnel' ? 'ok' : 'off',
-        !up ? 'выключен' : checking ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
+        !up ? offLabel('personal') : checking ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
             : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
     row('корп', up ? (s.corp_ip || '—') : '—',
-        !up ? 'off' : checking ? 'warn' : (corp ? 'ok' : 'bad'),
-        !up ? 'выключен' : checking ? 'проверяю…' : (corp ? 'отвечает' : 'молчит')) +
+        !up ? offChip('corp') : checking ? 'warn' : (corp ? 'ok' : 'bad'),
+        !up ? offLabel('corp') : checking ? 'проверяю…' : (corp ? 'отвечает' : 'молчит')) +
     row('выход', up ? [s.exit_country, s.exit_city].filter(Boolean).join(' ') || '—' : '—',
         'off', s.err_count ? s.err_count + ' ошибок' : 'без ошибок');
 
@@ -452,7 +458,7 @@ function render(s) {
     r.disabled = !up;
   }
   const c = document.getElementById('btn-check');
-  c.disabled = !up || busy || CHECKING;
+  c.disabled = busy || CHECKING;
   c.classList.toggle('spin', CHECKING);
   document.getElementById('btn-install').hidden = !noDaemon;
   document.getElementById('actions').hidden = noDaemon;
