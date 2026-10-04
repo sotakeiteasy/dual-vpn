@@ -29,15 +29,53 @@ foreach ($f in 'sing-box.exe', 'wintun.dll') {
 }
 
 # --- Окружение сборки
+# Установленное приложение несёт Python внутри себя, и его версия задаётся
+# здесь. В CI (.github/workflows/build.yml) — та же, иначе релизы и локальные
+# сборки работали бы на разных рантаймах.
+$PyVersion = '3.14'
 $Venv = Join-Path $Root 'lib\venv'
-if (-not (Test-Path $Venv)) {
-    Write-Host '-> создаю окружение...'
-    & python -m venv $Venv
+$Cfg = Join-Path $Venv 'pyvenv.cfg'
+$Have = ''
+if (Test-Path $Cfg) {
+    $m = Select-String -Path $Cfg -Pattern '^version(_info)?\s*=\s*(\S+)' | Select-Object -First 1
+    if ($m) { $Have = $m.Matches[0].Groups[2].Value }
+}
+# Окружение на другой версии пересоздаём: иначе новый Python до сборки
+# не дошёл бы никогда.
+if (-not $Have.StartsWith("$PyVersion.")) {
+    # Лаунчер py, а если его нет или он этой версии не знает (на раннере CI
+    # Python ставит setup-python) — python из PATH. Берём только нужную версию.
+    $SysPy = $null
+    foreach ($cand in @(@('py', "-$PyVersion"), @('python'))) {
+        if (-not (Get-Command $cand[0] -ErrorAction SilentlyContinue)) { continue }
+        $rest = @($cand | Select-Object -Skip 1)
+        try {
+            $out = & $cand[0] @rest -c "import sys; print('%d.%d' % sys.version_info[:2], sys.executable)" 2>$null
+        } catch { continue }
+        if ($LASTEXITCODE -eq 0 -and "$out" -match "^$([regex]::Escape($PyVersion)) (.+)$") {
+            $SysPy = $Matches[1]
+            break
+        }
+    }
+    if (-not $SysPy) {
+        throw "нет Python $PyVersion — поставить: winget install Python.Python.$PyVersion"
+    }
+    if (Test-Path $Venv) {
+        Write-Host "-> окружение на Python $Have, пересоздаю на $PyVersion..."
+        Remove-Item $Venv -Recurse -Force
+    } else {
+        Write-Host '-> создаю окружение...'
+    }
+    & $SysPy -m venv $Venv
+    if ($LASTEXITCODE -ne 0) { throw "venv на $SysPy вернул $LASTEXITCODE" }
 }
 $Py = Join-Path $Venv 'Scripts\python.exe'
 & $Py -m pip install -q --upgrade pip
 & $Py -m pip install -q -r (Join-Path $Root 'requirements.txt')
-& $Py -m pip install -q pyinstaller pystray pywebview pillow
+if ($LASTEXITCODE -ne 0) { throw "pip install вернул $LASTEXITCODE" }
+# PyInstaller нужен только сборке, поэтому он не в requirements.txt.
+& $Py -m pip install -q pyinstaller==6.22.3
+if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller вернул $LASTEXITCODE" }
 
 # --- Значок
 & $Py (Join-Path $Inst 'make_icon.py') (Join-Path $Inst 'DualVPN.ico')

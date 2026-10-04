@@ -82,7 +82,8 @@ Windows-машине (раздел «Сборка»).
 
 ## Из исходников
 
-Нужны Windows 10/11, Python 3.9+, права администратора и два бинарника рядом
+Нужны Windows 10/11, Python 3.14 (на нём собираются релизы:
+`winget install Python.Python.3.14`), права администратора и два бинарника рядом
 в `lib/bin\`:
 
 * [`sing-box-lx`](https://github.com/Leadaxe/sing-box-lx/releases) —
@@ -94,7 +95,7 @@ Windows-машине (раздел «Сборка»).
 git clone https://github.com/enkeym/dual-vpn.git
 cd dual-vpn
 
-python -m venv lib\venv
+py -3.14 -m venv lib\venv
 lib\venv\Scripts\pip install -r requirements.txt
 
 copy \путь\к\personal.conf conf\
@@ -114,7 +115,8 @@ lib\venv\Scripts\python -m dualvpn.cli service console
 powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ```
 
-Скрипт сам создаёт окружение, ставит зависимости, рисует значок и собирает:
+Скрипт сам создаёт окружение на Python 3.14 (окружение на другой версии
+пересоздаёт), ставит закреплённые зависимости, рисует значок и собирает:
 
 * `dist\DualVPN-Portable.exe` — портативная версия, один файл;
 * `dist\DualVPN\` — установочная пара `DualVPN-Tray.exe` (трей) и `dualvpn.exe`
