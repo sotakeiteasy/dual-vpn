@@ -118,7 +118,7 @@ def main(argv=None):
     if cmd == "admin-op":
         # Короткий elevated-заход: окно попросило у пользователя UAC ровно на
         # одну команду в conf\ (add-config, read-config, ...), запустило этот
-        # процесс с правами через Start-Process -Verb RunAs и ждёт результат
+        # процесс с правами через ShellExecuteEx (runas) и ждёт результат
         # в файле — сам процесс интерактивно ничего не показывает.
         if len(argv) < 4:
             print("использование: dualvpn admin-op ОП ФАЙЛ-ЗАПРОСА ФАЙЛ-ОТВЕТА")

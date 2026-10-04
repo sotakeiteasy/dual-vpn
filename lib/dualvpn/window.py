@@ -21,7 +21,6 @@ import time
 from . import buildconfig, ipc, paths
 
 POLL_EVERY = 2.0
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Фильтр для create_file_dialog. pywebview проверяет каждую строку регуляркой
 # вида ^([\w ]+)\(\*\.\w+...\)$ : в описании допустимы только буквы и пробелы,
@@ -43,6 +42,36 @@ def _is_admin():
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def _run_elevated(exe, args):
+    """Запускает exe с правами (UAC) и ждёт, пока он завершится.
+
+    Раньше это делал powershell Start-Process -Verb RunAs: тот же
+    ShellExecuteEx внутри, но сначала секунда-другая на запуск самого
+    PowerShell — до появления окна UAC. Отказ в UAC приходит исключением;
+    наружу он не выходит: вызывающий судит по файлу ответа.
+    """
+    import pywintypes
+    import win32api
+    import win32con
+    import win32event
+    from win32com.shell import shell, shellcon
+
+    try:
+        info = shell.ShellExecuteEx(
+            fMask=shellcon.SEE_MASK_NOCLOSEPROCESS, lpVerb="runas",
+            lpFile=exe, lpParameters=subprocess.list2cmdline(args),
+            nShow=win32con.SW_HIDE)
+    except pywintypes.error:
+        return
+    proc = info.get("hProcess")
+    if not proc:
+        return
+    try:
+        win32event.WaitForSingleObject(proc, win32event.INFINITE)
+    finally:
+        win32api.CloseHandle(proc)
 
 
 class Api:
@@ -150,17 +179,7 @@ class Api:
                 exe, base_args = sys.executable, []
             else:
                 exe, base_args = sys.executable, ["-m", "dualvpn.cli"]
-            args = base_args + ["admin-op", op, payload_file, result_file]
-
-            def q(s):
-                return "'" + s.replace("'", "''") + "'"
-
-            ps_args = ",".join(q(a) for a in args)
-            ps_cmd = (f"Start-Process -FilePath {q(exe)} -ArgumentList {ps_args} "
-                      f"-Verb RunAs -Wait -WindowStyle Hidden")
-            subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-                creationflags=_NO_WINDOW)
+            _run_elevated(exe, base_args + ["admin-op", op, payload_file, result_file])
 
             if os.path.isfile(result_file):
                 with open(result_file, encoding="utf-8") as fh:
