@@ -1,4 +1,7 @@
-"""Значок в трее: включить, выключить, выбрать профиль, открыть окно.
+"""Значок в трее: включить, выключить, добавить конфиг, открыть окно.
+
+Остальное — выбор личного профиля, автозапуск, рабочая сеть — только в окне:
+меню трея держим коротким, а настройки — в одном месте.
 
 Туннелем владеет служба, трей шлёт ей команды через именованный канал.
 Установленный трей запускается от администратора (манифест, см. dualvpn.spec):
@@ -10,11 +13,15 @@
 подстраивается под тёмную и светлую тему панели задач.
 """
 
+import os
 import threading
+import time
 
-from . import buildconfig, ipc, paths
+from . import ipc, paths
 
 POLL_EVERY = 3.0
+# Сколько выход ждёт, пока служба закончит начатый start и примет stop.
+QUIT_WAIT = 40.0
 
 # Пределы полей NOTIFYICONDATA с завершающим нулём. pystray их не обрезает:
 # строка длиннее — ValueError, и падает тот поток, который менял подпись.
@@ -50,16 +57,12 @@ def _icon_image(state):
 
 
 class Tray:
-    def __init__(self, on_quit_stops_tunnel=False):
+    def __init__(self):
         self.icon = None
         self.state = "off"
         self.status = {}
         self._last_menu_sig = None
         self.stop_event = threading.Event()
-        # В портативной версии туннель держит этот же процесс, и выход из трея
-        # обязан его опустить. В установленной — им владеет служба, и закрытие
-        # значка не должно выключать VPN.
-        self.quit_stops_tunnel = on_quit_stops_tunnel
 
     # ------------------------------------------------------------- статус
 
@@ -106,9 +109,7 @@ class Tray:
     def _menu_sig(self):
         """То, от чего зависят подписи, галочки и доступность пунктов меню."""
         st = self.status
-        return (bool(st), bool(st.get("up")), bool(st.get("busy")),
-                bool(st.get("autostart")), st.get("profile") or "",
-                tuple(st.get("profiles") or ()))
+        return (bool(st), bool(st.get("up")), bool(st.get("busy")))
 
     def _refresh_icon(self):
         if self.icon is None:
@@ -160,11 +161,6 @@ class Tray:
                 enabled=lambda _i: bool(self.status.get("up"))
                 and not self.status.get("busy")),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Личный профиль", pystray.Menu(self._profile_items)),
-            pystray.MenuItem(
-                "Включать при старте", self.on_autostart,
-                checked=lambda _i: bool(self.status.get("autostart"))),
-            pystray.Menu.SEPARATOR,
             # Как и в окне, при поднятом туннеле конфиги не меняем: новый файл
             # подействовал бы только после перезапуска, а до того работал бы
             # старый — «поменял, а ничего не изменилось».
@@ -174,40 +170,10 @@ class Tray:
             pystray.MenuItem(
                 "Добавить личный конфиг…", lambda: self.on_add_config("personal"),
                 enabled=self._can_edit),
-            pystray.MenuItem(
-                "Загрузить site.env…", self.on_load_site,
-                enabled=self._can_edit),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Окно…", self.on_window),
-            pystray.MenuItem("Выход", self.on_quit),
+            pystray.MenuItem("Открыть панель управления…", self.on_window),
+            pystray.MenuItem("Закрыть", self.on_quit),
         )
-
-    def _profile_items(self):
-        """Генератор пунктов подменю — pystray зовёт его при каждом показе."""
-        import pystray
-
-        # Рабочий конфиг подключается всегда и выбора не требует — в списке
-        # только личные, иначе выбрать «corp» личным туннелем было бы можно.
-        names = [n for n in (self.status.get("profiles") or [])
-                 if not buildconfig.is_corp_name(n)]
-        if not names:
-            yield pystray.MenuItem("(конфигов нет)", None, enabled=False)
-            return
-        for name in names:
-            yield pystray.MenuItem(
-                name, self._pick(name),
-                checked=lambda _it, n=name: n == (self.status.get("profile")
-                                                  or "personal"),
-                radio=True)
-
-    def _pick(self, name):
-        """Обработчик пункта профиля, с именем, связанным через замыкание.
-
-        Не `lambda _i, _it, n=name`: pystray считает аргументы по co_argcount,
-        и параметр по умолчанию для него третий аргумент — ValueError прямо
-        при построении меню. Падало и открытие меню, и поток опроса.
-        """
-        return lambda: self.on_profile(name)
 
     # -------------------------------------------------------------- команды
 
@@ -244,12 +210,6 @@ class Tray:
                 self._notify(str(exc))
         threading.Thread(target=work, daemon=True).start()
 
-    def on_profile(self, name):
-        self._do("set-profile", profile=name)
-
-    def on_autostart(self):
-        self._do("set-autostart", on=not self.status.get("autostart"))
-
     # ---------------------------------------------------------------- конфиги
 
     def _can_edit(self, _item=None):
@@ -267,29 +227,11 @@ class Tray:
             if not picked:
                 return
             path, text = picked
-            import os
             name = os.path.splitext(os.path.basename(path))[0]
             reply = self._call("add-config", name=name, text=text, kind=kind)
             if reply is not None:
                 what = "рабочий" if kind == "corp" else "личный"
                 self._notify(f"{what} конфиг добавлен: {reply.get('name')}.conf")
-        threading.Thread(target=work, daemon=True).start()
-
-    def on_load_site(self):
-        """site.env — домены и DNS рабочей сети — целиком из файла."""
-        def work():
-            picked = _pick_file(
-                "Настройки рабочей сети (site.env)",
-                "site.env\0*.env\0Все файлы\0*.*\0")
-            if not picked:
-                return
-            _path, text = picked
-            if "[interface]" in text.lower():
-                self._notify("это конфиг WireGuard, а не site.env — "
-                             "добавь его пунктом «Добавить … конфиг»")
-                return
-            if self._call("set-site", text=text) is not None:
-                self._notify("настройки рабочей сети обновлены")
         threading.Thread(target=work, daemon=True).start()
 
     def _call(self, op, **payload):
@@ -312,7 +254,6 @@ class Tray:
         потоке; в одном процессе они друг друга блокируют. Отдельный процесс
         обходится дешевле, чем попытка их подружить.
         """
-        import os
         import subprocess
         import sys
 
@@ -347,28 +288,45 @@ class Tray:
                       "a", encoding="utf-8", errors="replace")
         except OSError:
             log = subprocess.DEVNULL
-        subprocess.Popen(cmd, stdout=log, stderr=log,
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self._window_proc = subprocess.Popen(
+            cmd, stdout=log, stderr=log,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     def on_quit(self):
-        """Закрывает значок.
+        """Выключает VPN и закрывает значок — в обеих версиях.
 
-        В установленной версии туннель при этом остаётся поднятым: им владеет
-        служба, и «закрыл значок» не должно означать «выключил VPN» — это ровно
-        то поведение, которого ждут от обычного VPN-клиента.
+        Раньше в установленной версии туннель после «Выход» оставался поднятым:
+        им владеет служба. Снаружи это выглядело как «закрыл программу, а она
+        работает», и выключить VPN без значка было нечем, кроме диспетчера
+        задач. Теперь выход значит выход.
 
-        В портативной держать туннель после выхода некому, поэтому опускаем.
-        Сам вызов делаем здесь, а не только в portable.run(): пользователь ждёт,
-        что к моменту исчезновения значка сеть уже вернулась в норму.
+        stop шлём и при «выключен»: туннель мог подниматься (busy) или остаться
+        полуживым после ошибки, а stop на чистой системе безвреден. Значок
+        прячем сразу — уборка маршрутов идёт секунды, и всё это время меню
+        было бы живым, но бесполезным.
         """
-        if self.quit_stops_tunnel and self.status.get("up"):
-            try:
-                ipc.call("stop")
-            except ipc.NotRunning:
-                # Ядро в этом же процессе, но канал мог не подняться. Уборку
-                # всё равно доделает portable.run() через core.shutdown().
-                pass
         self.stop_event.set()
+        if self.icon is not None:
+            self.icon.visible = False
+        # Пока идёт start (до тридцати секунд), служба на stop отвечает «уже
+        # идёт» — ждём конца операции и повторяем, иначе выход оставил бы
+        # туннель поднятым ровно в тот момент, когда его включали.
+        # Любой другой отказ повтором не лечится — выходим сразу.
+        deadline = time.monotonic() + QUIT_WAIT
+        try:
+            while (not ipc.call("stop").get("ok")
+                   and ipc.call("status").get("status", {}).get("busy")
+                   and time.monotonic() < deadline):
+                time.sleep(1)
+        except ipc.NotRunning:
+            # Службы нет — опускать нечего. В портативной версии уборку
+            # всё равно доделает portable.run() через core.shutdown().
+            pass
+        # Окно — отдельный процесс; без трея ему некому быть, и оно висело бы
+        # в диспетчере задач после «Закрыть».
+        proc = getattr(self, "_window_proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
         if self.icon is not None:
             self.icon.stop()
 
@@ -428,3 +386,8 @@ def _pick_file(title, filters):
 
 def run():
     Tray().run()
+    # Значок закрыт — процесс обязан закончиться. Обычный выход ждёт все
+    # недемонические потоки, а их может оставить COM диалога выбора файла или
+    # pywin32; тогда DualVPN-Tray.exe остался бы висеть без значка, и снять
+    # его можно было бы только из диспетчера задач. Уборка уже сделана в on_quit.
+    os._exit(0)

@@ -94,6 +94,11 @@ button.primary:hover:not(:disabled) { background: #0b62e4; }
    так понятнее, чем поштучно выключенные кнопки. */
 #confs-wrap.locked { opacity: 0.45; pointer-events: none; }
 #lockhint { color: var(--dim); padding: 2px 3px 0; }
+/* Автозапуск — настройка, а не действие: флажком под кнопками, без рамки,
+   чтобы не спорить с «Включить» за внимание. */
+#autostart-row { display: flex; gap: 7px; align-items: center; color: var(--dim);
+                 padding: 0 3px; margin-top: -4px; cursor: pointer; }
+#autostart-row input { margin: 0; }
 /* Подвал колонки: версия нужна, когда просят «а какая у тебя», но внимания
    к себе требовать не должна. */
 #version { color: var(--dim); font-size: 11px; padding: 2px 3px 4px;
@@ -234,6 +239,8 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
     <button id="btn-toggle" class="primary">Включить</button>
     <button id="btn-restart">Перезапустить</button>
   </div>
+  <label id="autostart-row"><input type="checkbox" id="autostart">
+    Включать VPN при запуске компьютера</label>
 
   <div id="lockhint" hidden>выключи VPN, чтобы менять конфиги</div>
   <div id="confs-wrap">
@@ -324,6 +331,7 @@ const esc = t => String(t).replace(/[&<>"']/g, c =>
 
 let LAST = {};
 let PENDING = null;    // команда отправлена, состояние ещё не догнало
+let AUTOSTART_PENDING = false;
 
 // Рестарт нельзя ждать сравнением с желаемым состоянием: жмут его при поднятом
 // туннеле, и «уже как надо» получается сразу. Ждём полный цикл: упал и поднялся.
@@ -423,6 +431,12 @@ function render(s) {
   }
   document.getElementById('btn-install').hidden = !noDaemon;
   document.getElementById('actions').hidden = noDaemon;
+  document.getElementById('autostart-row').hidden = noDaemon || s.no_service;
+  // Пока идёт запрос (там UAC), опрос не должен вернуть флажок назад —
+  // иначе он мигает под рукой, пока человек жмёт «Да».
+  const auto = document.getElementById('autostart');
+  if (!AUTOSTART_PENDING) auto.checked = !!s.autostart;
+  auto.disabled = AUTOSTART_PENDING;
   document.getElementById('confs-wrap').classList.toggle('locked', up);
   document.getElementById('lockhint').hidden = !up;
   tick('status');
@@ -592,6 +606,10 @@ function renderHowto(h) {
     </table>
     <p class="note">Любой другой файл в <code>conf/</code> тоже можно выбрать
     личным — слева в списке. Рабочий подключается всегда и выбора не требует.</p>
+    <p class="note">Кнопками «Добавить … конфиг» можно брать файл с любым
+    именем: тип задаёт кнопка, а не имя. Рабочий сохраняется как
+    <code>corp.conf</code> и заменяет прежний, личный — под своим именем (похожее
+    на рабочее получает приставку <code>personal-</code>).</p>
 
     <h3>Что подключено сейчас</h3>
     <table>
@@ -722,6 +740,14 @@ document.getElementById('btn-toggle').onclick = () => {
   render(LAST);                       // мгновенная реакция, не ждём опроса
 };
 document.getElementById('btn-install').onclick = () => send('install_daemon');
+document.getElementById('autostart').onchange = e => {
+  AUTOSTART_PENDING = true;
+  send('set_autostart', e.target.checked);
+  render(LAST);
+};
+// Ответ на set_autostart — и при успехе, и при отказе: следующий render
+// покажет то, что на самом деле записала служба.
+function autostartDone() { AUTOSTART_PENDING = false; }
 document.getElementById('btn-site').onclick = () => send('site');
 document.getElementById('sheet-load').onclick = () => send('load_site');
 document.getElementById('sheet-save').onclick = () => {

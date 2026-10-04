@@ -83,6 +83,41 @@ def test_личный_с_тем_же_именем_перезаписываетс
         assert "PrivateKey = z" in fh.read()
 
 
+def _profile():
+    with open(paths.PROFILE_FILE, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_удаление_выбранного_личного_переключает_на_другой(core):
+    _put("corp.conf")
+    core._add_config("nl-2", WG, kind="personal")
+    core._add_config("nl-1", WG, kind="personal")
+
+    r = core._remove_config("nl-1")
+
+    assert r["ok"]
+    # Не corp: рабочий личным туннелем не бывает.
+    assert _profile() == "nl-2"
+
+
+def test_удаление_последнего_личного_сбрасывает_выбор(core):
+    _put("corp.conf")
+    core._add_config("nl-1", WG, kind="personal")
+
+    core._remove_config("nl-1")
+
+    assert _profile() == ""
+
+
+def test_удаление_невыбранного_выбор_не_трогает(core):
+    core._add_config("nl-2", WG, kind="personal")
+    core._add_config("nl-1", WG, kind="personal")
+
+    core._remove_config("nl-2")
+
+    assert _profile() == "nl-1"
+
+
 def test_bom_от_блокнота_не_мешает(core):
     r = core._add_config("nl-1", "\ufeff" + WG, kind="personal")
     assert r["ok"]

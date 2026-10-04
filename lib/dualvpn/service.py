@@ -276,6 +276,12 @@ class Core:
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
         self.log(f"→ удалён конфиг {name}.conf")
+        if name == probe.Prober.current_profile():
+            # Выбранный профиль указывал бы на удалённый файл, и следующее
+            # «Включить» падало бы с «нет профиля». Берём другой личный, а без
+            # него — пусто: сборка тогда ищет personal.conf / awg*.conf.
+            rest = [p for p in self._profiles() if not buildconfig.is_corp_name(p)]
+            self._set_profile(rest[0] if rest else "")
         return {"ok": True, "profiles": self._profiles()}
 
     def _set_profile(self, name):

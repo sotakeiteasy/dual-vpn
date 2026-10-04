@@ -74,6 +74,15 @@ class Api:
         elif name == "restart":
             ipc.call("stop")
             self._guard(ipc.call("start", profile=""))
+        elif name == "set_autostart":
+            # Флажок лежит в каталоге службы — команда под администратором,
+            # как и правка конфигов. Чем бы ни кончился UAC, флажок на
+            # странице должен вернуться к настоящему состоянию.
+            try:
+                self._guard(self._admin_call("set-autostart", on=bool(arg)))
+            finally:
+                self.js("autostartDone")
+                self.refresh()
         elif name == "use_config":
             self._guard(ipc.call("set-profile", profile=arg))
             self.refresh(full=True)
@@ -351,7 +360,7 @@ def _format_env(values):
 # ---------------------------------------------------------------- запуск
 
 def open_window():
-    """Открывает окно и не возвращается, пока его не закроют."""
+    """Открывает окно; когда его закроют, завершает процесс — не возвращается."""
     import webview
 
     holder = {}
@@ -377,3 +386,7 @@ def open_window():
     # gui='edgechromium' — WebView2, он есть в Windows 10/11 из коробки.
     webview.start(gui="edgechromium", private_mode=False)
     holder["window"] = None
+    # Окно закрыто — процесс тоже. WebView2 ходит через pythonnet, и потоки
+    # .NET способны удержать dualvpn.exe после закрытия окна: тогда он висел
+    # бы в диспетчере задач без окна. Ничего несохранённого здесь нет.
+    os._exit(0)
