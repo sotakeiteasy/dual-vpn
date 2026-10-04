@@ -44,7 +44,9 @@ class Core:
 
     def log(self, line):
         paths.ensure_dirs()
-        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+        # С миллисекундами: по разнице штампов соседних строк видно, какой
+        # шаг включения ест время, — секунд для этого мало.
+        stamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         try:
             with open(SERVICE_LOG, "a", encoding="utf-8") as fh:
                 fh.write(f"{stamp} {line}\n")
