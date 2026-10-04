@@ -4,7 +4,9 @@ pystray и окно здесь не поднять — подменяем зна
 и проверяем только решения трея: запускать ли окно и кто ждёт службу.
 """
 
+import ctypes
 import subprocess
+import sys
 import threading
 import types
 
@@ -108,3 +110,46 @@ def test_выход_закрывает_значок_и_окно_даже_при_
     assert terminated.is_set()
     assert thread_done.wait(5)
     assert escaped == [RuntimeError]
+
+
+class _Uxtheme:
+    """uxtheme по ordinal: записывает, что и с чем позвали."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getitem__(self, ordinal):
+        return lambda *args: self.calls.append((ordinal, args))
+
+
+def _fake_windows(monkeypatch, build):
+    uxtheme = _Uxtheme()
+    monkeypatch.setattr(ctypes, "windll",
+                        types.SimpleNamespace(uxtheme=uxtheme), raising=False)
+    monkeypatch.setattr(sys, "getwindowsversion",
+                        lambda: types.SimpleNamespace(build=build), raising=False)
+    return uxtheme.calls
+
+
+def test_тёмное_меню_включается_с_windows_1903(monkeypatch):
+    calls = _fake_windows(monkeypatch, 18362)
+
+    tray._dark_menus()
+
+    assert calls == [(135, (2,)), (136, ())]
+
+
+def test_на_сборке_до_1903_ordinal_135_не_зовётся(monkeypatch):
+    calls = _fake_windows(monkeypatch, 17763)
+
+    tray._dark_menus()
+
+    assert calls == []
+
+
+def test_без_windll_тёмное_меню_ничего_не_делает(monkeypatch):
+    monkeypatch.delattr(ctypes, "windll", raising=False)
+    monkeypatch.setattr(sys, "getwindowsversion",
+                        lambda: types.SimpleNamespace(build=26300), raising=False)
+
+    tray._dark_menus()

@@ -14,6 +14,7 @@
 """
 
 import os
+import sys
 import threading
 import time
 
@@ -374,6 +375,7 @@ class Tray:
     def run(self):
         import pystray
 
+        _dark_menus()
         self.icon = pystray.Icon(
             "dualvpn", _icon_image("off"), f"DualVPN {paths.version()}",
             menu=self._menu())
@@ -384,6 +386,27 @@ class Tray:
 def _clip(text, limit):
     text = str(text or "")
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _dark_menus():
+    """Тёмное меню значка: окно тёмное всегда, светлое меню рядом выбивается.
+
+    Нативное меню Win32 тёмным делает только недокументированный
+    SetPreferredAppMode (uxtheme, ordinal 135) с ForceDark = 2, а
+    FlushMenuThemes (ordinal 136) сбрасывает уже закэшированную тему меню.
+    Есть с Windows 10 1903, сборка 18362. Установщик пускает и с 17763, а там
+    под ordinal 135 другая функция, поэтому на старых сборках не зовём ничего.
+    Зовётся до создания значка; на любой ошибке меню просто остаётся светлым.
+    """
+    try:
+        import ctypes
+        if sys.getwindowsversion().build < 18362:
+            return
+        uxtheme = ctypes.windll.uxtheme
+        uxtheme[135](2)
+        uxtheme[136]()
+    except Exception:
+        pass
 
 
 def _raise_window(title):
