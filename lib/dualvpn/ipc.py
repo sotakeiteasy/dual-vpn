@@ -100,6 +100,16 @@ class Server:
         finally:
             import win32file
             import win32pipe
+            # DisconnectNamedPipe выбрасывает всё, что клиент ещё не дочитал.
+            # Без сброса ответ терялся, если трей не успел прочитать: ipc.call
+            # падал с NotRunning, и значок на три секунды краснел — «служба не
+            # отвечает», хотя она ответила. FlushFileBuffers ждёт, пока клиент
+            # заберёт данные. Отдельным try: сбой сброса (клиент уже ушёл) не
+            # должен оставить экземпляр канала неотключённым.
+            try:
+                win32file.FlushFileBuffers(pipe)
+            except Exception:
+                pass
             try:
                 win32pipe.DisconnectNamedPipe(pipe)
                 win32file.CloseHandle(pipe)
@@ -250,7 +260,7 @@ def call(op, **payload):
                 f"служба {paths.SERVICE_NAME} не отвечает: канал занят")
 
         win32file.WriteFile(handle, req)
-        _, data = win32file.ReadFile(handle, _BUF)
+        data = _read_reply(handle)
     except pywintypes.error as exc:
         raise NotRunning(
             f"служба {paths.SERVICE_NAME} не отвечает: {exc.strerror}") from exc
@@ -262,3 +272,33 @@ def call(op, **payload):
         return json.loads(data.decode("utf-8"))
     except ValueError as exc:
         raise NotRunning("служба ответила неразборчиво") from exc
+
+
+# ERROR_BROKEN_PIPE: сервер закрыл свой конец — после ответа это нормальный конец.
+_ERROR_BROKEN_PIPE = 109
+
+
+def _read_reply(handle):
+    """Читает ответ целиком — до перевода строки, которым его кончает сервер.
+
+    Одного ReadFile мало: ответ может прийти по частям, а лог на четыреста
+    строк или статус со многими профилями больше буфера. Обрезанный ответ
+    json.loads не разбирал, и окно писало «служба ответила неразборчиво».
+    """
+    import pywintypes
+    import win32file
+
+    chunks = []
+    while True:
+        try:
+            _, chunk = win32file.ReadFile(handle, _BUF)
+        except pywintypes.error as exc:
+            if exc.winerror == _ERROR_BROKEN_PIPE and chunks:
+                break
+            raise
+        if not chunk:
+            break
+        chunks.append(chunk)
+        if chunk.endswith(b"\n"):
+            break
+    return b"".join(chunks)
