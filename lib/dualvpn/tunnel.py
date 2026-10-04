@@ -18,6 +18,7 @@ import datetime
 import json
 import os
 import subprocess
+import threading
 import time
 
 from . import buildconfig, paths, winnet
@@ -33,6 +34,10 @@ SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE")
 HALVES = ("0.0.0.0/1", "128.0.0.0/1")
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Сколько ждём реальный адрес от запуска запроса. Обычно он приходит за
+# секунду, но на плохой сети запрос висел до 15 с и держал всё включение.
+REAL_IP_WAIT = 6
 
 # Пока туннель поднят, не даём системе засыпать по простою: во сне keepalive
 # не уходит, WG-сессия протухает, а TCP-соединения, открытые до сна, после
@@ -233,6 +238,14 @@ class Tunnel:
             return (f"нет {paths.WINTUN}: без wintun.dll sing-box не создаст "
                     f"сетевой адаптер")
 
+        # Реальный адрес спрашиваем в фоне, пока собирается и проверяется
+        # конфиг: туннеля ещё нет, ответ придёт мимо него.
+        real_ip = []
+        fetch = threading.Thread(
+            target=lambda: real_ip.append(self._fetch_real_ip()), daemon=True)
+        fetch.start()
+        fetch_deadline = time.time() + REAL_IP_WAIT
+
         self.log("→ собираю конфиг из conf\\…")
         try:
             buildconfig.main()
@@ -261,8 +274,6 @@ class Tunnel:
             return "нет маршрута по умолчанию — сеть не поднята?"
         self.log(f"→ аплинк: интерфейс {up_idx}, шлюз {gw}")
 
-        self._save_real_ip()
-
         # До старта туннеля: иначе первые же запросы браузера уйдут по v6 мимо.
         self.own("v6block")
         if winnet.v6_block(up_idx):
@@ -280,6 +291,15 @@ class Tunnel:
         for ip in peers:
             self.own("host", ip, gw, up_idx)
         winnet.add_routes([(f"{ip}/32", up_idx, gw, 1) for ip in peers])
+
+        # Дожидаемся адреса до старта sing-box: после него запрос ушёл бы в
+        # туннель, и адрес выхода записался бы как «реальный» — пробер видел бы
+        # утечку в рабочем туннеле. Опоздавший ответ поэтому отбрасываем.
+        fetch.join(max(0.0, fetch_deadline - time.time()))
+        if not real_ip:
+            self.log(f"→ реальный адрес не узнал за {REAL_IP_WAIT}с — "
+                     f"утечку сравнить будет не с чем")
+        self._save_real_ip(real_ip[0] if real_ip else "")
 
         log_path = self.open_log()
         self.log(f"→ журнал sing-box: {log_path}")
@@ -325,22 +345,24 @@ class Tunnel:
         self.log("→ работает")
         return ""
 
-    def _save_real_ip(self):
-        """Настоящий адрес провайдера, пока туннель не поднят.
+    def _fetch_real_ip(self):
+        """Настоящий адрес провайдера, пока туннель не поднят, или ''.
 
         Утечкой считается совпадение с ним. Сравнивать с адресом сервера
         ненадёжно: он может выходить не тем адресом, на котором принимает
         соединения, и тогда рабочий туннель показывался бы как утечка.
         """
-        ip = ""
         try:
             import urllib.request
             with urllib.request.urlopen("https://ifconfig.me/ip", timeout=4) as r:
                 ip = r.read().decode("ascii", "replace").strip()
         except Exception:
-            ip = ""
+            return ""
         if not all(c in "0123456789." for c in ip) or not ip:
-            ip = ""              # не ответили — не гадаем
+            return ""            # не ответили — не гадаем
+        return ip
+
+    def _save_real_ip(self, ip):
         try:
             with open(paths.REAL_IP_FILE, "w", encoding="utf-8") as fh:
                 fh.write(ip)
