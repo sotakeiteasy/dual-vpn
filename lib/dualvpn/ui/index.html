@@ -526,7 +526,12 @@ function fmtLine(l) {
          `<span class="lmsg">${esc(rest)}</span>`;
 }
 
+// Последние полученные строки: поиск и «только ошибки» фильтруют их здесь.
+// Раньше каждая буква в поиске шла запрос в службу, и окно подвисало.
+let logLines = [];
+
 function renderLogs(lines) {
+  logLines = lines;
   const q = document.getElementById('search').value.toLowerCase();
   const onlyErr = document.getElementById('only-err').checked;
   const box = document.getElementById('lines');
@@ -768,8 +773,8 @@ document.getElementById('side').onclick = e => {
   if (a) send('add_config', a.dataset.add);
 };
 
-document.getElementById('search').oninput = () => send('logs');
-document.getElementById('only-err').onchange = () => send('logs');
+document.getElementById('search').oninput = () => renderLogs(logLines);
+document.getElementById('only-err').onchange = () => renderLogs(logLines);
 document.getElementById('sheet-close').onclick = closeSheet;
 document.getElementById('sheet-del').onclick =
   () => send('del_config', document.getElementById('sheet').dataset.name);

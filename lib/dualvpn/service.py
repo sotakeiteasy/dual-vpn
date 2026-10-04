@@ -20,6 +20,9 @@ from . import buildconfig, ipc, paths, probe, tunnel, winnet
 
 AUTOSTART_FILE = os.path.join(paths.STATE, "autostart")
 SERVICE_LOG = os.path.join(paths.LOGS, "service.log")
+# Сколько читать с конца журнала sing-box: окно просит 400 строк, это
+# десятки КБ. Запас — на длинные строки с адресами и ошибками TLS.
+LOG_TAIL_BYTES = 256 * 1024
 
 
 class Core:
@@ -313,17 +316,27 @@ class Core:
 
     @staticmethod
     def _tail_log(lines):
-        """Последние строки журнала sing-box — их показывает окно."""
+        """Последние строки журнала sing-box — их показывает окно.
+
+        Читаем только хвост файла: за долгую сессию журнал вырастает
+        до мегабайт, а окно спрашивает его раз в две секунды — целиком это
+        было бы чтение и разбор всего файла на каждый опрос.
+        """
         try:
             files = sorted(f for f in os.listdir(paths.LOGS)
                            if f.startswith("vpn-") and f.endswith(".log"))
             if not files:
                 return []
-            with open(os.path.join(paths.LOGS, files[-1]),
-                      encoding="utf-8", errors="replace") as fh:
-                return fh.read().splitlines()[-lines:]
+            with open(os.path.join(paths.LOGS, files[-1]), "rb") as fh:
+                size = fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, size - LOG_TAIL_BYTES))
+                data = fh.read()
         except OSError:
             return []
+        out = data.decode("utf-8", errors="replace").splitlines()
+        if size > LOG_TAIL_BYTES:
+            out = out[1:]          # первая строка хвоста обрезана посередине
+        return out[-lines:]
 
 
 # ------------------------------------------------------- обвязка Windows
