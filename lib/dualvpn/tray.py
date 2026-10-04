@@ -574,12 +574,14 @@ def _conf_labels(st):
 def _conf_colors(st, corp_probe, checking):
     """(рабочий, личный): ключи COLORS для кружков.
 
-    VPN выключен — серые оба. Идёт проверка — рыжие. Личный работает, если
+    VPN выключен — итог прошлой проверки этих же файлов (st["last"]), а если
+    его нет — серые. Идёт проверка — рыжие. Личный работает, если
     выход виден и он не мимо туннеля. Рабочий — если хост проверки ответил
     по DNS или HTTP; без CORP_PROBE ответить нечему, и серый честнее красного.
     """
     if not st.get("up"):
-        return "off", "off"
+        last = st.get("last") or {}
+        return last.get("corp") or "off", last.get("personal") or "off"
     if checking or st.get("busy"):
         return "busy", "busy"
     personal = ("up" if st.get("exit_ip") and st.get("exit_state") != "leak"

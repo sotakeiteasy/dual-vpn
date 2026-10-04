@@ -11,6 +11,7 @@
 """
 
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -23,6 +24,9 @@ SERVICE_LOG = os.path.join(paths.LOGS, "service.log")
 # Сколько читать с конца журнала sing-box: окно просит 400 строк, это
 # десятки КБ. Запас — на длинные строки с адресами и ошибками TLS.
 LOG_TAIL_BYTES = 256 * 1024
+# Итог последней проверки по каждому конфигу: без туннеля мерить нечем, но
+# «как он отработал в прошлый раз» видно и при выключенном VPN.
+LAST_CHECK_FILE = os.path.join(paths.STATE, "last-check.json")
 
 
 class Core:
@@ -143,7 +147,53 @@ class Core:
         st["singbox"] = self._singbox_version()
         st["profiles"] = self._profiles()
         st["corp"] = self._corp()
+        st["last"] = self._last_results()
         return st
+
+    @staticmethod
+    def _conf_stamp(kind, name):
+        """Отпечаток файла конфига: заменили файл — прошлый итог не про него."""
+        try:
+            return os.stat(buildconfig.conf_path(kind, name)).st_mtime_ns
+        except (OSError, ValueError):
+            return None
+
+    def _last_results(self):
+        """{'corp': 'up'|'error'|'', 'personal': …} для файлов, что лежат сейчас."""
+        try:
+            with open(LAST_CHECK_FILE, encoding="utf-8") as fh:
+                saved = json.load(fh)
+        except (OSError, ValueError):
+            saved = {}
+        cur = {"corp": (self._corp() or [""])[0],
+               "personal": probe.Prober.current_profile()}
+        out = {}
+        for kind, name in cur.items():
+            rec = saved.get(kind) or {}
+            fresh = (name and rec.get("name") == name
+                     and rec.get("stamp") == self._conf_stamp(kind, name))
+            out[kind] = rec.get("result", "") if fresh else ""
+        return out
+
+    def _remember_check(self, st, corp_probe):
+        """Запоминает итог проверки при поднятом туннеле — по тем же правилам,
+        что красит кружки трей."""
+        cur = {"corp": (self._corp() or [""])[0],
+               "personal": probe.Prober.current_profile()}
+        result = {
+            "personal": ("up" if st.get("exit_ip")
+                         and st.get("exit_state") != "leak" else "error"),
+            "corp": ("up" if st.get("corp_ip") or st.get("corp_http")
+                     else "error" if corp_probe else ""),
+        }
+        data = {k: {"name": n, "stamp": self._conf_stamp(k, n),
+                    "result": result[k]} for k, n in cur.items() if n}
+        try:
+            paths.ensure_dirs()
+            with open(LAST_CHECK_FILE, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+        except OSError:
+            pass
 
     def _check(self):
         """Проверяет туннели сейчас и отдаёт статус.
@@ -155,8 +205,12 @@ class Core:
         st = self.prober.snapshot()
         if st.get("tun") and st.get("r_low") and not self.busy:
             self.prober.check_now()
-        return {"ok": True, "status": self._status(),
-                "corp_probe": bool(paths.site_env().get("CORP_PROBE"))}
+        corp_probe = bool(paths.site_env().get("CORP_PROBE"))
+        st = self._status()
+        if st["up"] and not self.busy:
+            self._remember_check(st, corp_probe)
+            st["last"] = self._last_results()
+        return {"ok": True, "status": st, "corp_probe": corp_probe}
 
     _singbox_cached = None
 

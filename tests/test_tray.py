@@ -209,3 +209,15 @@ def test_без_windll_тёмное_меню_ничего_не_делает(monk
                         lambda: types.SimpleNamespace(build=26300), raising=False)
 
     tray._dark_menus()
+
+
+def test_кружки_без_vpn_берут_итог_прошлой_проверки():
+    st = {"up": False, "last": {"corp": "error", "personal": "up"}}
+
+    assert tray._conf_colors(st, True, False) == ("error", "up")
+
+
+def test_кружки_без_vpn_и_без_итога_серые():
+    assert tray._conf_colors({"up": False}, True, False) == ("off", "off")
+    st = {"up": False, "last": {"corp": "", "personal": ""}}
+    assert tray._conf_colors(st, True, False) == ("off", "off")
