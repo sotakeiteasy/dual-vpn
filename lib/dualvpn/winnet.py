@@ -12,8 +12,9 @@ MSFT_NetIPAddress, ...) — это ровно те классы, поверх к
 «Включить» шло полторы минуты, статус отставал на десятки секунд, а машина
 постоянно молотила PowerShell в фоне.
 
-PowerShell остался для изменений (New-NetRoute, правило брандмауэра) — их
-мало и они редкие — и запасным путём, если WMI вдруг не ответит.
+Изменения идут тем же путём: маршруты — методами MSFT_NetRoute, правило
+брандмауэра — через COM. PowerShell остался только запасным путём, если WMI
+или COM вдруг не ответят.
 """
 
 import ctypes
@@ -266,11 +267,24 @@ def add_route(prefix, if_index, next_hop="0.0.0.0", metric=1):
 
 
 def add_routes(routes):
-    """Ставит несколько маршрутов одним запуском PowerShell.
+    """Ставит маршруты: routes — [(prefix, if_index, next_hop, metric)].
 
-    routes — [(prefix, if_index, next_hop, metric)]. Запуск PowerShell стоит
-    секунды, поэтому пиры и половинки ставятся пачкой, а не по одному.
+    Через MSFT_NetRoute.Create — это и есть New-NetRoute, только без запуска
+    PowerShell: тот вместе с загрузкой модуля NetTCPIP стоил 2–9 секунд на
+    каждый вызов, а включение делает два (видно по service.log). Что WMI
+    поставить не смог, уходит одной пачкой в командлет, как раньше.
     """
+    global last_error
+    if not routes:
+        return
+    try:
+        cls = _wmi().Get("MSFT_NetRoute")
+    except Exception as exc:                               # noqa: BLE001
+        last_error = f"WMI: {exc}"
+        _tls.wmi = None
+        cls = None
+    if cls is not None:
+        routes = [r for r in routes if not _create_route(cls, *r)]
     if not routes:
         return
     PS.run("\n".join(
@@ -279,6 +293,32 @@ def add_routes(routes):
         " -PolicyStore ActiveStore -Confirm:$false -ErrorAction SilentlyContinue"
         " | Out-Null"
         for prefix, idx, hop, metric in routes))
+
+
+def _create_route(cls, prefix, if_index, next_hop, metric):
+    """Один маршрут через WMI. True — маршрут на этом интерфейсе стоит.
+
+    «Такой уже есть» WMI отдаёт ошибкой, а New-NetRoute с SilentlyContinue её
+    глотал: для нас это успех, поэтому после сбоя смотрим в таблицу, а не
+    отправляем маршрут в PowerShell зря.
+    """
+    global last_error
+    try:
+        params = cls.Methods_("Create").InParameters.SpawnInstance_()
+        params.Properties_("DestinationPrefix").Value = prefix
+        params.Properties_("InterfaceIndex").Value = int(if_index)
+        params.Properties_("NextHop").Value = next_hop
+        params.Properties_("RouteMetric").Value = int(metric)
+        params.Properties_("PolicyStore").Value = "ActiveStore"
+        # Этот провайдер при успехе отдаёт ReturnValue None, а сбой — исключением
+        # (проверено на Windows 11); 0 — на случай провайдера по канону WMI.
+        if cls.ExecMethod_("Create", params).ReturnValue in (0, None):
+            return True
+        last_error = f"WMI: маршрут {prefix} не создан"
+    except Exception as exc:                               # noqa: BLE001
+        last_error = f"WMI: {exc}"
+    return any(r.get("InterfaceIndex") == int(if_index)
+               for r in routes_for(prefix) or [])
 
 
 def del_route(prefix, if_index=None):
