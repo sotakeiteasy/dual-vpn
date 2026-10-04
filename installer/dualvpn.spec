@@ -13,6 +13,11 @@
 # процесса не поднимается, и диспетчер отваливается по таймауту (ошибка 1053).
 
 import os
+import re
+
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo,
+    VarStruct, VSVersionInfo)
 
 # SPECPATH — это КАТАЛОГ со spec-файлом (installer/), а не путь к самому файлу.
 # Отсюда до корня ровно один уровень: второй dirname уводил на папку выше
@@ -20,6 +25,37 @@ import os
 ROOT = os.path.dirname(os.path.abspath(SPECPATH))
 INST = os.path.join(ROOT, "installer")
 ICON = os.path.join(INST, "DualVPN.ico")
+
+with open(os.path.join(ROOT, "VERSION"), encoding="utf-8") as fh:
+    VERSION = fh.read().strip()
+
+
+def version_info(description, filename):
+    """Ресурс версии exe. Без него у FileDescription пусто, и диспетчер задач
+    вместо «DualVPN» показывает имя файла.
+
+    Числовая версия — только цифры из VERSION («0.2.9-beta» → 0.2.9.0):
+    суффикс в FixedFileInfo не помещается, он остаётся в строковых полях.
+    """
+    nums = [int(n) for n in re.findall(r"\d+", VERSION.split("-")[0])][:4]
+    nums += [0] * (4 - len(nums))
+    strings = [
+        StringStruct("CompanyName", "Enkeym"),
+        StringStruct("FileDescription", description),
+        StringStruct("FileVersion", VERSION),
+        StringStruct("InternalName", filename),
+        StringStruct("OriginalFilename", filename + ".exe"),
+        StringStruct("ProductName", "DualVPN"),
+        StringStruct("ProductVersion", VERSION),
+    ]
+    return VSVersionInfo(
+        ffi=FixedFileInfo(filevers=tuple(nums), prodvers=tuple(nums)),
+        kids=[
+            # 0409 — английский (США), 04B0 — Unicode: таблица по умолчанию,
+            # её Windows находит без перевода.
+            StringFileInfo([StringTable("040904B0", strings)]),
+            VarFileInfo([VarStruct("Translation", [0x0409, 1200])]),
+        ])
 
 datas = [
     (os.path.join(ROOT, "lib", "dualvpn", "ui"), "dualvpn/ui"),
@@ -56,6 +92,7 @@ tray_pyz = PYZ(tray_a.pure)
 cli_exe = EXE(
     cli_pyz, cli_a.scripts, [], exclude_binaries=True,
     name="dualvpn", console=True, icon=ICON,
+    version=version_info("DualVPN", "dualvpn"),
 )
 # Имя трея обязано отличаться от CLI не только регистром: в Windows
 # DualVPN.exe и dualvpn.exe — один файл, трей ложился поверх CLI, и установщик,
@@ -63,6 +100,7 @@ cli_exe = EXE(
 tray_exe = EXE(
     tray_pyz, tray_a.scripts, [], exclude_binaries=True,
     name="DualVPN-Tray", console=False, icon=ICON,
+    version=version_info("DualVPN Tray", "DualVPN-Tray"),
     # Трей всегда от администратора: UAC один раз при запуске, а не на
     # каждое добавление конфига. Окно запускается из трея и наследует права.
     # Автозапуск поэтому — задачей планировщика, а не папкой «Автозагрузка»:
@@ -103,6 +141,7 @@ portable_exe = EXE(
     portable_a.binaries, portable_a.datas, [],
     name="DualVPN-Portable",
     console=False, icon=ICON,
+    version=version_info("DualVPN Portable", "DualVPN-Portable"),
     # Манифест requireAdministrator: UAC спрашивается один раз при запуске.
     # Без него процесс не сможет ни создать адаптер, ни править маршруты, и
     # приложение молча не заработало бы.

@@ -119,6 +119,13 @@ try {
     if (-not (Test-Path (Join-Path $Dist 'DualVPN-Tray.exe'))) {
         throw 'нет DualVPN-Tray.exe в dist\DualVPN'
     }
+    # Ресурс версии собирает dualvpn.spec. Пустое описание — и диспетчер
+    # задач снова покажет вместо «DualVPN» имя файла.
+    foreach ($exe in (Join-Path $Dist 'dualvpn.exe'), (Join-Path $Dist 'DualVPN-Tray.exe'),
+                     (Join-Path $Root 'dist\DualVPN-Portable.exe')) {
+        $desc = (Get-Item $exe).VersionInfo.FileDescription
+        if (-not $desc) { throw "у $exe нет FileDescription — ресурс версии не собрался" }
+    }
 } finally {
     Pop-Location
 }

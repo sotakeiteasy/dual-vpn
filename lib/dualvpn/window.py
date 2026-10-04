@@ -378,6 +378,28 @@ def _format_env(values):
 
 # ---------------------------------------------------------------- запуск
 
+def _source_icon():
+    """Значок окна, запущенного из исходников. None — остаётся значок exe.
+
+    pywebview берёт значок окна из sys.executable. В сборке это dualvpn.exe
+    со своим ico, а из исходников — python.exe, и окно с кнопкой в панели
+    задач показывали значок Python. Свой AppUserModelID нужен затем же: без
+    него панель задач складывает окно в одну группу с python.exe и берёт
+    значок оттуда. В сборке ID не задаём: ярлык из установщика его не знает,
+    и закреплённый значок разошёлся бы с окном.
+    """
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Enkeym.DualVPN")
+    except Exception:
+        pass
+    try:
+        from . import icon
+        return icon.write_ico(os.path.join(tempfile.gettempdir(), "DualVPN-window.ico"))
+    except Exception:
+        return None
+
+
 def open_window():
     """Открывает окно; когда его закроют, завершает процесс — не возвращается."""
     import webview
@@ -392,6 +414,7 @@ def open_window():
     holder["window"] = webview.create_window(
         f"DualVPN {paths.version()}", index,
         js_api=api, width=1040, height=720, min_size=(880, 560))
+    icon = None if getattr(sys, "frozen", False) else _source_icon()
 
     def poll():
         # Ждём, пока страница отчитается о готовности: до этого window[fn]
@@ -403,7 +426,7 @@ def open_window():
 
     threading.Thread(target=poll, daemon=True).start()
     # gui='edgechromium' — WebView2, он есть в Windows 10/11 из коробки.
-    webview.start(gui="edgechromium", private_mode=False)
+    webview.start(gui="edgechromium", private_mode=False, icon=icon)
     holder["window"] = None
     # Окно закрыто — процесс тоже. WebView2 ходит через pythonnet, и потоки
     # .NET способны удержать dualvpn.exe после закрытия окна: тогда он висел
