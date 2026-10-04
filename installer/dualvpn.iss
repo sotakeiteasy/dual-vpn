@@ -54,9 +54,6 @@ Name: "desktopicon"; Description: "Значок на рабочем столе";
 ; при перезагрузке, а не остаётся в Program Files навсегда.
 Source: "..\dist\DualVPN\*"; DestDir: "{app}"; \
   Flags: ignoreversion recursesubdirs createallsubdirs uninsrestartdelete
-; Образцы конфигов кладём рядом с программой, а не в conf\: в conf\ лежат
-; настоящие ключи, и подмешивать туда примеры при обновлении незачем.
-Source: "..\conf\*.example"; DestDir: "{app}\examples"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -77,6 +74,8 @@ Name: "{autodesktop}\{#MyName}"; Filename: "{app}\{#MyExe}"; Tasks: desktopicon
 ; Ярлык автозапуска из прошлых версий: трей теперь требует администратора,
 ; и из «Автозагрузки» Windows его просто не запустит.
 Type: files; Name: "{userstartup}\{#MyName}.lnk"
+; Образцы конфигов, которые клали версии до 0.2.9: их больше не поставляем.
+Type: filesandordirs; Name: "{app}\examples"
 
 [Run]
 ; --- Права на данные.
