@@ -10,13 +10,17 @@ DUALVPN_DATA при импорте и определяет раскладку о
 так не проверить, для него нужна настоящая машина.
 """
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA = tempfile.mkdtemp(prefix="dualvpn-tests-")
 
+# Каталог свой на каждый прогон, иначе %TEMP% зарастает сотнями dualvpn-tests-*.
+atexit.register(shutil.rmtree, _DATA, ignore_errors=True)
 os.environ["DUALVPN_DATA"] = _DATA
 for _sub in ("conf", "state", os.path.join("state", "logs")):
     os.makedirs(os.path.join(_DATA, _sub), exist_ok=True)
