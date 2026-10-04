@@ -2,37 +2,40 @@
 <meta charset="utf-8">
 <title>VPN-lx</title>
 <style>
+/* Тема одна, тёмная, по палитре AmneziaVPN (AmneziaStyle.qml). Остальные
+   оттенки — подложки статусов, наведение — выводятся из неё через color-mix,
+   чтобы смена цвета не требовала правок по всему файлу. */
 :root {
-  color-scheme: light dark;
-  --bg:        #ececec;
-  --panel:     #fbfbfb;
-  --line:      #00000014;
-  --text:      #1d1d1f;
-  --dim:       #6e6e73;
-  --ok:        #1a9c4b;
-  --warn:      #c77700;
-  --bad:       #d13b30;
-  --off:       #8e8e93;
-  --accent:    #0a6cff;
-  --logbg:     #ffffff;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:    #1c1c1e;  --panel: #252527;  --line: #ffffff1a;
-    --text:  #f2f2f7;  --dim:   #98989f;  --logbg: #1a1a1c;
-    --ok: #32d367; --warn: #ffb03a; --bad: #ff5f52; --off: #7c7c82;
-    --accent: #4c9bff;
-  }
+  color-scheme: dark;
+  --bg:        #101012;              /* backgroundBase */
+  --panel:     #18181b;              /* surfaceBase */
+  --hover:     #232327;              /* surfaceHovered */
+  --pressed:   #2c2d30;              /* surfacePressed */
+  --line:      rgba(255, 255, 255, .08);
+  --text:      #fafafa;              /* textPrimary */
+  --dim:       #a1a1aa;              /* textTertiary */
+  --off:       #71717a;
+  --accent:    #fbb26a;              /* goldenApricot */
+  /* На абрикосовом фоне белый текст не читается. */
+  --on-accent: #0e0e11;
+  --ok:        #3fbf6b;              /* vibrantGreen */
+  --bad:       #eb5757;              /* vibrantRed */
+  /* Жёлтый, а не оранжевый: иначе предупреждение сливается с акцентом. */
+  --warn:      #f2c94c;
+  --logbg:     var(--bg);
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, monospace;
 }
 * { box-sizing: border-box; }
 /* Без !important атрибут hidden проигрывает display:flex у самого элемента —
    поиск по логу оставался виден во вкладке «как это работает». */
 [hidden] { display: none !important; }
-html, body { height: 100%; margin: 0; }
+/* Фон и у html: до раскладки body иначе мелькает белый кадр. */
+html, body { height: 100%; margin: 0; background: var(--bg); }
 body {
-  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font: 14px/1.5 var(--sans);
   color: var(--text); background: var(--bg);
-  display: grid; grid-template-columns: 330px 1fr; height: 100vh;
+  display: grid; grid-template-columns: 340px 1fr; height: 100vh;
   overflow: hidden;                    /* прокручивается содержимое, не окно */
   -webkit-user-select: none; user-select: none;
 }
@@ -52,21 +55,21 @@ body {
 #tunnels { border-top: 1px solid var(--line); }
 #dot { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; flex: none;
        background: var(--off); box-shadow: 0 0 0 3px transparent; }
-#dot.ok   { background: var(--ok);   box-shadow: 0 0 0 3px #1a9c4b22; }
-#dot.warn { background: var(--warn); box-shadow: 0 0 0 3px #c7770022; }
-#dot.bad  { background: var(--bad);  box-shadow: 0 0 0 3px #d13b3022; }
-#state-title { font-size: 15px; font-weight: 600; letter-spacing: -0.1px; }
+#dot.ok   { background: var(--ok);   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
+#dot.warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
+#dot.bad  { background: var(--bad);  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
+#state-title { font-size: 16px; font-weight: 600; letter-spacing: -0.1px; }
 #state-sub   { color: var(--dim); margin-top: 2px; }
 
 /* Туннели: две строки, каждая со своим состоянием — корп отдельно от личного. */
 .tun { display: flex; align-items: baseline; gap: 8px; padding: 9px 14px; }
 .tun + .tun { border-top: 1px solid var(--line); }
-.tun-name { width: 58px; color: var(--dim); flex: none; }
+.tun-name { width: 66px; color: var(--dim); flex: none; }
 .tun-val  { font-variant-numeric: tabular-nums; }
-.chip { font-size: 11px; padding: 1px 7px; border-radius: 20px; margin-left: auto; flex: none; }
-.chip.ok  { color: var(--ok);   background: #1a9c4b1f; }
-.chip.bad { color: var(--bad);  background: #d13b301f; }
-.chip.off { color: var(--off);  background: #8e8e9320; }
+.chip { font-size: 12px; padding: 1px 8px; border-radius: 20px; margin-left: auto; flex: none; }
+.chip.ok  { color: var(--ok);   background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.chip.bad { color: var(--bad);  background: color-mix(in srgb, var(--bad) 14%, transparent); }
+.chip.off { color: var(--dim);  background: color-mix(in srgb, var(--off) 20%, transparent); }
 
 #actions { display: flex; gap: 7px; }
 /* flex:1 у button задумано для строк кнопок; прямой потомок колонки от него
@@ -77,16 +80,19 @@ body {
 #confs-wrap { display: flex; flex-direction: column; gap: 12px; }
 button {
   font: inherit; font-weight: 500; color: var(--text); flex: 1;
-  padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line);
+  padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line);
   background: var(--panel); cursor: pointer;
 }
-/* :not(.primary) обязателен: иначе это правило перебивает синий фон по
-   специфичности, и на наведении кнопка становилась почти белой. */
-button:hover:not(:disabled):not(.primary) { background: #8080801a; }
+/* :not(.primary) обязателен: иначе это правило перебивает фон акцента
+   по специфичности, и на наведении главная кнопка теряла свой цвет. */
+button:hover:not(:disabled):not(.primary) { background: var(--hover); }
+button:active:not(:disabled):not(.primary) { background: var(--pressed); }
 button:disabled { opacity: 0.45; cursor: default; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button.busy { color: var(--dim); }
-button.primary { background: var(--accent); border-color: transparent; color: #fff; }
-button.primary:hover:not(:disabled) { background: #0b62e4; }
+button.primary { background: var(--accent); border-color: transparent; color: var(--on-accent);
+                 font-weight: 600; }
+button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 85%, white); }
 
 /* При поднятом туннеле конфиги не трогаются: смена файла всё равно
    подействует только после перезапуска, а полупроходной режим («поменял,
@@ -98,16 +104,16 @@ button.primary:hover:not(:disabled) { background: #0b62e4; }
    чтобы не спорить с «Включить» за внимание. */
 #autostart-row { display: flex; gap: 7px; align-items: center; color: var(--dim);
                  padding: 0 3px; margin-top: -4px; cursor: pointer; }
-#autostart-row input { margin: 0; }
+#autostart-row input { margin: 0; accent-color: var(--accent); }
 /* Подвал колонки: версия нужна, когда просят «а какая у тебя», но внимания
    к себе требовать не должна. */
-#version { color: var(--dim); font-size: 11px; padding: 2px 3px 4px;
+#version { color: var(--dim); font-size: 12px; padding: 2px 3px 4px;
            margin-top: auto; }
-h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
+h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
      letter-spacing: 0.5px; color: var(--dim); margin: 4px 0 -2px 3px;
      display: flex; align-items: center; gap: 5px; }
 .info { width: 14px; height: 14px; border-radius: 50%; flex: none; cursor: pointer;
-        border: 1px solid var(--dim); color: var(--dim); font-size: 9px;
+        border: 1px solid var(--dim); color: var(--dim); font-size: 10px;
         font-weight: 700; text-transform: none;
         /* inline-flex вместо line-height: буква «i» узкая, и при центровании
            текстом она уезжала влево от центра кружка. */
@@ -119,29 +125,31 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
 /* Конфиги: список с пометкой активного и кнопкой добавления. */
 .conf { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; }
 .conf + .conf { border-top: 1px solid var(--line); }
-.conf:hover { background: #8080801a; }
+.conf:hover { background: var(--hover); }
 .conf-radio { width: 13px; height: 13px; border-radius: 50%; flex: none;
               border: 1.5px solid var(--dim); }
 .conf.active .conf-radio { border-color: var(--accent); background: var(--accent);
                            box-shadow: inset 0 0 0 2.5px var(--panel); }
-/* У рабочего выбора нет: галочка вместо переключателя, чтобы не звало нажать. */
-.conf-radio.fixed { border: none; background: none; box-shadow: none; color: var(--ok); }
+/* У рабочего выбора нет: галочка вместо переключателя, чтобы не звало нажать.
+   .conf впереди нужен для специфичности: иначе .conf.active .conf-radio
+   красит под галочкой кружок акцентом. */
+.conf .conf-radio.fixed { border: none; background: none; box-shadow: none; color: var(--ok); }
 .conf.active .conf-radio.fixed::before { content: '✓'; font-size: 12px; }
 .conf[data-pick="0"] { cursor: default; }
 .conf[data-pick="0"]:hover { background: none; }
 .conf-name { flex: 1; }
-.conf-kind { font-size: 11px; color: var(--dim); }
+.conf-kind { font-size: 12px; color: var(--dim); }
 .conf-menu { flex: none; width: 24px; padding: 0; line-height: 18px; color: var(--dim);
              background: none; border: none; border-radius: 5px; font-size: 15px; }
-.conf-menu:hover { background: #80808033; color: var(--text); }
+.conf-menu:hover { background: var(--pressed); color: var(--text); }
 .emptyrow { padding: 11px 12px; color: var(--dim); }
 
 #rowmenu { position: fixed; z-index: 20; background: var(--panel); padding: 4px;
            border: 1px solid var(--line); border-radius: 8px; min-width: 132px;
-           box-shadow: 0 8px 24px #00000033; display: flex; flex-direction: column; }
+           box-shadow: 0 8px 24px rgba(0, 0, 0, .5); display: flex; flex-direction: column; }
 #rowmenu button { text-align: left; border: none; background: none; padding: 5px 9px;
                   border-radius: 5px; font-weight: 400; }
-#rowmenu button:hover { background: #80808026; }
+#rowmenu button:hover { background: var(--hover); }
 #rowmenu button.danger { color: var(--bad); }
 
 /* ------------------------------------------------------------ правая часть */
@@ -153,9 +161,9 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
           border: 1px solid var(--line); background: var(--bg); color: var(--text);
           -webkit-user-select: text; user-select: text; }
 #logbar label { color: var(--dim); display: flex; gap: 5px; align-items: center; }
-.tzhint { color: var(--dim); font-size: 11px; }
+.tzhint { color: var(--dim); font-size: 12px; }
 #lines { flex: 1; overflow-y: auto; padding: 8px 0; margin: 0;
-         font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+         font: 12.5px/1.6 var(--mono);
          -webkit-user-select: text; user-select: text; }
 .ln { padding: 0 12px; white-space: pre-wrap; word-break: break-word; }
 .ltime { color: var(--dim); }
@@ -165,26 +173,26 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
 .l-error { color: var(--bad); font-weight: 600; }
 .lid   { color: var(--dim); opacity: 0.55; margin-left: 6px; }
 .lmsg  { margin-left: 6px; }
-.ln.err  { color: var(--bad); background: #d13b300f; }
+.ln.err  { color: var(--bad); background: color-mix(in srgb, var(--bad) 7%, transparent); }
 .ln.warn { color: var(--warn); }
 .ln.head { color: var(--dim); }
 #empty { color: var(--dim); padding: 20px 14px; }
 
 #tabs { display: flex; gap: 2px; padding: 8px 10px 0; }
-.tab { flex: none; font-size: 12px; font-weight: 500; padding: 5px 12px;
+.tab { flex: none; font-size: 13px; font-weight: 500; padding: 5px 12px;
        border: none; background: none; color: var(--dim); border-radius: 6px; }
-.tab:hover { background: #8080801a; color: var(--text); }
-.tab.on { background: #80808026; color: var(--text); }
+.tab:hover { background: var(--hover); color: var(--text); }
+.tab.on { background: var(--pressed); color: var(--text); }
 
 /* Раздел «как это работает»: читаемая колонка, не растягивается на всё окно. */
 #how { flex: 1; overflow-y: auto; padding: 4px 22px 28px; line-height: 1.6; }
 #how > * { max-width: 660px; }
-#how h3 { font-size: 13px; margin: 22px 0 6px; letter-spacing: -0.1px; }
+#how h3 { font-size: 15px; margin: 22px 0 6px; letter-spacing: -0.1px; }
 #how h3:first-child { margin-top: 14px; }
 #how p  { margin: 0 0 8px; color: var(--text); }
 #how .note { color: var(--dim); }
-#how code { font: 11.5px/1.5 ui-monospace, Menlo, monospace;
-            background: #80808024; padding: 1px 5px; border-radius: 4px; }
+#how code { font: 12.5px/1.5 var(--mono);
+            background: var(--hover); padding: 1px 5px; border-radius: 4px; }
 #how ol { margin: 6px 0; padding-left: 20px; }
 #how li { margin: 3px 0; }
 #how table { border-collapse: collapse; margin: 8px 0; width: 100%; }
@@ -194,22 +202,22 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
             margin: 8px 0; background: var(--panel); }
 
 /* Просмотр конфига поверх: ключи закрыты, показывать их незачем. */
-#sheet { position: fixed; inset: 0; background: #00000055; display: none;
+#sheet { position: fixed; inset: 0; background: rgba(0, 0, 0, .6); display: none;
          align-items: center; justify-content: center; }
 #sheet.on { display: flex; }
-#sheet-box { background: var(--panel); border-radius: 12px; width: 460px;
+#sheet-box { background: var(--panel); border-radius: 12px; width: 480px;
              max-height: 74vh; display: flex; flex-direction: column;
-             box-shadow: 0 12px 40px #00000040; }
+             border: 1px solid var(--line); box-shadow: 0 12px 40px rgba(0, 0, 0, .6); }
 #sheet-head { padding: 13px 16px; border-bottom: 1px solid var(--line);
               font-weight: 600; display: flex; }
 /* Конфиг — моноширинным и с сохранением переносов, справка — обычным
    текстом, который переносится по ширине окна. */
-#sheet-body.mono { font: 11.5px/1.6 ui-monospace, Menlo, monospace;
+#sheet-body.mono { font: 12.5px/1.6 var(--mono);
                    white-space: pre-wrap; }
 #sheet-body p { margin: 0 0 10px; }
 #sheet-body p:last-child { margin-bottom: 0; }
 #sheet-body { padding: 14px 16px; overflow: auto;
-              font: 12.5px/1.65 -apple-system, sans-serif;
+              font: 13.5px/1.65 var(--sans);
               -webkit-user-select: text; user-select: text; }
 #sheet-foot { padding: 11px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; }
 .field { display: block; margin-bottom: 14px; }
@@ -218,7 +226,7 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
                border: 1px solid var(--line); background: var(--bg); color: var(--text);
                -webkit-user-select: text; user-select: text; }
 .field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.fhint { display: block; color: var(--dim); font-size: 11px; margin-top: 3px; }
+.fhint { display: block; color: var(--dim); font-size: 12px; margin-top: 3px; }
 </style>
 
 <div id="side">

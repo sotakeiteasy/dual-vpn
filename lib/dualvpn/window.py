@@ -378,6 +378,24 @@ def _format_env(values):
 
 # ---------------------------------------------------------------- запуск
 
+def _dark_title(window):
+    """Тёмный заголовок окна независимо от темы Windows.
+
+    pywebview красит заголовок по AppsUseLightTheme, а страница всегда
+    тёмная: в светлой теме над тёмным окном висела бы белая полоса.
+    DWMWA_USE_IMMERSIVE_DARK_MODE = 20, с Windows 10 20H1. При смене темы
+    Windows pywebview вернёт светлый — до следующего открытия окна.
+    """
+    try:
+        import ctypes
+        hwnd = window.native.Handle.ToInt32()
+        on = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 20, ctypes.byref(on), ctypes.sizeof(on))
+    except Exception:
+        pass
+
+
 def _source_icon():
     """Значок окна, запущенного из исходников. None — остаётся значок exe.
 
@@ -413,7 +431,11 @@ def open_window():
 
     holder["window"] = webview.create_window(
         f"DualVPN {paths.version()}", index,
-        js_api=api, width=1040, height=720, min_size=(880, 560))
+        js_api=api, width=1040, height=720, min_size=(880, 560),
+        # Тот же фон, что --bg в index.html: иначе до загрузки страницы окно
+        # белое и мигает на открытии.
+        background_color="#101012")
+    holder["window"].events.shown += lambda: _dark_title(holder.get("window"))
     icon = None if getattr(sys, "frozen", False) else _source_icon()
 
     def poll():
