@@ -88,6 +88,15 @@ def test_выход_закрывает_значок_и_окно_даже_при_
     def broken(*_a, **_kw):
         raise RuntimeError("сбой")
     monkeypatch.setattr(ipc, "call", broken)
+    # Сбой уходит из рабочего потока уже после finally. Ловим его здесь, иначе
+    # pytest припишет его тому тесту, который будет идти в этот момент.
+    escaped = []
+    thread_done = threading.Event()
+
+    def excepthook(args):
+        escaped.append(args.exc_type)
+        thread_done.set()
+    monkeypatch.setattr(threading, "excepthook", excepthook)
 
     terminated = threading.Event()
     t = tray.Tray()
@@ -97,3 +106,5 @@ def test_выход_закрывает_значок_и_окно_даже_при_
     t.on_quit()
     assert t.icon.stopped.wait(5)
     assert terminated.is_set()
+    assert thread_done.wait(5)
+    assert escaped == [RuntimeError]
