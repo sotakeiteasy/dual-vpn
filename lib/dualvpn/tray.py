@@ -20,7 +20,9 @@ import time
 
 from . import ipc, paths
 
-POLL_EVERY = 3.0
+# Включение у службы идёт ~1,2 с: при опросе раз в три секунды жёлтый
+# «включаю» почти не попадал в опрос, если включали из окна.
+POLL_EVERY = 1.0
 # Сколько выход ждёт, пока служба закончит начатый start и примет stop.
 QUIT_WAIT = 40.0
 # Сколько даём окну показаться, прежде чем считать его процесс зависшим.
@@ -67,6 +69,10 @@ class Tray:
         self._last_menu_sig = None
         self._window_proc = None
         self._window_started = 0.0
+        # Команды трея, на которые служба ещё не ответила. Пока они есть,
+        # значок жёлтый сразу, а не с первым опросом, заставшим службу занятой.
+        self._pending = 0
+        self._state_lock = threading.Lock()
         self.stop_event = threading.Event()
 
     # ------------------------------------------------------------- статус
@@ -82,9 +88,14 @@ class Tray:
             self.stop_event.wait(POLL_EVERY)
 
     def _poll_once(self):
+        # Опрос идёт и из своего потока, и из потоков команд по их окончании.
+        with self._state_lock:
+            self._poll_locked()
+
+    def _poll_locked(self):
         try:
             self.status = ipc.call("status").get("status", {})
-            if self.status.get("busy"):
+            if self._pending or self.status.get("busy"):
                 new = "busy"
             elif self.status.get("up"):
                 new = "up"
@@ -159,8 +170,9 @@ class Tray:
             pystray.MenuItem(
                 lambda _i: "Выключить" if self.status.get("up") else "Включить",
                 self.on_toggle,
-                enabled=lambda _i: bool(self.status) and not self.status.get("busy"),
-                default=True),
+                # Без default=True: левый клик по значку не должен включать и
+                # выключать VPN — промахнуться слишком легко. Только из меню.
+                enabled=lambda _i: bool(self.status) and not self.status.get("busy")),
             pystray.MenuItem(
                 "Перезапустить", self.on_restart,
                 enabled=lambda _i: bool(self.status.get("up"))
@@ -196,7 +208,30 @@ class Tray:
                     self._notify(reply.get("error") or "не вышло")
             except ipc.NotRunning as exc:
                 self._notify(str(exc))
-        threading.Thread(target=work, daemon=True).start()
+        self._busy_while(work)
+
+    def _busy_while(self, work):
+        """work в отдельном потоке, значок жёлтый, пока она идёт.
+
+        По окончании опрашиваем службу сразу: зелёный или красный должен
+        появиться, как только служба ответила, а не через период опроса.
+        """
+        with self._state_lock:
+            self._pending += 1
+            self.state = "busy"
+            self._refresh_icon()
+
+        def run():
+            try:
+                work()
+            finally:
+                with self._state_lock:
+                    self._pending -= 1
+                try:
+                    self._poll_once()
+                except Exception:                          # noqa: BLE001
+                    pass                                   # догонит поток опроса
+        threading.Thread(target=run, daemon=True).start()
 
     def on_toggle(self):
         if self.status.get("up"):
@@ -213,7 +248,7 @@ class Tray:
                     self._notify(reply.get("error") or "не вышло")
             except ipc.NotRunning as exc:
                 self._notify(str(exc))
-        threading.Thread(target=work, daemon=True).start()
+        self._busy_while(work)
 
     # ---------------------------------------------------------------- конфиги
 

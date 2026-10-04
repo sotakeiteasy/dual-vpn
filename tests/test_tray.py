@@ -8,7 +8,10 @@ import ctypes
 import subprocess
 import sys
 import threading
+import time
 import types
+
+import pytest
 
 from dualvpn import ipc, tray
 
@@ -110,6 +113,59 @@ def test_выход_закрывает_значок_и_окно_даже_при_
     assert terminated.is_set()
     assert thread_done.wait(5)
     assert escaped == [RuntimeError]
+
+
+def _wait_state(t, state):
+    deadline = time.monotonic() + 5
+    while t.state != state and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return t.state
+
+
+def test_пока_идёт_включение_значок_жёлтый_а_после_ошибки_красный(monkeypatch):
+    release = threading.Event()
+
+    def call(op, **_kw):
+        if op == "start":
+            release.wait(5)
+            return {"ok": False, "error": "нет конфига"}
+        return {"ok": True, "status": {"last_error": "нет конфига"}}
+    monkeypatch.setattr(ipc, "call", call)
+    monkeypatch.setattr(tray.Tray, "_notify", lambda _self, _text: None)
+    t = tray.Tray()
+
+    t.on_toggle()
+    assert t.state == "busy"
+    # Опрос посреди команды не сбрасывает жёлтый, хотя служба ещё не занята.
+    t._poll_once()
+    assert t.state == "busy"
+
+    release.set()
+    assert _wait_state(t, "error") == "error"
+
+
+def test_после_включения_значок_зелёный_без_ожидания_опроса(monkeypatch):
+    started = threading.Event()
+
+    def call(op, **_kw):
+        if op == "start":
+            started.set()
+            return {"ok": True}
+        return {"ok": True, "status": {"up": started.is_set()}}
+    monkeypatch.setattr(ipc, "call", call)
+    t = tray.Tray()
+
+    t.on_toggle()
+
+    assert _wait_state(t, "up") == "up"
+
+
+def test_левый_клик_по_значку_не_включает_vpn():
+    pytest.importorskip("pystray")
+
+    menu = tray.Tray()._menu()
+
+    assert not any(item.default for item in menu.items)
 
 
 class _Uxtheme:
