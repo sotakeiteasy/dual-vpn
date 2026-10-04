@@ -22,6 +22,8 @@ from . import ipc, paths
 POLL_EVERY = 3.0
 # Сколько выход ждёт, пока служба закончит начатый start и примет stop.
 QUIT_WAIT = 40.0
+# Сколько даём окну показаться, прежде чем считать его процесс зависшим.
+WINDOW_START_WAIT = 15.0
 
 # Пределы полей NOTIFYICONDATA с завершающим нулём. pystray их не обрезает:
 # строка длиннее — ValueError, и падает тот поток, который менял подпись.
@@ -62,6 +64,8 @@ class Tray:
         self.state = "off"
         self.status = {}
         self._last_menu_sig = None
+        self._window_proc = None
+        self._window_started = 0.0
         self.stop_event = threading.Event()
 
     # ------------------------------------------------------------- статус
@@ -253,9 +257,24 @@ class Tray:
         И pywebview, и pystray хотят собственный цикл сообщений в главном
         потоке; в одном процессе они друг друга блокируют. Отдельный процесс
         обходится дешевле, чем попытка их подружить.
+
+        Окно одно: если прошлое ещё живо, поднимаем его. Раньше каждый
+        клик запускал новое, а запоминалось только последнее — «Закрыть» снимал
+        его, а первое оставалось висеть.
         """
         import subprocess
         import sys
+
+        proc = self._window_proc
+        if proc is not None and proc.poll() is None:
+            if _raise_window(f"DualVPN {paths.version()}"):
+                return
+            # Окно ещё может не показаться (WebView2 стартует секунду-две) —
+            # оно само встанет на передний план. Но процесс без окна дольше
+            # WINDOW_START_WAIT завис: без замены панель больше не открылась бы.
+            if time.monotonic() - self._window_started < WINDOW_START_WAIT:
+                return
+            proc.terminate()
 
         if getattr(sys, "frozen", False):
             # sys.executable здесь — сам трей (DualVPN-Tray.exe). У портативной
@@ -291,6 +310,7 @@ class Tray:
         self._window_proc = subprocess.Popen(
             cmd, stdout=log, stderr=log,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self._window_started = time.monotonic()
 
     def on_quit(self):
         """Выключает VPN и закрывает значок — в обеих версиях.
@@ -308,6 +328,13 @@ class Tray:
         self.stop_event.set()
         if self.icon is not None:
             self.icon.visible = False
+        # Ожидание — в рабочем потоке: обработчик меню идёт в потоке
+        # сообщений значка, и до QUIT_WAIT секунд процесс висел бы с мёртвым
+        # циклом сообщений. icon.stop() — по концу уборки: после него run()
+        # завершает процесс через os._exit, и недоделанный stop оборвался бы.
+        threading.Thread(target=self._quit_work, daemon=True).start()
+
+    def _quit_work(self):
         # Пока идёт start (до тридцати секунд), служба на stop отвечает «уже
         # идёт» — ждём конца операции и повторяем, иначе выход оставил бы
         # туннель поднятым ровно в тот момент, когда его включали.
@@ -322,13 +349,15 @@ class Tray:
             # Службы нет — опускать нечего. В портативной версии уборку
             # всё равно доделает portable.run() через core.shutdown().
             pass
-        # Окно — отдельный процесс; без трея ему некому быть, и оно висело бы
-        # в диспетчере задач после «Закрыть».
-        proc = getattr(self, "_window_proc", None)
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-        if self.icon is not None:
-            self.icon.stop()
+        finally:
+            # Окно — отдельный процесс; без трея ему некому быть, и оно
+            # висело бы в диспетчере задач после «Закрыть». В finally: сбой
+            # вызова не должен оставить процесс без значка и без выхода.
+            proc = self._window_proc
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+            if self.icon is not None:
+                self.icon.stop()
 
     def _notify(self, text):
         if self.icon is None:
@@ -355,6 +384,34 @@ class Tray:
 def _clip(text, limit):
     text = str(text or "")
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _raise_window(title):
+    """Выводит уже открытое окно на передний план. False — окна не нашлось.
+
+    SW_RESTORE только для свёрнутого: развёрнутое на весь экран он бы
+    уменьшил. Трей и окно оба от администратора, так что UIPI
+    SetForegroundWindow не режет.
+    """
+    import pywintypes
+    import win32con
+    import win32gui
+
+    try:
+        hwnd = win32gui.FindWindow(None, title)
+    except pywintypes.error:
+        return False
+    if not hwnd:
+        return False
+    # Окно есть — значит, True, даже если Windows не отдала ему фокус:
+    # иначе трей счёл бы живое окно зависшим и перезапустил бы его.
+    try:
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE
+                            if win32gui.IsIconic(hwnd) else win32con.SW_SHOW)
+        win32gui.SetForegroundWindow(hwnd)
+    except pywintypes.error:
+        pass
+    return True
 
 
 def _pick_file(title, filters):
