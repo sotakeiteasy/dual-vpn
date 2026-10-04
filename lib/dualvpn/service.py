@@ -345,6 +345,11 @@ class Core:
 
 def _service_class():
     """Класс службы собираем лениво: pywin32 нужен только здесь."""
+    # Класс кладём в модуль под его именем: win32serviceutil строит строку
+    # класса через pickle.whichmodule, а с Python 3.14 тот проверяет, что
+    # dualvpn.service.DualVPNService существует, и иначе падают все команды
+    # service install/remove/start/stop.
+    global DualVPNService
     import win32event
     import win32service
     import win32serviceutil
