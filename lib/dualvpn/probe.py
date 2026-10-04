@@ -32,6 +32,10 @@ class Prober:
         self.st = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
+        # При плохой сети probe_slow идёт до ~50 с (сумма таймаутов), а
+        # запускается раз в SLOW_EVERY. Без флага потоки множились бы и
+        # наперегонки писали exit_ip — следующий ждёт, пока закончится этот.
+        self.slow_busy = threading.Event()
 
     def set(self, **kw):
         with self.lock:
@@ -237,8 +241,13 @@ class Prober:
             was_up = up
 
             if up and time.time() - last_slow > SLOW_EVERY:
-                last_slow = time.time()
-                threading.Thread(target=self._slow_guarded, daemon=True).start()
+                # last_slow не сдвигаем, пока занято: новая проверка
+                # стартует на первом же круге после окончания текущей.
+                if not self.slow_busy.is_set():
+                    last_slow = time.time()
+                    self.slow_busy.set()
+                    threading.Thread(target=self._slow_guarded,
+                                     daemon=True).start()
             elif not up:
                 self.set(exit_ip="", corp_ip="", corp_http="", v6_leak="",
                          exit_is_peer=False, exit_state="unknown")
@@ -250,3 +259,5 @@ class Prober:
             self.probe_slow()
         except Exception:
             pass
+        finally:
+            self.slow_busy.clear()
