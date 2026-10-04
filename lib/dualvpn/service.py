@@ -179,6 +179,7 @@ class Core:
                 return {"ok": False, "error": err}
             return {"ok": True}
         finally:
+            self._probe_now()
             self.busy = ""
             self.lock.release()
 
@@ -191,8 +192,21 @@ class Core:
             self.last_error = ""
             return {"ok": True}
         finally:
+            self._probe_now()
             self.busy = ""
             self.lock.release()
+
+    def _probe_now(self):
+        """Снимок сети сразу по окончании start/stop, пока busy ещё стоит.
+
+        up в статусе берётся из снимка Prober, а тот обновляется раз в
+        FAST_EVERY. Без этого трей и окно после «включаю»/«выключаю» ещё до
+        двух секунд видели прежнее состояние: жёлтый, серый, потом зелёный.
+        """
+        try:
+            self.prober.probe_fast()
+        except Exception:                                  # noqa: BLE001
+            pass                                           # догонит цикл Prober
 
     # -------------------------------------------------------------- конфиги
 
