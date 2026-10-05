@@ -373,7 +373,9 @@ const tick = w => { if (!done[w]) { done[w] = 1; send('rendered', w); } };
 
 function render(s) {
   LAST = s;
-  const up = s.up, corp = !!s.corp_ip, leak = s.v6_leak;
+  // Корп жив, если ответил хоть кто-то: DNS или сайт. Трей и итог проверки
+  // считают так же — иначе окно показывало «молчит» при открытом сайте.
+  const up = s.up, corp = !!(s.corp_ip || s.corp_http), leak = s.v6_leak;
 
   // Четыре состояния, а не два: «корп не отвечает» — отдельный случай,
   // при котором личный туннель работает и интернет есть.
@@ -385,6 +387,10 @@ function render(s) {
   let cls = 'off', title = 'Выключено', sub = 'туннели не подняты';
   if (noDaemon) { cls='warn'; title='Нужна установка';
                   sub='фоновая служба ещё не поставлена'; }
+  // Служба сама снимает и поднимает туннель: на это время up ложный, и без
+  // этой ветки заголовок мигал бы «Выключено» или прошлой ошибкой.
+  else if (s.busy === 'переподключаю') { cls='warn'; title='Переподключаю';
+                  sub='сменилась сеть — поднимаю туннель заново'; }
   else if (leak) { cls='bad';  title='Утечка IPv6';        sub='часть трафика идёт мимо туннеля: ' + leak; }
   // Не поднялся и не просто выключен — показываем причину, а не пустоту.
   else if (!up && s.last_error) { cls='bad'; title='Не запускается'; sub = s.last_error; }
@@ -408,9 +414,10 @@ function render(s) {
        <span class="tun-val">${val}</span>
        <span class="chip ${state}">${label}</span></div>`;
 
-  // Пока идёт проверка по кнопке или при открытии окна, прежний ответ
-  // устарел: «молчит» от прошлой проверки читалось бы как свежий результат.
-  const checking = up && CHECKING;
+  // Пока идёт проверка — по кнопке, при открытии окна или сама после подъёма
+  // туннеля — прежний ответ устарел: «молчит» от прошлой проверки читалось
+  // бы как свежий результат.
+  const checking = up && (CHECKING || s.checking);
   // Без VPN мерить нечем — показываем, как этот же файл конфига отработал в
   // прошлый раз: сломанный заменяют до включения, а не после.
   const last = s.last || {};
@@ -423,7 +430,7 @@ function render(s) {
             : s.exit_state === 'tunnel' ? 'ok' : 'off',
         !up ? offLabel('personal') : checking ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
             : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
-    row('корп', up ? (s.corp_ip || '—') : '—',
+    row('корп', up ? (s.corp_ip || (s.corp_http ? 'HTTP ' + s.corp_http : '—')) : '—',
         !up ? offChip('corp') : checking ? 'warn' : (corp ? 'ok' : 'bad'),
         !up ? offLabel('corp') : checking ? 'проверяю…' : (corp ? 'отвечает' : 'молчит')) +
     row('выход', up ? [s.exit_country, s.exit_city].filter(Boolean).join(' ') || '—' : '—',
@@ -457,8 +464,11 @@ function render(s) {
     r.textContent = 'Перезапустить';
     r.disabled = !up;
   }
+  // Служба занята своей операцией (команда из трея, переподключение) —
+  // команда из окна вернула бы только «уже идёт».
+  if (s.busy) t.disabled = r.disabled = true;
   const c = document.getElementById('btn-check');
-  c.disabled = busy || CHECKING;
+  c.disabled = busy || CHECKING || !!s.busy;
   c.classList.toggle('spin', CHECKING);
   document.getElementById('btn-install').hidden = !noDaemon;
   document.getElementById('actions').hidden = noDaemon;

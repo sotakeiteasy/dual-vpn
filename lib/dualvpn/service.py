@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 
 from . import buildconfig, ipc, paths, probe, tunnel, winnet
 
@@ -27,6 +28,14 @@ LOG_TAIL_BYTES = 256 * 1024
 # Итог последней проверки по каждому конфигу: без туннеля мерить нечем, но
 # «как он отработал в прошлый раз» видно и при выключенном VPN.
 LAST_CHECK_FILE = os.path.join(paths.STATE, "last-check.json")
+# Сколько кругов пробера (по FAST_EVERY) новая сеть должна продержаться,
+# прежде чем переподключаться: Wi-Fi при смене точки и пробуждении моргает,
+# и на каждый пропавший на секунду маршрут перезапуск только мешал бы.
+UPLINK_SETTLE = 3
+# Новая сеть бывает не готова сразу (в 14:51 DNS ещё не резолвил корп-сервер):
+# не подняли — пробуем ещё столько раз с таким шагом, а не бросаем VPN выключенным.
+RECONNECT_TRIES = 5
+RECONNECT_GAP = 10.0
 
 
 class Core:
@@ -43,6 +52,10 @@ class Core:
         self.server = ipc.Server(self.handle, self.log)
         self.last_error = ""
         self.busy = ""
+
+    # Сколько ещё попыток поднять туннель после неудачного переподключения.
+    # Команда человека (start/stop) их отменяет: он уже решил сам.
+    _retry_left = 0
 
     # ---------------------------------------------------------------- лог
 
@@ -65,6 +78,7 @@ class Core:
         self._migrate()
         threading.Thread(target=self.prober.run, daemon=True).start()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        threading.Thread(target=self._watch, daemon=True).start()
         if self.autostart_enabled():
             self.log("→ автоподключение включено")
             threading.Thread(target=self._do_start, daemon=True).start()
@@ -141,6 +155,9 @@ class Core:
         st = self.prober.snapshot()
         st["up"] = bool(st.get("tun")) and bool(st.get("r_low"))
         st["busy"] = self.busy
+        # Идёт ли сетевая проверка — и та, что сама после подъёма туннеля:
+        # без этого окно до её ответа показывало «корп молчит».
+        st["checking"] = self.prober.slow_busy.is_set()
         st["last_error"] = self.last_error
         st["autostart"] = self.autostart_enabled()
         st["version"] = paths.version()
@@ -235,17 +252,32 @@ class Core:
             pass
         return cls._singbox_cached
 
-    def _do_start(self, profile=""):
+    def _do_start(self, profile="", reconnect=False, retries=0):
+        """Поднимает туннель. reconnect — сначала снять текущий: без этого
+        start принял бы живой процесс за «уже работает» и ничего не сделал.
+        retries — сколько повторов взвести, если не поднимется. Взводим под
+        замком: иначе переподключение, заставшее «Выключить» человека, потом
+        включило бы VPN обратно."""
         if not self.lock.acquire(blocking=False):
             return {"ok": False, "error": f"уже идёт: {self.busy or 'операция'}"}
         try:
-            self.busy = "включаю"
+            # Круг сторожа мог начаться до остановки службы и дождаться замка
+            # после неё: поднятый тогда туннель уже некому было бы снять.
+            if reconnect and self.prober.stop_event.is_set():
+                return {"ok": False, "error": "служба останавливается"}
+            if not reconnect:
+                self._retry_left = 0
+            self.busy = "переподключаю" if reconnect else "включаю"
+            if reconnect:
+                self.tunnel.stop()
             if not profile:
                 profile = probe.Prober.current_profile()
             err = self.tunnel.start(profile)
             self.last_error = err
             if err:
                 self.log(f"!! {err}")
+                if retries:
+                    self._retry_left = retries
                 # Наполовину поднятое состояние опаснее выключенного: маршруты
                 # уже могли встать. Убираем за собой сразу, а не ждём человека.
                 self.tunnel.stop()
@@ -260,6 +292,7 @@ class Core:
         if not self.lock.acquire(blocking=False):
             return {"ok": False, "error": f"уже идёт: {self.busy or 'операция'}"}
         try:
+            self._retry_left = 0
             self.busy = "выключаю"
             self.tunnel.stop()
             self.last_error = ""
@@ -268,6 +301,66 @@ class Core:
             self._probe_now()
             self.busy = ""
             self.lock.release()
+
+    # ------------------------------------------------------------ сторож
+
+    def _watch(self):
+        """Переподключение, когда сеть под туннелем уже не та или sing-box упал.
+
+        Туннель собирается под конкретную сеть: host-маршруты пиров идут
+        через её шлюз, а имя корп-сервера в офисе резолвится во внутренний
+        адрес, дома — во внешний. После перехода с кабеля на Wi-Fi или сна
+        в другом месте старый сеанс висел полумёртвым, пока его не перезапустят
+        руками. Сеть не опрашиваем заново: аплинк уже есть в снимке пробера.
+        """
+        seen, streak, retry_at = None, 0, 0.0
+        while not self.prober.stop_event.wait(probe.FAST_EVERY):
+            try:
+                seen, streak, retry_at = self._watch_once(seen, streak, retry_at)
+            except Exception as exc:                       # noqa: BLE001
+                # Умри сторож — смену сети снова придётся лечить руками.
+                self.log(f"!! сторож сети: {exc}")
+
+    def _watch_once(self, seen, streak, retry_at):
+        """Один круг сторожа. Принимает и возвращает его состояние:
+        какую новую сеть видим, сколько кругов подряд и когда следующий повтор."""
+        if self.busy:
+            return None, 0, retry_at
+        st = self.prober.snapshot()
+        cur = (st.get("iface"), st.get("gw") or "")
+        had = self.tunnel.uplink
+
+        if self._retry_left:
+            if had:                       # туннель уже подняли — повторы не нужны
+                self._retry_left = 0
+            elif cur[1] and time.monotonic() >= retry_at:
+                self._retry_left -= 1
+                self.log("→ ещё раз поднимаю туннель")
+                retry_at = self._reconnect(retries=0)
+            return None, 0, retry_at
+
+        if not had:
+            return None, 0, retry_at
+        proc = self.tunnel.proc
+        if proc is not None and proc.poll() is not None:
+            self.log(f"!! sing-box завершился сам (код {proc.returncode}) — "
+                     f"поднимаю заново")
+            return None, 0, self._reconnect()
+        if not cur[1] or cur == had:
+            return None, 0, retry_at
+        streak = streak + 1 if cur == seen else 1
+        if streak < UPLINK_SETTLE:
+            return cur, streak, retry_at
+        self.log(f"→ сеть сменилась: интерфейс {had[0]}, шлюз {had[1]} → "
+                 f"интерфейс {cur[0]}, шлюз {cur[1]} — переподключаю")
+        return None, 0, self._reconnect()
+
+    def _reconnect(self, retries=RECONNECT_TRIES):
+        """Туннель заново на текущей сети; не поднялся — взводит retries
+        повторов. Возвращает, когда пробовать в следующий раз."""
+        if self._do_start(reconnect=True, retries=retries).get("ok"):
+            self.prober.remeasure()
+        return time.monotonic() + RECONNECT_GAP
 
     def _probe_now(self):
         """Снимок сети сразу по окончании start/stop, пока busy ещё стоит.

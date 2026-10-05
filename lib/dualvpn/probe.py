@@ -6,14 +6,17 @@
 
 Проверки разделены на две скорости. Локальные (интерфейсы, маршруты, процесс)
 дёшевы и идут раз в две секунды. Сетевые (внешний адрес, корп-DNS, корп-HTTPS)
-ходят наружу с таймаутами до 12 секунд, поэтому идут раз в двадцать и в
-отдельном потоке: в общем цикле они останавливали бы обновление статуса на
-полминуты, и снаружи это выглядело как «туннель отвалился и вернулся».
+ходят наружу, поэтому идут не по расписанию, а по событию: один раз, когда
+туннель поднялся, и дальше только по запросу (check_now) — трей зовёт её при
+открытии меню, окно при открытии и по кнопке. Раньше они шли раз в двадцать
+секунд: каждая неудачная попытка перекрашивала корп в «молчит», хотя сайт
+открывался, а сервисы адреса выхода с общего адреса VPN отвечали 429.
 """
 
 import json
 import os
 import re
+import ssl
 import threading
 import time
 import urllib.error
@@ -24,10 +27,23 @@ from . import paths, winnet
 # Быстрый опрос — несколько WMI-запросов по 10–20 мс (см. winnet). Пока они
 # шли через запуск PowerShell, цикл стоил секунды и приходилось реже.
 FAST_EVERY = 2.0
-SLOW_EVERY = 20.0
 # Сколько check_now ждёт уже идущую проверку: при плохой сети она до ~30 с —
 # столько стоит адрес выхода со всеми запасными сервисами.
 CHECK_WAIT = 40.0
+# Корп-проверка: пакет через WireGuard теряется и при живом туннеле, поэтому
+# одна неудача ещё не «молчит» — повторяем. Попытки короче прежних 12 с, и
+# худший случай не дольше прежнего.
+CORP_TRIES = 2
+CORP_DNS_TIMEOUT = 2.5
+CORP_HTTP_TIMEOUT = 6.0
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Редирект — тоже ответ корп-сайта: 302 на страницу входа уже значит,
+    что сервер достижим. Идти по нему — значит мерить чужой хост."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 class Prober:
@@ -35,13 +51,22 @@ class Prober:
         self.st = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        # При плохой сети probe_slow идёт до ~30 с (самая долгая часть), а
-        # запускается раз в SLOW_EVERY. Без флага потоки множились бы и
-        # наперегонки писали exit_ip — следующий ждёт, пока закончится этот.
+        # При плохой сети probe_slow идёт до ~30 с (самая долгая часть). Без
+        # флага проверка по запросу и проверка на подъёме туннеля шли бы
+        # разом и наперегонки писали exit_ip — следующая ждёт, пока
+        # закончится эта.
         self.slow_busy = threading.Event()
         # Проверку по запросу (check_now) и плановую запускают разные потоки:
         # «свободен ли» и «занял» должны быть одним шагом.
         self._slow_gate = threading.Lock()
+        # Служба переподключила туннель: цикл мог не застать его упавшим между
+        # двумя кругами, и тогда остались бы ответы прошлой сети.
+        self._remeasure = threading.Event()
+
+    def remeasure(self):
+        """Сетевая проверка, как на подъёме туннеля, даже если цикл не
+        видел его падения. Увидел — проверка всё равно одна."""
+        self._remeasure.set()
 
     def set(self, **kw):
         with self.lock:
@@ -206,23 +231,37 @@ class Prober:
 
     @staticmethod
     def _dns_ask(server, name):
-        ip = winnet.resolve4_via(name, server)
-        return ip if re.match(r"^[\d.]+$", ip or "") else ""
+        for _ in range(CORP_TRIES):
+            ip = winnet.resolve4_via(name, server, timeout=CORP_DNS_TIMEOUT)
+            if re.match(r"^[\d.]+$", ip or ""):
+                return ip
+        return ""
 
     @staticmethod
     def _http_code(url):
         """Код ответа корп-сайта. Нас устраивает любой — важно, что он есть.
 
         Даже 403 значит, что до сервера дошли: без туннеля не было бы и его.
+
+        Сертификат не проверяем: служба под LocalSystem не видит корп-CA из
+        хранилища пользователя, и проверка падала на TLS при открытом в
+        браузере сайте. Мерим только достижимость: HEAD без данных и без
+        учётных записей. Прокси не берём — сайт ходит через туннель напрямую.
         """
-        try:
-            req = urllib.request.Request(url, method="HEAD")
-            with urllib.request.urlopen(req, timeout=12) as r:
-                return str(r.status)
-        except urllib.error.HTTPError as exc:
-            return str(exc.code)
-        except Exception:
-            return ""
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),
+            _NoRedirect())
+        for _ in range(CORP_TRIES):
+            try:
+                req = urllib.request.Request(url, method="HEAD")
+                with opener.open(req, timeout=CORP_HTTP_TIMEOUT) as r:
+                    return str(r.status)
+            except urllib.error.HTTPError as exc:
+                return str(exc.code)
+            except Exception:
+                continue
+        return ""
 
     # -------------------------------------------------------------- запись
 
@@ -245,8 +284,8 @@ class Prober:
             pass
 
     def run(self):
-        last_slow = 0.0
         was_up = False
+        want_slow = False
         while not self.stop_event.is_set():
             try:
                 self.probe_fast()
@@ -255,23 +294,24 @@ class Prober:
             s = self.snapshot()
             up = bool(s.get("tun")) and bool(s.get("r_low"))
 
-            # До того как поднялся tun и встали маршруты, мерить выход наружу
-            # бессмысленно: получим свой реальный адрес и покажем его ещё
-            # двадцать секунд, как будто туннель не работает.
-            if up and not was_up:
-                last_slow = 0.0
+            # Сетевая проверка — один раз на подъём туннеля, дальше только
+            # check_now. До подъёма мерить выход наружу бессмысленно: получим
+            # свой реальный адрес, как будто туннель не работает.
+            if up and (not was_up or self._remeasure.is_set()):
+                self._remeasure.clear()
+                want_slow = True
             was_up = up
 
-            if up and time.time() - last_slow > SLOW_EVERY:
-                # last_slow не сдвигаем, пока занято: новая проверка
-                # стартует на первом же круге после окончания текущей.
-                if self._take_slow():
-                    last_slow = time.time()
-                    threading.Thread(target=self._slow_guarded,
-                                     daemon=True).start()
-            elif not up:
+            if not up:
+                want_slow = False
                 self.set(exit_ip="", corp_ip="", corp_http="", v6_leak="",
                          exit_is_peer=False, exit_state="unknown")
+            elif want_slow and self._take_slow():
+                # Занято — ответ той проверки мерил прошлый туннель (она шла
+                # во время переподключения): ждём её конца и меряем заново.
+                want_slow = False
+                threading.Thread(target=self._slow_guarded,
+                                 daemon=True).start()
             self.write_status()
             self.stop_event.wait(FAST_EVERY)
 
@@ -284,8 +324,8 @@ class Prober:
             return True
 
     def check_now(self, wait=CHECK_WAIT):
-        """Сетевая проверка сейчас, а не через SLOW_EVERY — трей зовёт её при
-        открытии меню, окно при открытии и по кнопке.
+        """Сетевая проверка сейчас — трей зовёт её при открытии меню, окно
+        при открытии и по кнопке.
 
         Если проверка уже идёт, вторую не запускаем, а ждём её конца: ответ
         будет таким же свежим, а сервисы адреса выхода реже отвечают 429.

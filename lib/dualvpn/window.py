@@ -114,8 +114,8 @@ class Api:
         if name == "ready":
             self.ready.set()
             self.refresh(full=True)
-            # Статус туннелей сразу при открытии, а не со следующей плановой
-            # проверкой службы — до неё бывает двадцать секунд.
+            # Статус туннелей сразу при открытии: сама служба меряет сеть
+            # только на подъёме туннеля, и прежний ответ мог устареть на часы.
             threading.Thread(target=self._check, daemon=True).start()
         elif name == "check":
             threading.Thread(target=self._check, daemon=True).start()

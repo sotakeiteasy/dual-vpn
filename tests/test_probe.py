@@ -1,54 +1,109 @@
-"""Пробер: медленные сетевые проверки не накапливаются.
+"""Пробер: сетевые проверки идут по событию и не накапливаются.
 
 Сеть и WMI здесь не трогаем — подменяем probe_fast (туннель «поднят»),
-probe_slow (висит, пока тест не отпустит) и запись status.json.
+probe_slow (висит, пока тест не отпустит), запись status.json и HTTP-клиент.
 """
 
 import threading
 import time
+import urllib.error
+import urllib.request
 
 from dualvpn import probe
 
 
-def test_второй_probe_slow_не_стартует_пока_идёт_первый(monkeypatch):
-    monkeypatch.setattr(probe, "FAST_EVERY", 0.01)
-    monkeypatch.setattr(probe, "SLOW_EVERY", 0.0)
+def _wait(cond, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
 
+
+def _run_loop(monkeypatch, net, slow):
+    """Цикл пробера с «сетью» net.up вместо WMI и slow вместо сети."""
+    monkeypatch.setattr(probe, "FAST_EVERY", 0.01)
+    monkeypatch.setattr(probe.Prober, "probe_fast",
+                        lambda self: self.set(tun=net["up"], r_low=net["up"]))
+    monkeypatch.setattr(probe.Prober, "probe_slow", slow)
+    monkeypatch.setattr(probe.Prober, "write_status", lambda self: None)
+    p = probe.Prober()
+    loop = threading.Thread(target=p.run, daemon=True)
+    loop.start()
+    return p, loop
+
+
+def _stop_loop(p, loop):
+    p.stop_event.set()
+    loop.join(2)
+    # Поток проверки не должен пережить снятие подмен monkeypatch.
+    _wait(lambda: not p.slow_busy.is_set())
+
+
+def test_сетевая_проверка_один_раз_на_подъёме_а_не_по_расписанию(monkeypatch):
+    net = {"up": True}
+    calls = []
+    p, loop = _run_loop(monkeypatch, net, lambda self: calls.append(1))
+    try:
+        assert _wait(lambda: calls)
+        time.sleep(0.3)               # десятки кругов — повторов быть не должно
+        assert calls == [1]
+
+        # Туннель упал и поднялся — новый подъём меряем заново.
+        net["up"] = False
+        time.sleep(0.1)
+        net["up"] = True
+        assert _wait(lambda: len(calls) == 2)
+        time.sleep(0.2)
+        assert calls == [1, 1]
+    finally:
+        _stop_loop(p, loop)
+
+
+def test_remeasure_проверяет_заново_без_видимого_падения(monkeypatch):
+    net = {"up": True}
+    calls = []
+    p, loop = _run_loop(monkeypatch, net, lambda self: calls.append(1))
+    try:
+        assert _wait(lambda: calls)
+
+        # Переподключение уложилось между кругами — цикл туннель упавшим не видел.
+        p.remeasure()
+        assert _wait(lambda: len(calls) == 2)
+        time.sleep(0.2)
+        assert calls == [1, 1]
+    finally:
+        _stop_loop(p, loop)
+
+
+def test_проверка_на_подъёме_при_занятой_идёт_после_её_конца(monkeypatch):
     release = threading.Event()
     calls = []
 
     def slow(self):
-        calls.append(time.monotonic())
-        release.wait(5)
+        calls.append(1)
+        if len(calls) == 1:
+            release.wait(5)
 
-    def fast(self):
-        self.set(tun=True, r_low=True)
-
-    monkeypatch.setattr(probe.Prober, "probe_fast", fast)
-    monkeypatch.setattr(probe.Prober, "probe_slow", slow)
-    monkeypatch.setattr(probe.Prober, "write_status", lambda self: None)
-
-    p = probe.Prober()
-    loop = threading.Thread(target=p.run, daemon=True)
-    loop.start()
+    net = {"up": False}
+    p, loop = _run_loop(monkeypatch, net, slow)
+    first = threading.Thread(target=p.check_now, daemon=True)
     try:
-        time.sleep(0.3)
-        assert len(calls) == 1
+        first.start()
+        assert _wait(lambda: calls)
+        # Туннель поднялся, пока шла проверка по запросу: её ответ мерил
+        # ещё прежнее состояние, своя проверка не теряется, а ждёт.
+        net["up"] = True
+        time.sleep(0.2)
+        assert calls == [1]
 
-        # Первая закончилась — следующая должна пойти сразу, а не никогда.
         release.set()
-        deadline = time.monotonic() + 2
-        while len(calls) < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert len(calls) >= 2
+        assert _wait(lambda: len(calls) == 2)
+        time.sleep(0.2)
+        assert calls == [1, 1]
     finally:
         release.set()
-        p.stop_event.set()
-        loop.join(2)
-        # Поток проверки не должен пережить снятие подмен monkeypatch.
-        deadline = time.monotonic() + 2
-        while p.slow_busy.is_set() and time.monotonic() < deadline:
-            time.sleep(0.01)
+        first.join(2)
+        _stop_loop(p, loop)
 
 
 def test_check_now_при_идущей_проверке_ждёт_её_а_не_запускает_вторую(monkeypatch):
@@ -105,3 +160,63 @@ def test_части_probe_slow_идут_параллельно_а_не_скла�
     assert time.monotonic() - t0 < 0.9
     assert sorted(started) == ["_slow_corp_dns", "_slow_corp_http",
                                "_slow_exit", "_slow_v6"]
+
+
+class _Resp:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _opener(monkeypatch, *answers):
+    """HTTP-клиент отвечает по очереди: исключением или ответом."""
+    calls = []
+
+    class _Opener:
+        def open(self, req, timeout):
+            calls.append(req.get_method())
+            a = answers[len(calls) - 1]
+            if isinstance(a, Exception):
+                raise a
+            return a
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *h: _Opener())
+    return calls
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("https://corp/", code, "", {}, None)
+
+
+def test_http_code_редирект_и_403_значат_сервер_достижим(monkeypatch):
+    for code in (302, 403):
+        calls = _opener(monkeypatch, _http_error(code))
+
+        assert probe.Prober._http_code("https://corp/") == str(code)
+        assert calls == ["HEAD"]
+
+
+def test_http_code_потерянная_попытка_повторяется(monkeypatch):
+    calls = _opener(monkeypatch, TimeoutError(), _Resp())
+
+    assert probe.Prober._http_code("https://corp/") == "200"
+    assert len(calls) == 2
+
+
+def test_http_code_нет_ответа_после_всех_попыток_пусто(monkeypatch):
+    calls = _opener(monkeypatch, *[urllib.error.URLError("down")] * probe.CORP_TRIES)
+
+    assert probe.Prober._http_code("https://corp/") == ""
+    assert len(calls) == probe.CORP_TRIES
+
+
+def test_dns_ask_потерянный_пакет_повторяется(monkeypatch):
+    answers = iter(["", "10.0.0.8"])
+    monkeypatch.setattr(probe.winnet, "resolve4_via",
+                        lambda name, server, timeout: next(answers))
+
+    assert probe.Prober._dns_ask("10.0.0.1", "corp") == "10.0.0.8"
