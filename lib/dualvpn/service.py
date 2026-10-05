@@ -10,6 +10,7 @@
 это отдельный флажок в state\\autostart, который читается при старте службы.
 """
 
+import collections
 import datetime
 import json
 import os
@@ -55,6 +56,20 @@ DEAD_GAP = 300.0
 # после пробуждения сеть и туннель чаще всего и ломаются, и без отметки
 # о сне дыра в штампах журнала читается как зависшая служба.
 SLEEP_GAP = 60.0
+# Куда что ходит: число соединений по тегу туннеля и адресу — по нему решать, что
+# из site.env действительно нужно, а что лишнее. Строки info-уровня sing-box:
+# соединение несёт только IP, домен берём из DNS-ответа с тем же номером запроса
+# (первое имя — то, что спрашивали, дальше цепочка CNAME). DNS-серверы (:53) не
+# считаем: это настройка, а не трафик. SB_LOG_LEVEL выше info глушит эти строки.
+PATHS_FILE = os.path.join(paths.STATE, "paths.json")
+PATHS_EVERY = 600.0
+PATHS_KEEP = 1000      # адресов на тег в файле: хвост из единичных не копим
+PATHS_NAMES = 20000    # сколько IP → имя помнить, потом память сбрасываем
+CONN_RE = re.compile(
+    r"\] (?:endpoint|outbound)/\w+\[([^\]]+)\]: outbound (?:packet )?connection to (\S+)")
+PREMATCH_RE = re.compile(
+    r"pre-match: .* connection from \S+ to (\S+) via (?:endpoint|outbound)/\w+\[([^\]]+)\]")
+DNS_RE = re.compile(r"\[(\d+) [^\]]*\] dns: \w+ \w+ (\S+?)\.? \d+ IN (\w+) (\S+?)\.?$")
 
 
 class Core:
@@ -71,6 +86,10 @@ class Core:
         self.server = ipc.Server(self.handle, self.log)
         self.last_error = ""
         self.busy = ""
+        # Журнал sing-box читают сторож и остановка туннеля — из разных потоков.
+        self.log_lock = threading.Lock()
+        self._paths = {}         # тег → Counter адресов с прошлой записи в файл
+        self._ip_names = {}      # IP → имя из DNS-ответа
 
     # Сколько ещё попыток поднять туннель после неудачного переподключения.
     # Команда человека (start/stop) их отменяет: он уже решил сам.
@@ -86,6 +105,8 @@ class Core:
     # Для какой паузы DEAD_GAP уже записали «мёртв, но жду»: раз за паузу, не
     # каждый круг.
     _dead_noted = None
+    # Когда статистику адресов снова писать в PATHS_FILE.
+    _paths_at = 0.0
 
     # ---------------------------------------------------------------- лог
 
@@ -123,6 +144,7 @@ class Core:
         self.prober.stop_event.set()
         self.server.stop_event.set()
         with self.lock:
+            self._flush_paths()
             self.tunnel.stop()
         winnet.PS.close()
 
@@ -299,6 +321,7 @@ class Core:
                 self._retry_left = 0
             self.busy = "переподключаю" if reconnect else "включаю"
             if reconnect:
+                self._flush_paths()
                 self.tunnel.stop()
             if not profile:
                 profile = probe.Prober.current_profile()
@@ -327,6 +350,7 @@ class Core:
         try:
             self._retry_left = 0
             self.busy = "выключаю"
+            self._flush_paths()
             self.tunnel.stop()
             self.last_error = ""
             return {"ok": True}
@@ -391,7 +415,12 @@ class Core:
             self.log(f"!! sing-box завершился сам (код {proc.returncode}) — "
                      f"поднимаю заново")
             return None, 0, self._reconnect()
-        dead = self._dead_tunnel()
+        with self.log_lock:
+            lines = self._read_log()
+            self._count_paths(lines)
+            if time.monotonic() >= self._paths_at:
+                self._save_paths()
+        dead = self._dead_tunnel(lines)
         if dead:
             now = time.monotonic()
             tag, addrs = dead[0][1], sorted({h[2] for h in dead})
@@ -445,13 +474,13 @@ class Core:
         self._log_pos += end
         return data[:end].decode("utf-8", "replace").splitlines()
 
-    def _dead_tunnel(self):
+    def _dead_tunnel(self, lines):
         """Таймауты (время круга, тег, адрес) туннеля, через который за DEAD_WINDOW
         не открылось DEAD_HITS соединений к хотя бы DEAD_ADDRS разным адресам,
         или None. Паузу DEAD_GAP не смотрит: это решает сторож."""
         now = time.monotonic()
         hits = [h for h in self._dead_hits if now - h[0] < DEAD_WINDOW]
-        for line in self._read_log():
+        for line in lines:
             m = DEAD_RE.search(line)
             if m:
                 hits.append((now, m.group(2), m.group(1).rpartition(":")[0]))
@@ -461,6 +490,83 @@ class Core:
             if len(mine) >= DEAD_HITS and len({h[2] for h in mine}) >= DEAD_ADDRS:
                 return mine
         return None
+
+    # ------------------------------------------------------ куда что ходит
+
+    def _count_paths(self, lines):
+        """Соединения из строк журнала — в счётчик по тегу и адресу (домену, если
+        его уже видели в DNS-ответе)."""
+        asked = {}                # номер DNS-запроса → спрошенное имя
+        for line in lines:
+            m = DNS_RE.search(line)
+            if m:
+                name = asked.setdefault(m.group(1), m.group(2))
+                if m.group(3) in ("A", "AAAA"):
+                    if len(self._ip_names) >= PATHS_NAMES:
+                        self._ip_names.clear()
+                    self._ip_names[m.group(4)] = name
+                continue
+            m = CONN_RE.search(line)
+            if m:
+                tag, (host, _, port) = m.group(1), m.group(2).rpartition(":")
+                if port == "53":
+                    continue
+                host = host.strip("[]")
+            else:
+                m = PREMATCH_RE.search(line)
+                if not m:
+                    continue
+                host, tag = m.group(1), m.group(2)
+            dest = self._ip_names.get(host, host)
+            self._paths.setdefault(tag, collections.Counter())[dest] += 1
+
+    def _save_paths(self):
+        """Счётчик с прошлой записи — прибавить к PATHS_FILE: статистика копится
+        между запусками службы, иначе редкие, но нужные адреса не дожили бы до
+        разбора. В файле по тегу — адреса по убыванию числа соединений."""
+        self._paths_at = time.monotonic() + PATHS_EVERY
+        if not self._paths:
+            return
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        try:
+            with open(PATHS_FILE, encoding="utf-8") as fh:
+                saved = json.load(fh)
+        except (OSError, ValueError):
+            saved = {}
+        if not isinstance(saved, dict) or not isinstance(saved.get("tags"), dict):
+            saved = {"since": now, "tags": {}}
+        try:
+            for tag, fresh in self._paths.items():
+                total = collections.Counter(saved["tags"].get(tag) or {})
+                total.update(fresh)
+                saved["tags"][tag] = dict(total.most_common(PATHS_KEEP))
+        except (TypeError, AttributeError):
+            # В файле не числа (правили руками) — счёт заново, а не ошибка каждый раз.
+            saved = {"since": now, "tags": {
+                tag: dict(fresh.most_common(PATHS_KEEP))
+                for tag, fresh in self._paths.items()}}
+        saved["updated"] = now
+        try:
+            paths.ensure_dirs()
+            tmp = PATHS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(saved, fh, ensure_ascii=False, indent=1)
+            os.replace(tmp, PATHS_FILE)
+        except OSError as exc:
+            self.log(f"!! статистика адресов не записана: {exc}")
+            return
+        self._paths = {}
+
+    def _flush_paths(self):
+        """Перед остановкой туннеля: дочитать журнал и записать статистику —
+        Tunnel.stop сбрасывает log_start, и хвост потом уже не прочесть.
+        Не бросает: статистика не должна мешать выключить VPN."""
+        try:
+            with self.log_lock:
+                self._count_paths(self._read_log())
+                self._save_paths()
+        except Exception as exc:                           # noqa: BLE001
+            self.log(f"!! статистика адресов: {exc}")
 
     def _reconnect(self, retries=RECONNECT_TRIES):
         """Туннель заново на текущей сети; не поднялся — взводит retries

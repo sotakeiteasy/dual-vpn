@@ -4,12 +4,23 @@
 Core без службы: туннель — заглушка, аплинк кладём в снимок пробера руками,
 круги сторожа гоняем вызовом _watch_once без ожиданий."""
 
+import json
 import threading
+
+import pytest
 
 from dualvpn import probe, service
 
 OFFICE = (12, "192.168.19.1")
 HOME = (7, "192.168.0.1")
+
+
+@pytest.fixture(autouse=True)
+def _paths_file(monkeypatch, tmp_path):
+    """Статистика адресов — во временную папку, не в настоящий state."""
+    path = tmp_path / "paths.json"
+    monkeypatch.setattr(service, "PATHS_FILE", str(path))
+    return path
 
 
 def _timeout(addr, tag="awg-personal"):
@@ -51,6 +62,8 @@ def _core(monkeypatch):
     core.lock = threading.Lock()
     core.busy = ""
     core.last_error = ""
+    core.log_lock = threading.Lock()
+    core._paths, core._ip_names = {}, {}
     core.prober = probe.Prober()
     core.tunnel = _Tunnel(core.prober)
     core.logged = []
@@ -392,3 +405,91 @@ def test_обычный_круг_сном_не_считается(monkeypatch):
     core._note_sleep(1000.0, 1000.0 + service.SLEEP_GAP)
 
     assert not _said(core, "спал")
+
+
+# ------------------------------------------------------- куда что ходит
+
+_PFX = "+0300 2026-10-05 22:45:33 INFO "
+
+
+def _dns(qid, name, kind, value):
+    return f"{_PFX}[{qid} 8ms] dns: exchanged {kind} {name}. 10 IN {kind} {value}\n"
+
+
+def _conn(addr, tag="awg-personal", packet=""):
+    return (f"{_PFX}[2734387054 1ms] endpoint/wireguard[{tag}]: "
+            f"outbound {packet}connection to {addr}\n")
+
+
+def _prematch(ip, tag="awg-personal"):
+    return (f"{_PFX}[639815585 1ms] router: pre-match: forward udp connection "
+            f"from 172.19.0.1 to {ip} via outbound/wireguard[{tag}]\n")
+
+
+def _saved(path):
+    return json.loads(path.read_text(encoding="utf-8"))["tags"]
+
+
+def test_адреса_по_тегу_с_доменом_из_dns(monkeypatch, tmp_path, _paths_file):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log,
+            _dns(1, "watson.events.data.microsoft.com", "CNAME",
+                 "blobcollectorcommon.trafficmanager.net."),
+            _dns(1, "blobcollectorcommon.trafficmanager.net", "A", "20.42.65.92"),
+            _dns(2, "git.corp.example", "A", "10.20.0.4"),
+            _conn("20.42.65.92:443"), _conn("20.42.65.92:443"),
+            _conn("10.20.0.4:443", "wg-corp"),
+            _conn("140.82.121.6:443"),
+            _conn("172.15.0.110:53", "wg-corp", packet="packet "),
+            _prematch("91.189.91.157"))
+
+    assert core._do_stop() == {"ok": True}
+
+    assert _saved(_paths_file) == {
+        "awg-personal": {"watson.events.data.microsoft.com": 2,
+                         "140.82.121.6": 1, "91.189.91.157": 1},
+        "wg-corp": {"git.corp.example": 1},
+    }
+
+
+def test_статистика_пишется_раз_в_период(monkeypatch, tmp_path, _paths_file):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log, _conn("1.1.1.1:443"))
+    state = _rounds(core, 1)
+    assert _saved(_paths_file) == {"awg-personal": {"1.1.1.1": 1}}
+
+    _append(log, _conn("1.1.1.1:443"))
+    state = _rounds(core, 1, state)
+    assert _saved(_paths_file) == {"awg-personal": {"1.1.1.1": 1}}
+
+    core._paths_at = 0.0
+    _rounds(core, 1, state)
+    assert _saved(_paths_file) == {"awg-personal": {"1.1.1.1": 2}}
+
+
+def test_статистика_копится_между_запусками_и_режется(monkeypatch, tmp_path,
+                                                     _paths_file):
+    monkeypatch.setattr(service, "PATHS_KEEP", 2)
+    first = _core(monkeypatch)
+    _append(_sing_log(first, tmp_path), _conn("1.1.1.1:443"), _conn("2.2.2.2:443"))
+    first._do_stop()
+
+    second = _core(monkeypatch)
+    _append(_sing_log(second, tmp_path), _conn("2.2.2.2:443"), _conn("3.3.3.3:443"))
+    second._do_stop()
+
+    assert _saved(_paths_file) == {"awg-personal": {"2.2.2.2": 2, "1.1.1.1": 1}}
+
+
+def test_испорченная_статистика_не_мешает_выключить(monkeypatch, tmp_path, _paths_file):
+    _paths_file.write_text('{"tags": {"awg-personal": {"1.1.1.1": "x"}}}',
+                           encoding="utf-8")
+    core = _core(monkeypatch)
+    _append(_sing_log(core, tmp_path), _conn("2.2.2.2:443"))
+
+    assert core._do_stop() == {"ok": True}
+
+    assert core.tunnel.uplink is None
+    assert _saved(_paths_file) == {"awg-personal": {"2.2.2.2": 1}}

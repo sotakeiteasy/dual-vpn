@@ -8,6 +8,8 @@ from dualvpn import probe, service
 
 
 class _Tunnel:
+    log_start = None
+
     def __init__(self, net):
         self.net = net
 
@@ -26,6 +28,8 @@ def _core(monkeypatch, up):
     core.lock = threading.Lock()
     core.busy = ""
     core.last_error = ""
+    core.log_lock = threading.Lock()
+    core._paths, core._ip_names = {}, {}
     core.tunnel = _Tunnel(net)
     core.prober = probe.Prober()
     monkeypatch.setattr(core.prober, "probe_fast", lambda: core.prober.set(
