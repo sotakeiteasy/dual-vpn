@@ -31,7 +31,7 @@ def _fake_win32(monkeypatch, execute):
     win32com_shell.shell, win32com_shell.shellcon = shell, shellcon
     modules = {
         "win32com.shell": win32com_shell,
-        "win32con": types.SimpleNamespace(SW_HIDE=0),
+        "win32con": types.SimpleNamespace(SW_HIDE=0, SW_SHOWNORMAL=1),
         "win32event": types.SimpleNamespace(
             INFINITE=-1,
             WaitForSingleObject=lambda h, t: calls.append(("wait", h, t))),
@@ -83,3 +83,13 @@ def test_отказ_в_uac_даёт_ошибку_а_не_исключение(mo
 
     assert reply["ok"] is False and "отменён" in reply["error"]
     assert [c[0] for c in calls] == ["execute"]
+
+
+def test_admin_op_скрыт_а_редактор_виден(monkeypatch):
+    calls = _fake_win32(monkeypatch, lambda _kw: {"hProcess": 5})
+
+    window._run_elevated("x.exe", [])
+    window._run_elevated("notepad.exe", ["a.conf"], show=True)
+
+    shown = [c[1]["nShow"] for c in calls if c[0] == "execute"]
+    assert shown == [0, 1]

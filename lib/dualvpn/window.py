@@ -44,8 +44,10 @@ def _is_admin():
         return False
 
 
-def _run_elevated(exe, args):
+def _run_elevated(exe, args, show=False):
     """Запускает exe с правами (UAC) и ждёт, пока он завершится.
+
+    show — окно процесса видно: admin-op прячем, Блокнот с конфигом — нет.
 
     Раньше это делал powershell Start-Process -Verb RunAs: тот же
     ShellExecuteEx внутри, но сначала секунда-другая на запуск самого
@@ -62,7 +64,7 @@ def _run_elevated(exe, args):
         info = shell.ShellExecuteEx(
             fMask=shellcon.SEE_MASK_NOCLOSEPROCESS, lpVerb="runas",
             lpFile=exe, lpParameters=subprocess.list2cmdline(args),
-            nShow=win32con.SW_HIDE)
+            nShow=win32con.SW_SHOWNORMAL if show else win32con.SW_HIDE)
     except pywintypes.error:
         return
     proc = info.get("hProcess")
@@ -72,6 +74,22 @@ def _run_elevated(exe, args):
         win32event.WaitForSingleObject(proc, win32event.INFINITE)
     finally:
         win32api.CloseHandle(proc)
+
+
+def _service_installed():
+    """Стоит ли служба: канал молчит и у остановленной, а «Нужна установка»
+    положено показывать только у непоставленной. None — узнать нечем.
+    """
+    try:
+        import pywintypes
+        import win32serviceutil
+    except ImportError:
+        return None
+    try:
+        win32serviceutil.QueryServiceStatus(paths.SERVICE_NAME)
+        return True
+    except pywintypes.error:
+        return False
 
 
 class Api:
@@ -129,6 +147,10 @@ class Api:
             self._add_config(arg)
         elif name == "show_config":
             self._show_conf(arg["name"], arg["kind"])
+        elif name == "edit_config":
+            # Блокнот держит поток, пока его не закроют, — мост не ждёт.
+            threading.Thread(target=self._edit_conf,
+                             args=(arg["name"], arg["kind"]), daemon=True).start()
         elif name == "info":
             # «i» у колонки показывает тот конфиг, что пойдёт в сборку.
             st = ipc.call("status").get("status", {})
@@ -232,7 +254,8 @@ class Api:
         try:
             st = ipc.call("status").get("status", {})
         except ipc.NotRunning:
-            self.js("render", {"up": False, "no_service": True})
+            self.js("render", {"up": False, "no_service": True,
+                                "daemon": _service_installed()})
             return
         self.js("render", st)
         if full:
@@ -311,6 +334,31 @@ class Api:
             self.jsn("showConf", [name, kind, reply.get("text", "")])
         else:
             self.js("failed", reply.get("error") or "не прочитать конфиг")
+
+    def _edit_conf(self, name, kind):
+        """Открывает конфиг в Блокноте с правами: каталог conf\\ закрыт для
+        пользователя. Свой редактор в окне не делаем, как и на macOS.
+
+        Путь собирается только из имени, которое служба сама отдала в
+        статусе: имя приходит со страницы, и «..\\» вывел бы Блокнот с правами
+        за пределы conf\\.
+        """
+        try:
+            st = ipc.call("status").get("status", {})
+        except ipc.NotRunning as exc:
+            self.js("failed", str(exc))
+            return
+        confs = self._confs(st).get(kind) if kind in ("corp", "personal") else []
+        if name not in [c["name"] for c in confs]:
+            self.js("failed", f"нет конфига «{name}»")
+            return
+        folder = paths.CONF_CORP if kind == "corp" else paths.CONF_PERSONAL
+        # Полный путь: с правами запускается то, что найдётся по имени, а
+        # PATH и текущий каталог пишет и обычный пользователь.
+        notepad = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                               "System32", "notepad.exe")
+        _run_elevated(notepad, [os.path.join(folder, f"{name}.conf")], show=True)
+        self.refresh(full=True)
 
     def _add_config(self, kind):
         """Диалог выбора файла и передача его службе.
