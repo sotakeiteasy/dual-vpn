@@ -354,6 +354,35 @@ def test_в_паузе_мёртвого_смена_сети_переподклю
     assert core.tunnel.starts == 2
 
 
+def test_без_шлюза_мёртвый_не_переподключает(monkeypatch, tmp_path):
+    """Wi-Fi отвалился или компьютер проснулся: таймауты от сети, а не от
+    туннеля, и без сети переподключение только снимет туннель."""
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _net(core, (None, ""))
+    _append(log, *_three_dead())
+
+    _rounds(core, 3)
+
+    assert core.tunnel.starts == 0
+    assert not _said(core, "переподключаю")
+    assert not _said(core, "жду")
+
+
+def test_таймауты_без_шлюза_не_копятся(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _net(core, (None, ""))
+    _append(log, _timeout("1.1.1.1:443"), _timeout("8.8.8.8:443"))
+    state = _rounds(core, 1)
+
+    _net(core, OFFICE)
+    _append(log, _timeout("9.9.9.9:443"))
+    _rounds(core, 1, state)
+
+    assert core.tunnel.starts == 0
+
+
 def test_повторы_пишутся_с_номером(monkeypatch):
     core = _core(monkeypatch)
     core.tunnel.fail = True

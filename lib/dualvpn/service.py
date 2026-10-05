@@ -420,7 +420,13 @@ class Core:
             self._count_paths(lines)
             if time.monotonic() >= self._paths_at:
                 self._save_paths()
-        dead = self._dead_tunnel(lines)
+        if cur[1]:
+            dead = self._dead_tunnel(lines)
+        else:
+            # Без шлюза таймауты — от сети, а не от туннеля: не копим, иначе
+            # они сработают сразу после её возвращения, и не переподключаем —
+            # без сети туннель только снимется.
+            dead, self._dead_hits = None, ()
         if dead:
             now = time.monotonic()
             tag, addrs = dead[0][1], sorted({h[2] for h in dead})
