@@ -47,7 +47,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Prober:
-    def __init__(self):
+    def __init__(self, log=None):
+        # Журнал службы: итог сетевой проверки нужен рядом со строками сторожа,
+        # а не только в status.json, который перезаписывается.
+        self.log = log
         self.st = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -170,13 +173,47 @@ class Prober:
         """Сетевая проверка. Части независимы и идут параллельно: по очереди
         их таймауты складывались, и проверка «висела» до минуты, хотя каждая
         часть по отдельности укладывается в секунды."""
-        parts = [threading.Thread(target=fn, daemon=True)
-                 for fn in (self._slow_exit, self._slow_v6,
-                            self._slow_corp_dns, self._slow_corp_http)]
+        took = {}
+
+        def timed(name, fn):
+            began = time.monotonic()
+            try:
+                fn()
+            finally:
+                took[name] = time.monotonic() - began
+
+        began = time.monotonic()
+        parts = [threading.Thread(target=timed, args=item, daemon=True)
+                 for item in (("exit", self._slow_exit), ("v6", self._slow_v6),
+                              ("dns", self._slow_corp_dns),
+                              ("http", self._slow_corp_http))]
         for t in parts:
             t.start()
         for t in parts:
             t.join()
+        if self.log:
+            self.log(self._slow_summary(time.monotonic() - began, took))
+
+    def _slow_summary(self, total, took):
+        """Строка для журнала: что намерила проверка и сколько шла каждая часть."""
+        s = self.snapshot()
+
+        def sec(name):
+            return f"{took[name]:.1f} с" if name in took else "не дошла"
+
+        where = " ".join(filter(None, (s.get("exit_country"), s.get("exit_org"))))
+        out = (f"выход {s.get('exit_ip') or 'не узнал'}"
+               f"{f' ({where})' if where else ''}, {s.get('exit_state') or 'unknown'}, "
+               f"{sec('exit')}")
+        if paths.site_env().get("CORP_PROBE"):
+            corp = (f"корп DNS {s.get('corp_ip') or 'молчит'}, {sec('dns')}; "
+                    f"корп HTTPS {s.get('corp_http') or 'молчит'}, {sec('http')}")
+        else:
+            corp = "корп не проверял (CORP_PROBE не задан)"
+        v6 = (f"утечка IPv6 {s['v6_leak']}" if s.get("v6_leak")
+              else "IPv6 без утечки")
+        return (f"→ проверка сети за {total:.1f} с: {out}; {corp}; "
+                f"{v6}, {sec('v6')}")
 
     def _slow_exit(self):
         peers = self.peer_addrs()

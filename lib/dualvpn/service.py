@@ -67,7 +67,7 @@ class Core:
     def __init__(self):
         self.lock = threading.Lock()      # один start/stop одновременно
         self.tunnel = tunnel.Tunnel(self.log)
-        self.prober = probe.Prober()
+        self.prober = probe.Prober(self.log)
         self.server = ipc.Server(self.handle, self.log)
         self.last_error = ""
         self.busy = ""

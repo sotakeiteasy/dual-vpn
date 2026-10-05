@@ -162,6 +162,49 @@ def test_части_probe_slow_идут_параллельно_а_не_скла�
                                "_slow_exit", "_slow_v6"]
 
 
+def _slow_parts(monkeypatch, **st):
+    """Части probe_slow без сети: каждая кладёт в снимок свою долю st."""
+    def part(*keys):
+        def run(self):
+            self.set(**{k: st[k] for k in keys if k in st})
+        return run
+
+    monkeypatch.setattr(probe.Prober, "_slow_exit",
+                        part("exit_ip", "exit_country", "exit_org", "exit_state"))
+    monkeypatch.setattr(probe.Prober, "_slow_v6", part("v6_leak"))
+    monkeypatch.setattr(probe.Prober, "_slow_corp_dns", part("corp_ip"))
+    monkeypatch.setattr(probe.Prober, "_slow_corp_http", part("corp_http"))
+
+
+def test_итог_проверки_сети_в_журнале(monkeypatch):
+    _slow_parts(monkeypatch, exit_ip="185.1.2.3", exit_country="NL",
+                exit_state="tunnel", corp_ip="10.1.1.1", corp_http="",
+                v6_leak="2a00::1")
+    monkeypatch.setattr(probe.paths, "site_env", lambda: {"CORP_PROBE": "corp.example"})
+    logged = []
+
+    probe.Prober(logged.append).probe_slow()
+
+    [line] = logged
+    assert "выход 185.1.2.3 (NL), tunnel" in line
+    assert "корп DNS 10.1.1.1" in line
+    assert "корп HTTPS молчит" in line
+    assert "утечка IPv6 2a00::1" in line
+
+
+def test_итог_без_хоста_корпа_так_и_пишет(monkeypatch):
+    _slow_parts(monkeypatch)
+    monkeypatch.setattr(probe.paths, "site_env", lambda: {})
+    logged = []
+
+    probe.Prober(logged.append).probe_slow()
+
+    [line] = logged
+    assert "выход не узнал" in line
+    assert "CORP_PROBE не задан" in line
+    assert "IPv6 без утечки" in line
+
+
 class _Resp:
     status = 200
 
