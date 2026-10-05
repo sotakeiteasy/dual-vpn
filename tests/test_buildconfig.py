@@ -103,8 +103,32 @@ def test_endpoint_собирается_из_конфига(tmp_path):
 
 
 def test_mtu_из_конфига_важнее_умолчания(tmp_path):
-    conf = buildconfig.parse_conf(_write(tmp_path, "p.conf", PERSONAL_AWG))
+    text = CORP.replace("DNS = 10.0.0.53", "DNS = 10.0.0.53\nMTU = 1420")
+    conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", text))
+    assert buildconfig.endpoint(conf, "wg-corp", 1280)["mtu"] == 1420
+
+
+def test_awg_с_junk_режет_mtu_до_1280(tmp_path, capsys):
+    """S1–S4 удлиняют пакеты: с 1420 из файла они не пролезают в мобильной сети."""
+    path = _write(tmp_path, "p.conf", PERSONAL_AWG)
+    conf = buildconfig.parse_conf(path)
+
+    assert buildconfig.endpoint(conf, "awg-personal", 1280)["mtu"] == 1280
+    assert "MTU 1420 -> 1280" in capsys.readouterr().out
+    assert "MTU = 1420" in (tmp_path / "p.conf").read_text(encoding="utf-8")
+
+
+def test_awg_с_нулевым_junk_mtu_не_трогает(tmp_path):
+    """Jc = 0, S1 = 0 — пакеты как у обычного WireGuard, удлинения нет."""
+    text = PERSONAL_AWG.replace("Jc = 4", "Jc = 0").replace("S1 = 30", "S1 = 0")
+    conf = buildconfig.parse_conf(_write(tmp_path, "p.conf", text))
     assert buildconfig.endpoint(conf, "awg-personal", 1280)["mtu"] == 1420
+
+
+def test_awg_с_малым_mtu_не_поднимается(tmp_path):
+    text = PERSONAL_AWG.replace("MTU = 1420", "MTU = 1200")
+    conf = buildconfig.parse_conf(_write(tmp_path, "p.conf", text))
+    assert buildconfig.endpoint(conf, "awg-personal", 1280)["mtu"] == 1200
 
 
 def test_awg_поля_числа_числами_диапазоны_строками(tmp_path):

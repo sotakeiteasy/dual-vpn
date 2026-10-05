@@ -51,6 +51,12 @@ AWG3_RANGE = {
 AWG3_BOOL = {"randomtrailers": "random_trailers",
              "disablecookies": "disable_cookies"}
 
+# Потолок MTU для AWG с junk-параметрами: S1–S4 удлиняют пакеты, и с MTU
+# из файла (часто 1420) они не пролезают в мобильных сетях и вложенных
+# туннелях. Файл пользователя не меняем — режем только при сборке.
+AWG_JUNK = ("jc", "s1", "s2", "s3", "s4")
+AWG_MTU_MAX = 1280
+
 
 # Раньше тип туннеля решало имя файла в плоском conf\. Эти шаблоны остались
 # только для переезда старых установок в conf\corp и conf\personal.
@@ -300,6 +306,10 @@ def endpoint(conf, tag, default_mtu):
     for k, key in AWG3_BOOL.items():
         if k in iface:
             ep[key] = iface[k].lower() in ("1", "true", "yes", "on")
+
+    if any(ep.get(k) for k in AWG_JUNK) and ep["mtu"] > AWG_MTU_MAX:
+        print(f"  [{tag}] MTU {ep['mtu']} -> {AWG_MTU_MAX}: AWG с junk-параметрами")
+        ep["mtu"] = AWG_MTU_MAX
     return ep
 
 
