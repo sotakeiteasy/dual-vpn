@@ -53,6 +53,9 @@ class Tunnel:
         self.log = log
         self.proc = None
         self.logfile = None
+        # (путь, смещение) начала текущего запуска в журнале sing-box: сторож
+        # службы читает оттуда ошибки соединений. None — туннель не запущен.
+        self.log_start = None
         # Индекс нашего tun, каким мы его запомнили. Нужен уборке после того,
         # как интерфейс исчез, а журнал уже удалён.
         self._tun_hint = None
@@ -189,6 +192,7 @@ class Tunnel:
         self.logfile.write(
             f"\n=== {datetime.datetime.now():%Y-%m-%d %H:%M:%S} DualVPN ===\n")
         self.logfile.flush()
+        self.log_start = (path, self.logfile.tell())
         return path
 
     # -------------------------------------------------------------- старт
@@ -455,6 +459,7 @@ class Tunnel:
             except OSError:
                 pass
             self.logfile = None
+        self.log_start = None
 
         # 2. Маршруты — по журналу, в порядке, обратном постановке. Там
         # записано ровно то, что навесили мы, включая пиров прошлого профиля.

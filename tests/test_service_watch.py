@@ -12,6 +12,12 @@ OFFICE = (12, "192.168.19.1")
 HOME = (7, "192.168.0.1")
 
 
+def _timeout(addr, tag="awg-personal"):
+    return (f"+0300 2026-10-05 09:59:57 ERROR [2478390845 15.1s] connection: open "
+            f"connection to {addr} using outbound/wireguard[{tag}]: "
+            f"context deadline exceeded\n")
+
+
 class _Proc:
     returncode = 1
 
@@ -24,6 +30,7 @@ class _Tunnel:
         self.prober = prober
         self.uplink = OFFICE
         self.proc = None
+        self.log_start = None
         self.fail = False
         self.starts = 0
 
@@ -53,6 +60,19 @@ def _core(monkeypatch):
     monkeypatch.setattr(service, "RECONNECT_GAP", 0.0)
     _net(core, OFFICE)
     return core
+
+
+def _sing_log(core, tmp_path, old=""):
+    """Журнал sing-box: old — строки прошлого запуска до начала текущего."""
+    path = tmp_path / "vpn.log"
+    path.write_bytes(old.encode())
+    core.tunnel.log_start = (str(path), len(old.encode()))
+    return path
+
+
+def _append(path, *lines):
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.writelines(lines)
 
 
 def _net(core, uplink):
@@ -189,3 +209,81 @@ def test_занятая_служба_сторожа_не_пускает(monkeypa
     _rounds(core, service.UPLINK_SETTLE * 3)
 
     assert core.tunnel.starts == 0
+
+
+# ------------------------------------------------------- мёртвый туннель
+
+def test_таймауты_к_разным_адресам_переподключают(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log, _timeout("34.117.59.81:443"), _timeout("172.217.23.238:443"))
+    state = _rounds(core, 1)
+    assert core.tunnel.starts == 0
+
+    _append(log, _timeout("160.79.104.10:443"))
+    _rounds(core, 1, state)
+
+    assert core.tunnel.starts == 1
+    assert any("awg-personal" in line for line in core.logged)
+
+
+def test_таймауты_к_одному_адресу_не_переподключают(monkeypatch, tmp_path):
+    """Лежит один сайт, а не туннель."""
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log, *[_timeout("160.79.104.10:443")] * 5)
+
+    _rounds(core, 3)
+
+    assert core.tunnel.starts == 0
+
+
+def test_таймауты_разных_туннелей_не_складываются(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log, _timeout("10.10.0.5:443", "wg-corp"),
+            _timeout("34.117.59.81:443"), _timeout("172.217.23.238:443"))
+
+    _rounds(core, 1)
+
+    assert core.tunnel.starts == 0
+
+
+def test_повтор_раньше_паузы_не_переподключает(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log, _timeout("1.1.1.1:443"), _timeout("8.8.8.8:443"),
+            _timeout("9.9.9.9:443"))
+    state = _rounds(core, 1)
+    assert core.tunnel.starts == 1
+
+    _append(log, _timeout("1.1.1.1:443"), _timeout("8.8.8.8:443"),
+            _timeout("9.9.9.9:443"))
+    _rounds(core, 3, state)
+
+    assert core.tunnel.starts == 1
+
+
+def test_ошибки_прошлого_запуска_не_в_счёт(monkeypatch, tmp_path):
+    """open_log продолжает свежий файл: строки до заголовка — чужой сеанс."""
+    core = _core(monkeypatch)
+    _sing_log(core, tmp_path, old=_timeout("1.1.1.1:443") +
+              _timeout("8.8.8.8:443") + _timeout("9.9.9.9:443"))
+
+    _rounds(core, 3)
+
+    assert core.tunnel.starts == 0
+
+
+def test_недописанная_строка_дочитывается_на_следующем_круге(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    line = _timeout("9.9.9.9:443")
+    _append(log, _timeout("1.1.1.1:443"), _timeout("8.8.8.8:443"), line[:40])
+    state = _rounds(core, 1)
+    assert core.tunnel.starts == 0
+
+    _append(log, line[40:])
+    _rounds(core, 1, state)
+
+    assert core.tunnel.starts == 1

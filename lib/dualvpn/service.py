@@ -13,6 +13,7 @@
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -38,6 +39,18 @@ UPLINK_SETTLE = 3
 # дёргают маршруты, а человек всё равно увидит ошибку и включит сам.
 RECONNECT_TRIES = 2
 RECONNECT_GAP = 10.0
+# Мёртвый туннель: keepalive идёт, а TCP через него не открывается (5 октября личный
+# молчал две минуты, корп — до замены конфига). Сетевой пинг давал бы постоянный
+# трафик и ложное «молчит», поэтому смотрим на живые соединения в журнале
+# sing-box. Один адрес может лежать сам — нужны разные; переподключение при этом
+# не чаще DEAD_GAP, чтобы лежащий сервер не дёргал маршруты по кругу.
+DEAD_RE = re.compile(
+    r"ERROR .*open connection to (\S+) "
+    r"using outbound/wireguard\[([^\]]+)\]: context deadline exceeded")
+DEAD_HITS = 3
+DEAD_ADDRS = 2
+DEAD_WINDOW = 60.0
+DEAD_GAP = 300.0
 
 
 class Core:
@@ -58,6 +71,14 @@ class Core:
     # Сколько ещё попыток поднять туннель после неудачного переподключения.
     # Команда человека (start/stop) их отменяет: он уже решил сам.
     _retry_left = 0
+
+    # Чтение журнала sing-box сторожем: для какого запуска (Tunnel.log_start)
+    # и до какого байта дочитано; таймауты (время, тег, адрес) за DEAD_WINDOW;
+    # раньше чего мёртвый туннель снова не переподключаем.
+    _log_from = None
+    _log_pos = 0
+    _dead_hits = ()
+    _dead_after = 0.0
 
     # ---------------------------------------------------------------- лог
 
@@ -348,6 +369,13 @@ class Core:
             self.log(f"!! sing-box завершился сам (код {proc.returncode}) — "
                      f"поднимаю заново")
             return None, 0, self._reconnect()
+        tag = self._dead_tunnel()
+        if tag:
+            self._dead_hits = ()
+            self._dead_after = time.monotonic() + DEAD_GAP
+            self.log(f"!! через {tag} соединения не открываются — "
+                     f"переподключаю")
+            return None, 0, self._reconnect()
         if not cur[1] or cur == had:
             return None, 0, retry_at
         streak = streak + 1 if cur == seen else 1
@@ -356,6 +384,46 @@ class Core:
         self.log(f"→ сеть сменилась: интерфейс {had[0]}, шлюз {had[1]} → "
                  f"интерфейс {cur[0]}, шлюз {cur[1]} — переподключаю")
         return None, 0, self._reconnect()
+
+    def _read_log(self):
+        """Новые целые строки журнала sing-box с прошлого круга, только текущего
+        запуска: старые ошибки прошлого сеанса в том же файле не в счёт."""
+        start = self.tunnel.log_start
+        if start is None:
+            return []
+        if start != self._log_from:
+            self._log_from, self._log_pos = start, start[1]
+        try:
+            with open(start[0], "rb") as fh:
+                fh.seek(self._log_pos)
+                data = fh.read(LOG_TAIL_BYTES)
+        except OSError:
+            return []
+        # Недописанную строку оставляем до следующего круга; кусок без единого
+        # перевода строки во всю длину пропускаем, иначе чтение встанет.
+        end = data.rfind(b"\n") + 1
+        if not end and len(data) == LOG_TAIL_BYTES:
+            end = len(data)
+        self._log_pos += end
+        return data[:end].decode("utf-8", "replace").splitlines()
+
+    def _dead_tunnel(self):
+        """Тег туннеля, через который за DEAD_WINDOW не открылось DEAD_HITS соединений
+        к хотя бы DEAD_ADDRS разным адресам, или None."""
+        now = time.monotonic()
+        hits = [h for h in self._dead_hits if now - h[0] < DEAD_WINDOW]
+        for line in self._read_log():
+            m = DEAD_RE.search(line)
+            if m:
+                hits.append((now, m.group(2), m.group(1).rpartition(":")[0]))
+        self._dead_hits = hits
+        if now < self._dead_after:
+            return None
+        for tag in {h[1] for h in hits}:
+            addrs = [h[2] for h in hits if h[1] == tag]
+            if len(addrs) >= DEAD_HITS and len(set(addrs)) >= DEAD_ADDRS:
+                return tag
+        return None
 
     def _reconnect(self, retries=RECONNECT_TRIES):
         """Туннель заново на текущей сети; не поднялся — взводит retries
