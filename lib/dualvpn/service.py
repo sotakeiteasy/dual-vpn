@@ -79,6 +79,9 @@ class Core:
     _log_pos = 0
     _dead_hits = ()
     _dead_after = 0.0
+    # Для какой паузы DEAD_GAP уже записали «мёртв, но жду»: раз за паузу, не
+    # каждый круг.
+    _dead_noted = None
 
     # ---------------------------------------------------------------- лог
 
@@ -295,16 +298,19 @@ class Core:
                 self.tunnel.stop()
             if not profile:
                 profile = probe.Prober.current_profile()
+            began = time.monotonic()
             err = self.tunnel.start(profile)
+            took = time.monotonic() - began
             self.last_error = err
             if err:
-                self.log(f"!! {err}")
+                self.log(f"!! {err} (за {took:.1f} с)")
                 if retries:
                     self._retry_left = retries
                 # Наполовину поднятое состояние опаснее выключенного: маршруты
                 # уже могли встать. Убираем за собой сразу, а не ждём человека.
                 self.tunnel.stop()
                 return {"ok": False, "error": err}
+            self.log(f"→ туннель поднят за {took:.1f} с")
             return {"ok": True}
         finally:
             self._probe_now()
@@ -358,7 +364,8 @@ class Core:
                 self._retry_left = 0
             elif cur[1] and time.monotonic() >= retry_at:
                 self._retry_left -= 1
-                self.log("→ ещё раз поднимаю туннель")
+                self.log(f"→ ещё раз поднимаю туннель: повтор "
+                         f"{RECONNECT_TRIES - self._retry_left} из {RECONNECT_TRIES}")
                 retry_at = self._reconnect(retries=0)
             return None, 0, retry_at
 
@@ -369,17 +376,33 @@ class Core:
             self.log(f"!! sing-box завершился сам (код {proc.returncode}) — "
                      f"поднимаю заново")
             return None, 0, self._reconnect()
-        tag = self._dead_tunnel()
-        if tag:
-            self._dead_hits = ()
-            self._dead_after = time.monotonic() + DEAD_GAP
-            self.log(f"!! через {tag} соединения не открываются — "
-                     f"переподключаю")
-            return None, 0, self._reconnect()
+        dead = self._dead_tunnel()
+        if dead:
+            now = time.monotonic()
+            tag, addrs = dead[0][1], sorted({h[2] for h in dead})
+            what = (f"через {tag} соединения не открываются: таймаутов "
+                    f"{len(dead)} за {now - dead[0][0]:.0f} с, адреса: {', '.join(addrs)}")
+            if now >= self._dead_after:
+                self._dead_hits = ()
+                self._dead_after = now + DEAD_GAP
+                self.log(f"!! {what} — переподключаю")
+                return None, 0, self._reconnect()
+            # Внутри паузы смену сети всё равно проверяем ниже.
+            if self._dead_noted != self._dead_after:
+                self._dead_noted = self._dead_after
+                self.log(f"!! {what} — туннель мёртв, но с прошлого "
+                         f"переподключения нет {DEAD_GAP:.0f} с, жду")
         if not cur[1] or cur == had:
+            if seen:
+                self.log(f"→ сеть моргнула: интерфейс {seen[0]}, шлюз {seen[1]} "
+                         f"продержалась {streak} из {UPLINK_SETTLE} кругов — "
+                         f"остаюсь на прежней")
             return None, 0, retry_at
         streak = streak + 1 if cur == seen else 1
         if streak < UPLINK_SETTLE:
+            if streak == 1:
+                self.log(f"→ вижу новую сеть: интерфейс {cur[0]}, шлюз {cur[1]} "
+                         f"— жду {UPLINK_SETTLE} кругов, прежде чем переподключать")
             return cur, streak, retry_at
         self.log(f"→ сеть сменилась: интерфейс {had[0]}, шлюз {had[1]} → "
                  f"интерфейс {cur[0]}, шлюз {cur[1]} — переподключаю")
@@ -408,8 +431,9 @@ class Core:
         return data[:end].decode("utf-8", "replace").splitlines()
 
     def _dead_tunnel(self):
-        """Тег туннеля, через который за DEAD_WINDOW не открылось DEAD_HITS соединений
-        к хотя бы DEAD_ADDRS разным адресам, или None."""
+        """Таймауты (время круга, тег, адрес) туннеля, через который за DEAD_WINDOW
+        не открылось DEAD_HITS соединений к хотя бы DEAD_ADDRS разным адресам,
+        или None. Паузу DEAD_GAP не смотрит: это решает сторож."""
         now = time.monotonic()
         hits = [h for h in self._dead_hits if now - h[0] < DEAD_WINDOW]
         for line in self._read_log():
@@ -417,12 +441,10 @@ class Core:
             if m:
                 hits.append((now, m.group(2), m.group(1).rpartition(":")[0]))
         self._dead_hits = hits
-        if now < self._dead_after:
-            return None
-        for tag in {h[1] for h in hits}:
-            addrs = [h[2] for h in hits if h[1] == tag]
-            if len(addrs) >= DEAD_HITS and len(set(addrs)) >= DEAD_ADDRS:
-                return tag
+        for tag in sorted({h[1] for h in hits}):
+            mine = [h for h in hits if h[1] == tag]
+            if len(mine) >= DEAD_HITS and len({h[2] for h in mine}) >= DEAD_ADDRS:
+                return mine
         return None
 
     def _reconnect(self, retries=RECONNECT_TRIES):

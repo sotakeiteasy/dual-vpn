@@ -287,3 +287,91 @@ def test_недописанная_строка_дочитывается_на_с�
     _rounds(core, 1, state)
 
     assert core.tunnel.starts == 1
+
+
+# ------------------------------------------------------------ журнал сторожа
+
+def _said(core, text):
+    return [line for line in core.logged if text in line]
+
+
+def _three_dead():
+    return (_timeout("1.1.1.1:443"), _timeout("8.8.8.8:443"), _timeout("9.9.9.9:443"))
+
+
+def test_мёртвый_туннель_в_журнале_с_тегом_числом_и_адресами(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log, _timeout("34.117.59.81:443"), _timeout("172.217.23.238:443"),
+            _timeout("34.117.59.81:443"))
+
+    _rounds(core, 1)
+
+    [line] = _said(core, "переподключаю")
+    assert "awg-personal" in line
+    assert "таймаутов 3" in line
+    assert "172.217.23.238, 34.117.59.81" in line
+
+
+def test_мёртвый_в_паузе_пишется_один_раз(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log, *_three_dead())
+    state = _rounds(core, 1)
+
+    for _ in range(3):
+        _append(log, *_three_dead())
+        state = _rounds(core, 1, state)
+
+    assert len(_said(core, "жду")) == 1
+
+
+def test_в_паузе_мёртвого_смена_сети_переподключает(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _append(log, *_three_dead())
+    state = _rounds(core, 1)
+    assert core.tunnel.starts == 1
+
+    _net(core, HOME)
+    for _ in range(service.UPLINK_SETTLE):
+        _append(log, *_three_dead())
+        state = _rounds(core, 1, state)
+
+    assert core.tunnel.starts == 2
+
+
+def test_повторы_пишутся_с_номером(monkeypatch):
+    core = _core(monkeypatch)
+    core.tunnel.fail = True
+    _net(core, HOME)
+
+    _rounds(core, service.UPLINK_SETTLE + service.RECONNECT_TRIES * 3)
+
+    n = service.RECONNECT_TRIES
+    assert _said(core, f"повтор 1 из {n}")
+    assert _said(core, f"повтор {n} из {n}")
+
+
+def test_время_подъёма_туннеля_в_журнале(monkeypatch):
+    core = _core(monkeypatch)
+
+    assert core._do_start("p") == {"ok": True}
+    core.tunnel.fail = True
+    core._do_start("p")
+
+    assert _said(core, "туннель поднят за")
+    assert _said(core, "не поднялся (за")
+
+
+def test_мигание_сети_в_журнале(monkeypatch):
+    core = _core(monkeypatch)
+    _net(core, HOME)
+    state = _rounds(core, service.UPLINK_SETTLE - 1)
+    _net(core, OFFICE)
+
+    _rounds(core, 1, state)
+
+    assert len(_said(core, "вижу новую сеть")) == 1
+    [line] = _said(core, "сеть моргнула")
+    assert f"шлюз {HOME[1]}" in line
