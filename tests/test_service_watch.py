@@ -375,3 +375,20 @@ def test_мигание_сети_в_журнале(monkeypatch):
     assert len(_said(core, "вижу новую сеть")) == 1
     [line] = _said(core, "сеть моргнула")
     assert f"шлюз {HOME[1]}" in line
+
+
+def test_сон_между_кругами_в_журнале(monkeypatch):
+    core = _core(monkeypatch)
+
+    core._note_sleep(1000.0, 1000.0 + 25 * 60)
+
+    [line] = _said(core, "компьютер спал")
+    assert "25.0 мин" in line
+
+
+def test_обычный_круг_сном_не_считается(monkeypatch):
+    core = _core(monkeypatch)
+
+    core._note_sleep(1000.0, 1000.0 + service.SLEEP_GAP)
+
+    assert not _said(core, "спал")

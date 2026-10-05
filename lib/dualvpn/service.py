@@ -51,6 +51,10 @@ DEAD_HITS = 3
 DEAD_ADDRS = 2
 DEAD_WINDOW = 60.0
 DEAD_GAP = 300.0
+# Пауза между кругами сторожа длиннее этого (при шаге FAST_EVERY) — компьютер спал:
+# после пробуждения сеть и туннель чаще всего и ломаются, и без отметки
+# о сне дыра в штампах журнала читается как зависшая служба.
+SLEEP_GAP = 60.0
 
 
 class Core:
@@ -343,12 +347,23 @@ class Core:
         руками. Сеть не опрашиваем заново: аплинк уже есть в снимке пробера.
         """
         seen, streak, retry_at = None, 0, 0.0
+        # По часам стены: monotonic на Windows сон может не считать.
+        # Отсчёт — от конца круга: долгое переподключение сном не считаем.
+        last = time.time()
         while not self.prober.stop_event.wait(probe.FAST_EVERY):
+            self._note_sleep(last, time.time())
             try:
                 seen, streak, retry_at = self._watch_once(seen, streak, retry_at)
             except Exception as exc:                       # noqa: BLE001
                 # Умри сторож — смену сети снова придётся лечить руками.
                 self.log(f"!! сторож сети: {exc}")
+            last = time.time()
+
+    def _note_sleep(self, last, now):
+        """Отметка в журнале, если между кругами сторожа компьютер спал."""
+        if now - last > SLEEP_GAP:
+            since = datetime.datetime.fromtimestamp(last).strftime("%H:%M:%S")
+            self.log(f"→ компьютер спал {(now - last) / 60:.1f} мин (с {since})")
 
     def _watch_once(self, seen, streak, retry_at):
         """Один круг сторожа. Принимает и возвращает его состояние:
