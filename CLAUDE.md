@@ -15,8 +15,23 @@ From the project root:
 - CLI: `python.exe installer/entry_cli.py <args>`; tray: `python.exe installer/entry_tray.py`.
   From source, `lib/` must be on `PYTHONPATH`, else `No module named 'dualvpn'`:
   `PYTHONPATH="$(wslpath -w lib)" WSLENV=PYTHONPATH/w python.exe installer/entry_tray.py`
-- Build and installer: `powershell.exe -NoProfile -File "$(wslpath -w installer/build.ps1)"`
+- Build and installer: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w installer/build.ps1)"`
+  (without `Bypass` the Windows execution policy refuses the script)
 - Any other Windows command: `powershell.exe -NoProfile -Command '<command>'`
+
+## Updating the installed build
+
+The setup stops the service and drops the tunnel, so the user's connection (and this session's API calls)
+goes down. Update only silently, then put everything back in the same command:
+
+1. Note `& "C:\Program Files\DualVPN\dualvpn.exe" status` first: was the tunnel `работает`?
+2. `Start-Process '<setup.exe>' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Verb RunAs -Wait -PassThru`;
+   never bare `/SILENT` — that run once ended with the service removed and not reinstalled.
+3. `sc.exe query DualVPN` must be `RUNNING`. Service missing → rerun the setup's own steps elevated:
+   `dualvpn.exe service install`, `sc.exe config DualVPN start= auto`,
+   `sc.exe failure DualVPN reset= 86400 actions= restart/5000/restart/10000/restart/30000`, `dualvpn.exe service start`.
+4. Tunnel was up → `dualvpn.exe start` elevated; restart the tray (`DualVPN-Tray.exe`, RunAs) if it is gone.
+5. Confirm with `dualvpn.exe status`: `работает`, routes present, exit через туннель.
 
 ## Limits
 
