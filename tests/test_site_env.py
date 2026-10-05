@@ -48,6 +48,7 @@ def test_запись_и_чтение_дают_исходное():
         "CORP_PROBE": "git.example.local",
         "CORP_HOSTS": "git.example.local wiki.example.local",
         "SB_CORP_EXCLUDE": "198.51.100.7/32",
+        "SB_LOG_LEVEL": "debug",
     }
     assert window._parse_env(window._format_env(values)) == values
 

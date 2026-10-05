@@ -378,6 +378,22 @@ def running_pid():
         return ""
 
 
+# Уровни журнала sing-box. Чужое слово в site.env не должно ронять запуск:
+# sing-box check отверг бы весь конфиг из-за опечатки в диагностическом ключе.
+LOG_LEVELS = ("trace", "debug", "info", "warn", "error", "fatal", "panic")
+
+
+def log_level():
+    """SB_LOG_LEVEL из site.env: debug — когда ищем причину сбоя, иначе info.
+    Статистика адресов и сторож службы читают строки info и error — выше
+    warn их не будет."""
+    level = os.environ.get("SB_LOG_LEVEL", "").strip().lower()
+    if level and level not in LOG_LEVELS:
+        print(f"SB_LOG_LEVEL={level}: такого уровня нет, беру info",
+              file=sys.stderr)
+    return level if level in LOG_LEVELS else "info"
+
+
 def main():
     os.makedirs(STATE, exist_ok=True)
     out_path = os.path.join(STATE, "config.json")
@@ -530,7 +546,7 @@ def main():
         dns_rules.append({"domain_suffix": domains, "server": "dns-corp"})
 
     config = {
-        "log": {"level": "info", "timestamp": True},
+        "log": {"level": log_level(), "timestamp": True},
         "dns": {
             "servers": dns_servers,
             "rules": dns_rules,

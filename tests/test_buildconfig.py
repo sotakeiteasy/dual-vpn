@@ -187,6 +187,19 @@ def test_имя_сервера_даёт_домен_второго_уровня(t
 
 # -------------------------------------------------------------- мелочи
 
+@pytest.mark.parametrize("value, level", [
+    (None, "info"), ("", "info"), ("debug", "debug"), (" DEBUG ", "debug"),
+    ("verbose", "info"),
+])
+def test_уровень_журнала_из_site_env(monkeypatch, value, level):
+    if value is None:
+        monkeypatch.delenv("SB_LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("SB_LOG_LEVEL", value)
+
+    assert buildconfig.log_level() == level
+
+
 def test_split_list_режет_по_запятой_и_чистит_пробелы():
     assert buildconfig.split_list(" a , b ,, c ") == ["a", "b", "c"]
 

@@ -26,7 +26,8 @@ from . import buildconfig, paths, winnet
 KEEP_LOGS = 10
 
 # Ключи conf\site.env, которые читает buildconfig.
-SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE")
+SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE",
+             "SB_LOG_LEVEL")
 
 # Обе половины адресного пространства. Пишем именно так, а не 0.0.0.0/0:
 # более специфичный префикс выигрывает у маршрута по умолчанию, не удаляя его,

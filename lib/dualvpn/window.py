@@ -436,7 +436,8 @@ def _parse_env(text):
 def _format_env(values):
     """Собирает site.env обратно. Пустые поля не пишем — они значат «не задано»."""
     lines = ["# Настройки рабочей сети. Правится окном, но можно и руками.", ""]
-    for key in ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE"):
+    for key in ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE",
+                "SB_LOG_LEVEL"):
         val = (values.get(key) or "").strip()
         if val:
             lines.append(f'{key}="{val}"')
