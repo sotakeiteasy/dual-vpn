@@ -308,7 +308,8 @@ def test_публичный_dns_идёт_выходом_с_запасным_dire
 
 @pytest.fixture
 def built(tmp_path, monkeypatch):
-    """Собирает оба конфига из CORP и PERSONAL_AWG во временную папку."""
+    """Собирает три конфига из CORP и PERSONAL_AWG во временную папку:
+    (основной, корп, личный)."""
     state = tmp_path / "state"
     for kind, text in (("corp", CORP), ("personal", PERSONAL_AWG)):
         d = tmp_path / "conf" / kind
@@ -319,6 +320,7 @@ def built(tmp_path, monkeypatch):
                         str(tmp_path / "conf" / "personal"))
     monkeypatch.setattr(buildconfig, "STATE", str(state))
     monkeypatch.setattr(paths, "CORP_JSON", str(state / "corp.json"))
+    monkeypatch.setattr(paths, "PERSONAL_JSON", str(state / "personal.json"))
     monkeypatch.setattr(buildconfig, "running_pid", lambda: "")
     monkeypatch.setattr(buildconfig.sys, "argv", ["buildconfig"])
     for key in ("SB_PERSONAL", "SB_CORP_EXCLUDE", "CORP_DOMAINS"):
@@ -326,8 +328,8 @@ def built(tmp_path, monkeypatch):
 
     def load():
         buildconfig.main(log=lambda line: None)
-        return (json.loads((state / "config.json").read_text(encoding="utf-8")),
-                json.loads((state / "corp.json").read_text(encoding="utf-8")))
+        return tuple(json.loads((state / name).read_text(encoding="utf-8"))
+                     for name in ("config.json", "corp.json", "personal.json"))
     return load
 
 
@@ -335,19 +337,33 @@ def _by_tag(items, tag):
     return next(i for i in items if i.get("tag") == tag)
 
 
-def test_корп_живёт_в_своём_конфиге(built):
-    """Сторож перезапускает корп один, не трогая tun и личный туннель."""
-    main, corp = built()
+def test_каждый_туннель_живёт_в_своём_конфиге(built):
+    """Сторож перезапускает туннель один, не трогая tun и второй туннель."""
+    main, corp, personal = built()
 
-    assert [e["tag"] for e in main["endpoints"]] == ["awg-personal"]
-    assert [e["tag"] for e in corp["endpoints"]] == ["wg-corp"]
-    assert corp["route"]["final"] == "wg-corp"
-    # Автоопределение привязало бы сокет к tun основного процесса.
-    assert corp["route"]["auto_detect_interface"] is False
+    assert "endpoints" not in main
+    for cfg, tag in ((corp, "wg-corp"), (personal, "awg-personal")):
+        assert [e["tag"] for e in cfg["endpoints"]] == [tag]
+        assert cfg["route"]["final"] == tag
+        # Автоопределение привязало бы сокет к tun основного процесса.
+        assert cfg["route"]["auto_detect_interface"] is False
+
+
+def test_личный_идёт_в_свой_socks_с_другим_паролем(built):
+    main, _, personal = built()
+
+    socks = _by_tag(main["outbounds"], "personal-socks")
+    inbound = _by_tag(personal["inbounds"], "socks-in")
+    assert socks["server_port"] == inbound["listen_port"]
+    assert inbound["users"] == [{"username": socks["username"],
+                                 "password": socks["password"]}]
+    corp = _by_tag(main["outbounds"], "corp-socks")
+    assert corp["server_port"] != socks["server_port"]
+    assert corp["password"] != socks["password"]
 
 
 def test_корп_подсети_и_корп_dns_идут_в_socks_с_паролем(built):
-    main, corp = built()
+    main, corp, _ = built()
 
     rule = next(r for r in main["route"]["rules"] if "ip_cidr" in r
                 and r["outbound"] != "direct")
@@ -366,36 +382,41 @@ def test_корп_подсети_и_корп_dns_идут_в_socks_с_парол
 
 
 def test_пароль_socks_новый_на_каждую_сборку(built):
-    first, _ = built()
-    second, _ = built()
+    first, _, _ = built()
+    second, _, _ = built()
     assert (_by_tag(first["outbounds"], "corp-socks")["password"]
             != _by_tag(second["outbounds"], "corp-socks")["password"])
 
 
 def test_остальное_через_личный_с_запасным_direct(built):
-    main, _ = built()
+    main, _, _ = built()
 
     assert main["route"]["final"] == "out"
     out = _by_tag(main["outbounds"], "out")
     assert out["type"] == "selector"
-    assert out["outbounds"] == ["awg-personal", "direct"]
-    assert out["default"] == "awg-personal"
+    assert out["outbounds"] == ["personal-socks", "direct"]
+    assert out["default"] == "personal-socks"
     assert buildconfig.api_of(main)[0].startswith("127.0.0.1:")
     assert buildconfig.api_of(main)[1]
 
 
-def test_перезапуск_корпа_меняет_только_адрес_пира(built, monkeypatch):
+@pytest.mark.parametrize("kind, old_ip", [("corp", "198.51.100.10"),
+                                         ("personal", "203.0.113.5")])
+def test_перезапуск_туннеля_меняет_только_адрес_пира(built, monkeypatch,
+                                                   kind, old_ip):
     """Основной процесс работает и знает порт и пароль socks — они остаются."""
-    main, before = built()
+    main, *sides = built()
+    before = dict(zip(("corp", "personal"), sides))[kind]
     monkeypatch.setattr(buildconfig, "peer_host", lambda host, tag, log: "198.51.100.99")
 
-    assert buildconfig.refresh_corp_peer(log=lambda line: None) == "198.51.100.99"
+    assert buildconfig.refresh_peer(kind, log=lambda line: None) == "198.51.100.99"
 
-    after = json.loads(open(paths.CORP_JSON, encoding="utf-8").read())
+    after = json.loads(open(buildconfig.side_json(kind), encoding="utf-8").read())
     assert after["endpoints"][0]["peers"][0]["address"] == "198.51.100.99"
-    after["endpoints"][0]["peers"][0]["address"] = "198.51.100.10"
+    after["endpoints"][0]["peers"][0]["address"] = old_ip
     assert after == before
-    assert buildconfig.corp_link(main)["port"] == before["inbounds"][0]["listen_port"]
+    assert (buildconfig.side_link(main, kind)["port"]
+            == before["inbounds"][0]["listen_port"])
 
 
 def test_без_корп_dns_только_личный():

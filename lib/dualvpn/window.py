@@ -297,9 +297,9 @@ class Api:
     def _howto(st):
         site = paths.site_env()
         nets, endpoints = [], []
-        # Корп живёт в своём процессе (corp.json), основной отдаёт ему корп-
-        # подсети правилом на socks-выход buildconfig.CORP_SOCKS_TAG.
-        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON):
+        # Туннели живут в своих процессах (corp.json, personal.json), основной
+        # отдаёт корпу подсети правилом на socks-выход buildconfig.CORP_SOCKS_TAG.
+        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON, paths.PERSONAL_JSON):
             try:
                 with open(cfg_path, encoding="utf-8") as fh:
                     cfg = json.load(fh)

@@ -78,12 +78,13 @@ class FakeBuild:
     def __init__(self):
         self.on_main = lambda: None
         self.corp_ip = "203.0.113.20"
+        self.personal_ip = "203.0.113.10"
 
     def main(self, log=print):
         self.on_main()
 
-    def refresh_corp_peer(self, log=print):
-        return self.corp_ip
+    def refresh_peer(self, kind, log=print):
+        return self.corp_ip if kind == "corp" else self.personal_ip
 
     def __getattr__(self, name):
         return getattr(buildconfig, name)
@@ -121,15 +122,17 @@ def env(monkeypatch, tmp_path):
         monkeypatch.setattr(paths, name, str(f))
     cfg = tmp_path / "config.json"
     cfg.write_text(json.dumps({
-        "endpoints": [{"peers": [{"address": "203.0.113.10"}]}],
         "outbounds": [{"type": "socks", "tag": buildconfig.CORP_SOCKS_TAG,
-                       "server_port": 1080}],
+                       "server_port": 1080},
+                      {"type": "socks", "tag": buildconfig.PERSONAL_SOCKS_TAG,
+                       "server_port": 1081}],
     }))
     monkeypatch.setattr(paths, "CONFIG_JSON", str(cfg))
-    corp = tmp_path / "corp.json"
-    corp.write_text(json.dumps(
-        {"endpoints": [{"peers": [{"address": "203.0.113.20"}]}]}))
-    monkeypatch.setattr(paths, "CORP_JSON", str(corp))
+    for name, ip in (("corp", "203.0.113.20"), ("personal", "203.0.113.10")):
+        side = tmp_path / f"{name}.json"
+        side.write_text(json.dumps(
+            {"endpoints": [{"peers": [{"address": ip}]}]}))
+        monkeypatch.setattr(paths, f"{name.upper()}_JSON", str(side))
     monkeypatch.setattr(paths, "OWNED_FILE", str(tmp_path / "owned"))
     monkeypatch.setattr(paths, "REAL_IP_FILE", str(tmp_path / "real-ip"))
     logs = tmp_path / "logs"
@@ -140,7 +143,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(tunnel, "winnet", net)
     build = FakeBuild()
     monkeypatch.setattr(tunnel, "buildconfig", build)
-    seen = {"checked": [], "started": [], "corp_dies": False,
+    seen = {"checked": [], "started": [], "dies": set(), "socks": [],
             "socks_open": True}
 
     def run(cmd, **_k):
@@ -150,7 +153,7 @@ def env(monkeypatch, tmp_path):
 
     monkeypatch.setattr(tunnel.subprocess, "run", run)
     monkeypatch.setattr(tunnel, "REAL_IP_WAIT", 0.3)
-    monkeypatch.setattr(tunnel, "CORP_WAIT", 0.5)
+    monkeypatch.setattr(tunnel, "SIDE_WAIT", 0.5)
 
     # Что лежит в real-ip в момент старта sing-box — это и увидит пробер.
     def popen(cmd, **_k):
@@ -161,12 +164,12 @@ def env(monkeypatch, tmp_path):
             with open(paths.REAL_IP_FILE, encoding="utf-8") as fh:
                 seen["real_ip"] = fh.read()
             net.singbox_running = True
-        elif seen["corp_dies"]:
+        elif any(buildconfig.side_json(k) == cfg_path for k in seen["dies"]):
             proc.returncode = 1
         return proc
 
     def port_open(port):
-        seen["socks"] = port
+        seen["socks"].append(port)
         return seen["socks_open"]
 
     monkeypatch.setattr(tunnel.subprocess, "Popen", popen)
@@ -178,7 +181,7 @@ def env(monkeypatch, tmp_path):
     seen["net"] = net
     monkeypatch.setattr(tun, "_keep_awake", lambda _on: None)
     yield tun, build, seen
-    for fh in (tun.logfile, tun.corp_logfile):
+    for fh in (tun.logfile, tun.corp.logfile, tun.personal.logfile):
         if fh is not None:
             fh.close()
 
@@ -227,20 +230,23 @@ def test_опоздавший_ответ_не_записывается(env, monk
         assert fh.read() == ""
 
 
-# ------------------------------------------------------------ два процесса
+# ---------------------------------------------------------- три процесса
 
 
-def test_проверяются_оба_конфига_и_корп_стартует_первым(env):
-    """Основной сразу отдаёт корп-подсети в socks — корп должен уже слушать."""
+def test_проверяются_все_конфиги_и_туннели_стартуют_первыми(env):
+    """Основной сразу отдаёт трафик в socks — туннели должны уже слушать."""
     tun, _build, seen = env
 
     assert tun.start() == ""
 
-    assert seen["checked"] == [paths.CONFIG_JSON, paths.CORP_JSON]
-    assert seen["started"] == [paths.CORP_JSON, paths.CONFIG_JSON]
-    assert seen["socks"] == 1080
-    assert tun.corp_log_start[0].startswith(paths.LOGS)
-    assert "corp-" in tun.corp_log_start[0]
+    assert seen["checked"] == [paths.CONFIG_JSON, paths.CORP_JSON,
+                               paths.PERSONAL_JSON]
+    assert seen["started"] == [paths.CORP_JSON, paths.PERSONAL_JSON,
+                               paths.CONFIG_JSON]
+    assert seen["socks"] == [1080, 1081]
+    for side in tun.sides:
+        assert side.log_start[0].startswith(paths.LOGS)
+        assert f"{side.kind}-" in side.log_start[0]
     assert "vpn-" in tun.log_start[0]
 
 
@@ -254,7 +260,7 @@ def test_порт_открыт_только_когда_его_слушают():
     assert not tunnel._port_open(port)
 
 
-def test_пиры_берутся_из_обоих_конфигов(env):
+def test_пиры_берутся_из_конфигов_туннелей(env):
     tun, _build, seen = env
 
     assert tun.start() == ""
@@ -266,65 +272,99 @@ def test_пиры_берутся_из_обоих_конфигов(env):
 def test_упавший_корп_не_срывает_включение(env):
     """Интернету корп не нужен: без него включение идёт дальше."""
     tun, _build, seen = env
-    seen["corp_dies"] = True
+    seen["dies"] = {"corp"}
 
     assert tun.start() == ""
 
     assert tun.proc is not None
-    assert any("корп-процесс упал" in l for l in seen["log"])
+    assert any("корп процесс упал" in l for l in seen["log"])
 
 
-def test_корп_не_открыл_socks_гасим_его(env):
+def test_упавший_личный_включает_выход_напрямую(env, monkeypatch):
+    """Интернет работает и без личного: socks без процесса отказывал бы всем."""
     tun, _build, seen = env
-    seen["socks_open"] = False
+    seen["dies"] = {"personal"}
+    outs = []
+    monkeypatch.setattr(tun, "set_out", outs.append)
 
     assert tun.start() == ""
 
-    assert tun.corp_proc is None
+    assert tun.proc is not None
+    assert outs == [buildconfig.DIRECT_TAG]
+    assert any("личный процесс упал" in l and "выход напрямую" in l
+               for l in seen["log"])
+
+
+def test_туннель_не_открыл_socks_гасим_его(env, monkeypatch):
+    tun, _build, seen = env
+    seen["socks_open"] = False
+    monkeypatch.setattr(tun, "set_out", lambda _tag: True)
+
+    assert tun.start() == ""
+
+    assert tun.corp.proc is None and tun.personal.proc is None
     assert any("не открыл socks" in l for l in seen["log"])
 
 
 def test_повторное_включение_поднимает_мёртвый_корп(env):
     tun, _build, seen = env
     assert tun.start() == ""
-    tun.corp_proc.returncode = 1
+    tun.corp.proc.returncode = 1
     main = tun.proc
 
     assert tun.start() == ""
 
     assert tun.proc is main
     assert seen["started"][-1] == paths.CORP_JSON
-    assert tun.corp_proc.poll() is None
+    assert tun.corp.alive()
 
 
-def test_перезапуск_корпа_не_трогает_основной(env):
+def test_повторное_включение_возвращает_выход_на_личный(env, monkeypatch):
+    tun, _build, seen = env
+    assert tun.start() == ""
+    tun.personal.proc.returncode = 1
+    outs = []
+    monkeypatch.setattr(tun, "set_out", outs.append)
+
+    assert tun.start() == ""
+
+    assert seen["started"][-1] == paths.PERSONAL_JSON
+    assert tun.personal.alive() and tun.corp.alive()
+    assert outs == [buildconfig.PERSONAL_SOCKS_TAG]
+
+
+@pytest.mark.parametrize("kind, ip_attr", [("corp", "corp_ip"),
+                                          ("personal", "personal_ip")])
+def test_перезапуск_туннеля_не_трогает_остальные(env, kind, ip_attr):
     tun, build, seen = env
     assert tun.start() == ""
-    main, corp = tun.proc, tun.corp_proc
-    build.corp_ip = "203.0.113.99"
+    side = getattr(tun, kind)
+    other = tun.personal if side is tun.corp else tun.corp
+    main, old, other_proc = tun.proc, side.proc, other.proc
+    setattr(build, ip_attr, "203.0.113.99")
 
-    assert tun.restart_corp() == ""
+    assert tun.restart_side(side) == ""
 
-    assert corp.terminated
-    assert not main.terminated
-    assert tun.proc is main
-    assert tun.corp_proc is not corp
-    # Новый адрес пира корпа — мимо туннеля, через тот же аплинк.
+    assert old.terminated
+    assert not main.terminated and not other_proc.terminated
+    assert tun.proc is main and other.proc is other_proc
+    assert side.proc is not old and side.alive()
+    # Новый адрес пира — мимо туннеля, через тот же аплинк.
     assert ("203.0.113.99/32", 18, "192.168.0.1", 1) in seen["net"].added
     assert ["host", "203.0.113.99", "192.168.0.1", "18"] in tun.owned_lines()
 
 
-def test_перезапуск_корпа_без_туннеля_отказ(env):
+def test_перезапуск_туннеля_без_туннеля_отказ(env):
     tun, _build, seen = env
 
-    assert tun.restart_corp() == "туннель не поднят"
+    assert tun.restart_side(tun.corp) == "туннель не поднят"
     assert seen["started"] == []
 
 
-def test_стоп_гасит_оба_процесса(env, monkeypatch):
+def test_стоп_гасит_все_процессы(env, monkeypatch):
     tun, _build, _seen = env
     assert tun.start() == ""
-    main, corp = tun.proc, tun.corp_proc
+    procs = [tun.proc] + [side.proc for side in tun.sides]
     for name in ("routes_on_interface", "v6_unblock", "nrpt_clear",
                  "flush_dns", "del_route"):
         monkeypatch.setattr(tunnel.winnet, name, lambda *_a: [], raising=False)
@@ -333,9 +373,11 @@ def test_стоп_гасит_оба_процесса(env, monkeypatch):
 
     tun.stop()
 
-    assert main.terminated and corp.terminated
-    assert tun.corp_proc is None and tun.corp_logfile is None
-    assert tun.corp_log_start is None and tun.log_start is None
+    assert all(p.terminated for p in procs)
+    for side in tun.sides:
+        assert side.proc is None and side.logfile is None
+        assert side.log_start is None
+    assert tun.log_start is None
 
 
 # ------------------------------------------------------------ выход наружу
@@ -345,8 +387,8 @@ class FakeClash(http.server.BaseHTTPRequestHandler):
     """clash_api основного процесса: selector out и замер задержки."""
 
     secret = "s3cret"
-    now = buildconfig.PERSONAL_TAG
-    delays = {buildconfig.PERSONAL_TAG: 0, buildconfig.DIRECT_TAG: 42}
+    now = buildconfig.PERSONAL_SOCKS_TAG
+    delays = {buildconfig.PERSONAL_SOCKS_TAG: 0, buildconfig.DIRECT_TAG: 42}
     paths_seen = []
 
     def _auth(self):
@@ -392,7 +434,7 @@ def clash(env):
     tun, _build, seen = env
     server = http.server.HTTPServer(("127.0.0.1", 0), FakeClash)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    FakeClash.now = buildconfig.PERSONAL_TAG
+    FakeClash.now = buildconfig.PERSONAL_SOCKS_TAG
     FakeClash.paths_seen = []
     with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
         cfg = json.load(fh)
@@ -409,18 +451,18 @@ def clash(env):
 def test_переключение_выхода_на_direct_и_обратно(clash):
     tun, _seen = clash
 
-    assert tun.out_now() == buildconfig.PERSONAL_TAG
+    assert tun.out_now() == buildconfig.PERSONAL_SOCKS_TAG
     assert tun.set_out(buildconfig.DIRECT_TAG)
     assert tun.out_now() == buildconfig.DIRECT_TAG
-    assert tun.set_out(buildconfig.PERSONAL_TAG)
-    assert tun.out_now() == buildconfig.PERSONAL_TAG
+    assert tun.set_out(buildconfig.PERSONAL_SOCKS_TAG)
+    assert tun.out_now() == buildconfig.PERSONAL_SOCKS_TAG
 
 
 def test_задержка_живого_и_мёртвого_выхода(clash):
     tun, _seen = clash
 
     assert tun.delay(buildconfig.DIRECT_TAG) == 42
-    assert tun.delay(buildconfig.PERSONAL_TAG) is None
+    assert tun.delay(buildconfig.PERSONAL_SOCKS_TAG) is None
     # Мерить по имени: голый адрес sing-box через selector не меряет.
     assert "cp.cloudflare.com" in FakeClash.paths_seen[-1]
 
@@ -440,7 +482,7 @@ def test_системный_прокси_не_перехватывает_clash_a
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
     monkeypatch.setenv("NO_PROXY", "")
 
-    assert tun.out_now() == buildconfig.PERSONAL_TAG
+    assert tun.out_now() == buildconfig.PERSONAL_SOCKS_TAG
 
 
 def test_без_clash_api_выход_не_переключается(env):

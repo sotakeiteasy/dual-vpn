@@ -39,8 +39,8 @@ HALVES = ("0.0.0.0/1", "128.0.0.0/1")
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-# Сколько ждём, пока корп-процесс откроет socks на loopback.
-CORP_WAIT = 15
+# Сколько ждём, пока боковой процесс откроет socks на loopback.
+SIDE_WAIT = 15
 
 # Чем clash_api меряет выход. Только по имени: голый 1.1.1.1 sing-box
 # через selector не меряет и отвечает таймаутом даже живому туннелю.
@@ -57,21 +57,45 @@ _ES_CONTINUOUS = 0x80000000
 _ES_SYSTEM_REQUIRED = 0x00000001
 
 
+class Side:
+    """Боковой процесс sing-box — корп или личный туннель за socks на loopback.
+
+    У каждого свой журнал <kind>-<дата>.log: сторож читает оттуда таймауты
+    туннеля и перезапускает процесс один, не трогая tun.
+    """
+
+    def __init__(self, kind, title):
+        self.kind = kind          # 'corp' | 'personal' — ключ buildconfig.SIDES
+        self.title = title        # для журнала службы
+        self.proc = None
+        self.logfile = None
+        # (путь, смещение) начала текущего запуска в его журнале.
+        self.log_start = None
+
+    @property
+    def tag(self):
+        """Тег endpoint туннеля: wg-corp, awg-personal."""
+        return buildconfig.SIDES[self.kind][0]
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+
 class Tunnel:
     """Один туннель на процесс службы. Методы зовутся из одного потока."""
 
     def __init__(self, log):
         self.log = log
-        # Основной процесс: tun, маршрутизация, DNS и личный туннель.
+        # Основной процесс: tun, маршрутизация и DNS.
         self.proc = None
         self.logfile = None
         # (путь, смещение) начала текущего запуска в журнале sing-box: сторож
-        # службы читает оттуда ошибки соединений. None — туннель не запущен.
+        # службы читает оттуда соединения. None — туннель не запущен.
         self.log_start = None
-        # Корп-процесс со своим журналом: его перезапускают отдельно.
-        self.corp_proc = None
-        self.corp_logfile = None
-        self.corp_log_start = None
+        # Туннели — в своих процессах: их перезапускают по одному.
+        self.corp = Side("corp", "корп")
+        self.personal = Side("personal", "личный")
+        self.sides = (self.corp, self.personal)
         # Индекс нашего tun, каким мы его запомнили. Нужен уборке после того,
         # как интерфейс исчез, а журнал уже удалён.
         self._tun_hint = None
@@ -224,11 +248,15 @@ class Tunnel:
                 and profile == os.environ.get("SB_PERSONAL", "")
                 and winnet.tun_index(paths.TUN_IP) is not None):
             self.log("→ уже работает")
-            # Основной жив, а корп упал: поднимаем только его, иначе
-            # «Включить» отвечало бы «работает» при мёртвой рабочей сети.
-            if self.corp_proc is None or self.corp_proc.poll() is not None:
-                self.log("→ корп-процесс не работает, поднимаю")
-                self._report_corp(self._start_corp())
+            # Основной жив, а туннель упал: поднимаем только его, иначе
+            # «Включить» отвечало бы «работает» при мёртвом туннеле.
+            for side in self.sides:
+                if not side.alive():
+                    self.log(f"→ {side.title} процесс не работает, поднимаю")
+                    err = self._start_side(side)
+                    self._report_side(side, err)
+                    if side is self.personal and not err:
+                        self.set_out(buildconfig.PERSONAL_SOCKS_TAG)
             return ""
 
         # Уборка за прошлым запуском — до того, как поднимем свой. Прошлый мог
@@ -291,7 +319,7 @@ class Tunnel:
         # timeout обязателен: без него зависший sing-box повесил бы
         # весь start навсегда, а клиент ждёт ответ по каналу без таймаута —
         # снаружи это ровно ««Включить» зависло».
-        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON):
+        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON, paths.PERSONAL_JSON):
             try:
                 check = subprocess.run(
                     [paths.SINGBOX, "check", "-c", cfg_path],
@@ -338,10 +366,12 @@ class Tunnel:
                      f"утечку сравнить будет не с чем")
         self._save_real_ip(real_ip[0] if real_ip else "")
 
-        # Корп — до основного: тот сразу начнёт отдавать корп-подсети и
-        # корп-DNS в socks. Упал корп — включение идёт дальше: интернету он
-        # не нужен, а поднимет его сторож службы или повторное «Включить».
-        self._report_corp(self._start_corp())
+        # Туннели — до основного: тот сразу начнёт отдавать им трафик
+        # и DNS в socks. Упал туннель — включение идёт дальше: без корпа работает
+        # интернет, без личного — выход напрямую, а упавший поднимет сторож.
+        side_err = {side.kind: self._start_side(side) for side in self.sides}
+        for side in self.sides:
+            self._report_side(side, side_err[side.kind])
 
         self.logfile = self.open_log()
         log_path = self.logfile.name
@@ -362,8 +392,9 @@ class Tunnel:
         while time.time() < deadline:
             time.sleep(0.25)
             if self.proc.poll() is not None:
-                # Корп без основного никому не нужен: в socks никто не зайдёт.
-                self._stop_corp()
+                # Туннели без основного никому не нужны: в socks никто не зайдёт.
+                for side in self.sides:
+                    self._stop_side(side)
                 return f"sing-box упал на старте: {_fatal_line(log_path)}"
             tun_idx = winnet.tun_index(paths.TUN_IP)
             if tun_idx is not None:
@@ -393,6 +424,11 @@ class Tunnel:
         elif names:
             self.log("!! правило NRPT не встало: несуществующие корп-имена "
                      "будут отвечать по 12 с")
+
+        # Личный не поднялся — выход напрямую сразу, не дожидаясь сторожа:
+        # socks без процесса за ним отказывал бы каждому соединению.
+        if side_err["personal"]:
+            self.set_out(buildconfig.DIRECT_TAG)
 
         self._keep_awake(True)
         self.uplink = (up_idx, gw)
@@ -431,7 +467,7 @@ class Tunnel:
         """
         out = []
         endpoints = []
-        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON):
+        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON, paths.PERSONAL_JSON):
             endpoints += _load_json(cfg_path).get("endpoints", [])
         for ep in endpoints:
             for peer in ep.get("peers", []):
@@ -455,70 +491,74 @@ class Tunnel:
                 names += rule.get("domain_suffix", [])
         return names
 
-    # -------------------------------------------------------- корп-процесс
+    # ---------------------------------------------------- боковые процессы
 
-    def _start_corp(self):
-        """Запускает корп-процесс и ждёт, пока он откроет socks. '' или ошибка.
+    def _start_side(self, side):
+        """Запускает боковой процесс и ждёт, пока он откроет socks. '' или ошибка.
 
-        Ждём именно socks, а не просто живой процесс: основной отдаёт корп-
-        подсети на этот порт, и до его открытия первые запросы получили бы
-        отказ соединения.
+        Ждём именно socks, а не просто живой процесс: основной отдаёт трафик
+        на этот порт, и до его открытия первые запросы получили бы отказ.
         """
-        link = buildconfig.corp_link(_load_json(paths.CONFIG_JSON))
+        link = buildconfig.side_link(_load_json(paths.CONFIG_JSON), side.kind)
         if not link or not link.get("port"):
-            return "в собранном конфиге нет связи с корп-процессом"
-        self._stop_corp()
-        self.corp_logfile = self.open_log("corp")
-        log_path = self.corp_logfile.name
-        self.corp_log_start = (log_path, self.corp_logfile.tell())
-        self.log(f"→ запускаю корп-процесс, журнал: {log_path}")
-        self.corp_proc = subprocess.Popen(
-            [paths.SINGBOX, "run", "-c", paths.CORP_JSON, "--disable-color"],
+            return f"в собранном конфиге нет связи с процессом {side.tag}"
+        self._stop_side(side)
+        side.logfile = self.open_log(side.kind)
+        log_path = side.logfile.name
+        side.log_start = (log_path, side.logfile.tell())
+        self.log(f"→ запускаю {side.title} процесс, журнал: {log_path}")
+        side.proc = subprocess.Popen(
+            [paths.SINGBOX, "run", "-c", buildconfig.side_json(side.kind),
+             "--disable-color"],
             cwd=paths.BIN,
-            stdout=self.corp_logfile, stderr=subprocess.STDOUT,
+            stdout=side.logfile, stderr=subprocess.STDOUT,
             creationflags=_NO_WINDOW,
         )
-        deadline = time.time() + CORP_WAIT
+        deadline = time.time() + SIDE_WAIT
         while time.time() < deadline:
-            if self.corp_proc.poll() is not None:
-                return f"корп-процесс упал на старте: {_fatal_line(log_path)}"
+            if side.proc.poll() is not None:
+                return f"{side.title} процесс упал на старте: {_fatal_line(log_path)}"
             if _port_open(link["port"]):
                 return ""
             time.sleep(0.25)
-        self._stop_corp()
-        return f"корп-процесс не открыл socks за {CORP_WAIT}с"
+        self._stop_side(side)
+        return f"{side.title} процесс не открыл socks за {SIDE_WAIT}с"
 
-    def _report_corp(self, err):
+    def _report_side(self, side, err):
         if err:
-            self.log(f"!! {err} — рабочая сеть недоступна, интернет работает")
+            what = ("рабочая сеть недоступна" if side.kind == "corp"
+                    else "выход напрямую")
+            self.log(f"!! {err} — {what}, интернет работает")
 
-    def _stop_corp(self):
-        """Гасит только корп-процесс и закрывает его журнал."""
-        _end(self.corp_proc)
-        self.corp_proc = None
-        if self.corp_logfile is not None:
+    def _stop_side(self, side):
+        """Гасит один боковой процесс и закрывает его журнал."""
+        _end(side.proc)
+        side.proc = None
+        if side.logfile is not None:
             try:
-                self.corp_logfile.close()
+                side.logfile.close()
             except OSError:
                 pass
-            self.corp_logfile = None
-        self.corp_log_start = None
+            side.logfile = None
+        side.log_start = None
 
-    def restart_corp(self):
-        """Перезапускает один корп-процесс. '' или текст ошибки.
+    def restart_side(self, side):
+        """Перезапускает один боковой процесс. '' или текст ошибки.
 
-        tun, маршруты и личный туннель не трогаем: интернет на это время не
-        моргает. Пира корпа резолвим заново — сменился адрес, ставим и на
-        него host-маршрут через тот же аплинк, иначе пакеты к нему ушли бы в tun.
+        tun, маршруты и второй туннель не трогаем: интернет на это время не
+        падает. Пира резолвим заново — сменился адрес, ставим и на него
+        host-маршрут через тот же аплинк, иначе пакеты к нему ушли бы в tun.
+        Выход наружу не переключает: на личный его возвращает тот, кто проверил,
+        что туннель снова везёт.
         """
         if self.uplink is None:
             return "туннель не поднят"
-        self._stop_corp()
+        self._stop_side(side)
         try:
-            ip = buildconfig.refresh_corp_peer(self.log)
+            ip = buildconfig.refresh_peer(side.kind, self.log)
         except SystemExit as exc:
             # Конфиг остался прежним — пробуем с прошлым адресом пира.
-            self.log(f"!! адрес корп-пира не обновить: {exc}")
+            self.log(f"!! адрес пира {side.tag} не обновить: {exc}")
             ip = ""
         if ip:
             up_idx, gw = self.uplink
@@ -526,10 +566,10 @@ class Tunnel:
                        for r in winnet.routes_for(f"{ip}/32")):
                 self.own("host", ip, gw, up_idx)
                 winnet.add_routes([(f"{ip}/32", up_idx, gw, 1)])
-                self.log(f"→ корп-пир теперь {ip}, маршрут мимо туннеля поставлен")
-        err = self._start_corp()
+                self.log(f"→ пир {side.tag} теперь {ip}, маршрут мимо туннеля поставлен")
+        err = self._start_side(side)
         if not err:
-            self.log("→ корп-процесс перезапущен")
+            self.log(f"→ {side.title} процесс перезапущен")
         return err
 
     # ----------------------------------------------------- выход наружу
@@ -620,7 +660,8 @@ class Tunnel:
         # 1. Процессы. Сначала свои, потом любой оставшийся от прошлых запусков.
         _end(self.proc)
         self.proc = None
-        self._stop_corp()
+        for side in self.sides:
+            self._stop_side(side)
         self._kill_strays()
 
         if self.logfile is not None:
@@ -751,7 +792,7 @@ def _end(proc):
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
-        # Дожидаемся смерти: новый корп-процесс займёт тот же порт socks.
+        # Дожидаемся смерти: новый боковой процесс займёт тот же порт socks.
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:

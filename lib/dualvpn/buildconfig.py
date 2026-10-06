@@ -5,10 +5,10 @@
     conf/personal/<имя>.conf   личный AmneziaWG  -> весь остальной трафик
     conf/corp/<имя>.conf       корпоративный WG  -> подсети из его AllowedIPs
 
-Процессов два: state/config.json — tun, маршрутизация, DNS и личный туннель;
-state/corp.json — корп-туннель за socks на loopback. Так сбой корпа чинится
-перезапуском одного корп-процесса, а сбой личного — переключением выхода
-на direct, без перезапуска чего-либо.
+Процессов три: state/config.json — tun, маршрутизация и DNS; state/corp.json
+и state/personal.json — корп и личный туннели, каждый за своим socks на
+loopback. Сбой туннеля чинится перезапуском одного его процесса: tun не
+падает, а трафик упавшего личного до его возвращения идёт напрямую.
 
 Рабочий ровно один. Личных сколько угодно, нужный выбирает профиль:
     set SB_PERSONAL=nl-1 && python -m dualvpn.buildconfig
@@ -500,12 +500,17 @@ def dns_section(corp_dns, domains):
 LOCAL_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
               "169.254.0.0/16", "224.0.0.0/4"]
 
-# Корп живёт в отдельном процессе sing-box (state/corp.json): сторож
-# перезапускает его один, не трогая tun, маршруты и личный туннель. Основной
-# процесс отдаёт ему корп-подсети через socks на loopback.
+# Корп и личный живут в отдельных процессах sing-box (боковые: state/corp.json,
+# state/personal.json): сторож перезапускает упавший один, не трогая tun,
+# маршруты и второй туннель. Основной процесс ходит в каждый через свой socks
+# на loopback.
 PERSONAL_TAG = "awg-personal"
 CORP_TAG = "wg-corp"
 CORP_SOCKS_TAG = "corp-socks"
+PERSONAL_SOCKS_TAG = "personal-socks"
+# Боковой процесс → (тег его endpoint, тег socks-выхода в основном).
+SIDES = {"corp": (CORP_TAG, CORP_SOCKS_TAG),
+         "personal": (PERSONAL_TAG, PERSONAL_SOCKS_TAG)}
 # Выход для всего, что не корп и не локальная сеть: личный туннель, а пока
 # он мёртв — напрямую. Переключает служба через clash_api, без перезапуска.
 OUT_TAG = "out"
@@ -548,8 +553,13 @@ def write_json(path, data):
     os.chmod(path, 0o600)
 
 
-def corp_config(ep_corp, link):
-    """Конфиг корп-процесса: socks-вход на loopback и endpoint wg-corp."""
+def side_json(kind):
+    """Путь к конфигу бокового процесса: 'corp' или 'personal'."""
+    return paths.CORP_JSON if kind == "corp" else paths.PERSONAL_JSON
+
+
+def side_config(ep, link):
+    """Конфиг бокового процесса: socks-вход на loopback и один endpoint."""
     return {
         "log": {"level": log_level(), "timestamp": True},
         "inbounds": [{
@@ -558,21 +568,21 @@ def corp_config(ep_corp, link):
             "users": [{"username": link["username"],
                        "password": link["password"]}],
         }],
-        "endpoints": [ep_corp],
+        "endpoints": [ep],
         "route": {
-            "final": CORP_TAG,
+            "final": ep["tag"],
             # Без автоопределения: оно привязало бы сокет к интерфейсу по
-            # умолчанию, а это tun основного процесса — корп ушёл бы в
-            # личный туннель. Пакеты к пиру ведёт host-маршрут через аплинк.
+            # умолчанию, а это tun основного процесса — пакеты к пиру ушли
+            # бы обратно в tun. К пиру их ведёт host-маршрут через аплинк.
             "auto_detect_interface": False,
         },
     }
 
 
-def corp_link(main_cfg):
-    """Порт и логин socks из собранного основного конфига, иначе None."""
+def side_link(main_cfg, kind):
+    """Порт и логин socks бокового процесса из основного конфига, иначе None."""
     for ob in main_cfg.get("outbounds", []):
-        if ob.get("tag") == CORP_SOCKS_TAG:
+        if ob.get("tag") == SIDES[kind][1]:
             return {"port": ob.get("server_port"),
                     "username": ob.get("username"),
                     "password": ob.get("password")}
@@ -587,24 +597,27 @@ def api_of(main_cfg):
     return api["external_controller"], api.get("secret", "")
 
 
-def refresh_corp_peer(log=print):
-    """Заново резолвит пира корпа и переписывает адрес в state/corp.json.
+def refresh_peer(kind, log=print):
+    """Заново резолвит пира бокового процесса и переписывает адрес в его конфиге.
 
-    Зовётся перед перезапуском одного корп-процесса: основной работает, и
+    Зовётся перед перезапуском одного бокового процесса: основной работает, и
     порт с паролем socks должны остаться прежними — их знает он. Возвращает
     IPv4 пира. Ошибки — sys.exit с текстом, как у сборки.
     """
+    path = side_json(kind)
     try:
-        with open(paths.CORP_JSON, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             cfg = json.load(fh)
     except (OSError, ValueError) as exc:
-        sys.exit(f"корп-конфиг не прочитать: {exc}")
-    host = parse_conf(pick_corp())["peer"]["endpoint"].rpartition(":")[0]
-    ip = peer_host(host, CORP_TAG, log)
+        sys.exit(f"{os.path.basename(path)} не прочитать: {exc}")
+    conf = pick_corp() if kind == "corp" else pick_personal()
+    tag = SIDES[kind][0]
+    host = parse_conf(conf)["peer"]["endpoint"].rpartition(":")[0]
+    ip = peer_host(host, tag, log)
     for ep in cfg.get("endpoints", []):
-        if ep.get("tag") == CORP_TAG and ep.get("peers"):
+        if ep.get("tag") == tag and ep.get("peers"):
             ep["peers"][0]["address"] = ip
-    write_json(paths.CORP_JSON, cfg)
+    write_json(path, cfg)
     return ip
 
 
@@ -646,10 +659,11 @@ def main(log=print):
         sys.exit(f"sing-box уже работает (pid {pid}) — конфиг не трогаю.\n"
                  f"Останови его (`vpn stop`) или пересобери в другой файл:\n"
                  f"  python3 {os.path.relpath(__file__, BASE)} --out /tmp/test.json")
-    corp_path = paths.CORP_JSON
+    corp_path, personal_path = paths.CORP_JSON, paths.PERSONAL_JSON
     if "--out" in sys.argv:
         out_path = sys.argv[sys.argv.index("--out") + 1]
         corp_path = os.path.splitext(out_path)[0] + ".corp.json"
+        personal_path = os.path.splitext(out_path)[0] + ".personal.json"
 
     p_path = pick_personal()
     c_path = pick_corp()
@@ -664,8 +678,8 @@ def main(log=print):
     # nl-1 рукопожатие проходило, а данные не пролезали — туннель выглядел
     # поднятым, но интернета не было. Конфиги со своим MTU (personal.conf)
     # это не затрагивает: там значение берётся из файла.
-    ep_personal = endpoint(personal, "awg-personal", 1280, log)
-    ep_corp = endpoint(corp, "wg-corp", 1280, log)
+    ep_personal = endpoint(personal, PERSONAL_TAG, 1280, log)
+    ep_corp = endpoint(corp, CORP_TAG, 1280, log)
 
     # Переключатели для диагностики, без правки файлов:
     #   SB_STACK=system|gvisor|mixed   сетевой стек tun
@@ -776,7 +790,7 @@ def main(log=print):
 
     dns_servers, dns_rules = dns_section(corp_dns, domains)
 
-    link = new_link()
+    links = {kind: new_link() for kind in SIDES}
     api = new_api()
 
     config = {
@@ -787,7 +801,6 @@ def main(log=print):
             "final": "dns-personal",
             "strategy": "ipv4_only",
         },
-        "endpoints": [ep_personal],
         "inbounds": [{
             "type": "tun", "tag": "tun-in",
             "mtu": int(os.environ.get("SB_TUN_MTU", ep_personal["mtu"])),
@@ -802,13 +815,16 @@ def main(log=print):
         }],
         "outbounds": [
             {"type": "direct", "tag": DIRECT_TAG},
-            {"type": "socks", "tag": CORP_SOCKS_TAG, "version": "5",
-             "server": "127.0.0.1", "server_port": link["port"],
-             "username": link["username"], "password": link["password"]},
+            *({"type": "socks", "tag": socks, "version": "5",
+               "server": "127.0.0.1", "server_port": links[kind]["port"],
+               "username": links[kind]["username"],
+               "password": links[kind]["password"]}
+              for kind, (_, socks) in SIDES.items()),
             # Рвать соединения при смене выхода: открытые через мёртвый
             # личный туннель иначе висят до своих таймаутов.
             {"type": "selector", "tag": OUT_TAG,
-             "outbounds": [PERSONAL_TAG, DIRECT_TAG], "default": PERSONAL_TAG,
+             "outbounds": [PERSONAL_SOCKS_TAG, DIRECT_TAG],
+             "default": PERSONAL_SOCKS_TAG,
              "interrupt_exist_connections": True},
         ],
         "experimental": {"clash_api": {
@@ -840,7 +856,8 @@ def main(log=print):
     }
 
     write_json(out_path, config)
-    write_json(corp_path, corp_config(ep_corp, link))
+    write_json(corp_path, side_config(ep_corp, links["corp"]))
+    write_json(personal_path, side_config(ep_personal, links["personal"]))
 
     print(f"собрано: {out_path}")
     print(f"  из     : {os.path.basename(p_path)} + {os.path.basename(c_path)}")

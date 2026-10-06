@@ -117,17 +117,18 @@ class Prober:
             return ""
 
     def peer_addrs(self):
-        """Адреса пиров из собранного конфига: {tag: address}."""
+        """Адреса пиров из собранных конфигов туннелей: {tag: address}."""
         out = {}
-        try:
-            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
-                cfg = json.load(fh)
-            for e in cfg.get("endpoints", []):
-                peers = e.get("peers") or []
-                if peers:
-                    out[e.get("tag", "")] = peers[0].get("address", "")
-        except Exception:
-            pass
+        for cfg_path in (paths.CORP_JSON, paths.PERSONAL_JSON):
+            try:
+                with open(cfg_path, encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+                for e in cfg.get("endpoints", []):
+                    peers = e.get("peers") or []
+                    if peers:
+                        out[e.get("tag", "")] = peers[0].get("address", "")
+            except Exception:
+                pass
         return out
 
     def corp_dns(self):
