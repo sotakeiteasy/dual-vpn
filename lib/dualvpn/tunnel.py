@@ -417,6 +417,10 @@ class Tunnel:
                 missing.append((half, tun_idx, "0.0.0.0", 1))
         winnet.add_routes(missing)
         self.log("→ маршруты выставлены")
+        # Первый запуск после старта службы бывал мёртвым: ни один туннель
+        # не делал рукопожатия. Подозрение — host-маршрута к пиру к этому
+        # моменту нет, и WireGuard уходит в tun петлёй. Сверяем и пишем в журнал.
+        self.mend_peer_routes((up_idx, gw))
 
         names = self._corp_domains()
         if names and winnet.nrpt_set(names, paths.TUN_DNS):
@@ -571,6 +575,30 @@ class Tunnel:
         if not err:
             self.log(f"→ {side.title} процесс перезапущен")
         return err
+
+    def mend_peer_routes(self, uplink=None):
+        """Ставит заново пропавшие host-маршруты к пирам. Список их адресов.
+
+        Пиров берём из журнала своего: там и включение, и перезапуск туннеля
+        со сменившимся адресом.
+        """
+        uplink = uplink or self.uplink
+        if uplink is None:
+            return []
+        up_idx, gw = uplink
+        peers = sorted({parts[1] for parts in self.owned_lines()
+                        if parts[0] == "host" and len(parts) >= 4
+                        and parts[2] == gw and parts[3] == str(up_idx)})
+        lost = []
+        for ip in peers:
+            if not any(r.get("NextHop") == gw
+                       and str(r.get("InterfaceIndex")) == str(up_idx)
+                       for r in winnet.routes_for(f"{ip}/32")):
+                lost.append(ip)
+        for ip in lost:
+            self.log(f"!! маршрут к пиру {ip} пропал — ставлю заново")
+        winnet.add_routes([(f"{ip}/32", up_idx, gw, 1) for ip in lost])
+        return lost
 
     # ----------------------------------------------------- выход наружу
 

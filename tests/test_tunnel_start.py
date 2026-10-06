@@ -29,6 +29,7 @@ class FakeNet:
     def __init__(self):
         self.singbox_running = False
         self.added = []
+        self.gone = set()       # маршруты, которые система потеряла
 
     def tun_index(self, _ip):
         return 45 if self.singbox_running else None
@@ -48,8 +49,11 @@ class FakeNet:
     def add_routes(self, routes):
         self.added += routes
 
-    def routes_for(self, _prefix):
-        return []
+    def routes_for(self, prefix):
+        if prefix in self.gone:
+            return []
+        return [{"InterfaceIndex": idx, "NextHop": hop}
+                for p, idx, hop, _m in self.added if p == prefix]
 
 
 class FakeProc:
@@ -267,6 +271,50 @@ def test_пиры_берутся_из_конфигов_туннелей(env):
 
     hosts = {r[0] for r in seen["net"].added}
     assert {"203.0.113.10/32", "203.0.113.20/32"} <= hosts
+
+
+def test_маршруты_к_пирам_на_месте_журнал_молчит(env):
+    tun, _build, seen = env
+
+    assert tun.start() == ""
+
+    assert not any("пропал" in l for l in seen["log"])
+    assert tun.mend_peer_routes() == []
+
+
+def test_пропавший_на_старте_маршрут_к_пиру_ставится_заново(env):
+    """Без host-маршрута WireGuard уходит в tun петлёй — ни одного рукопожатия."""
+    tun, _build, seen = env
+    seen["net"].gone = {"203.0.113.10/32"}
+
+    assert tun.start() == ""
+
+    route = ("203.0.113.10/32", 18, "192.168.0.1", 1)
+    assert seen["net"].added.count(route) == 2
+    assert "!! маршрут к пиру 203.0.113.10 пропал — ставлю заново" in seen["log"]
+    assert not any("203.0.113.20 пропал" in l for l in seen["log"])
+
+
+def test_маршрут_к_пиру_пропал_в_работе_ставится_заново(env):
+    tun, build, seen = env
+    assert tun.start() == ""
+    build.corp_ip = "203.0.113.99"
+    assert tun.restart_side(tun.corp) == ""
+    net = seen["net"]
+    net.gone = {"203.0.113.99/32", "203.0.113.10/32"}
+    before = len(net.added)
+
+    # Пир со сменившимся адресом тоже под присмотром.
+    assert tun.mend_peer_routes() == ["203.0.113.10", "203.0.113.99"]
+    assert net.added[before:] == [("203.0.113.10/32", 18, "192.168.0.1", 1),
+                                  ("203.0.113.99/32", 18, "192.168.0.1", 1)]
+
+
+def test_сверка_маршрутов_без_туннеля_ничего_не_делает(env):
+    tun, _build, seen = env
+
+    assert tun.mend_peer_routes() == []
+    assert seen["net"].added == []
 
 
 def test_упавший_корп_не_срывает_включение(env):

@@ -61,6 +61,7 @@ class _Tunnel:
         self.restarts = []       # kind перезапущенных процессов
         self.side_fail = ""
         self.delay_ms = None     # что ответит проверка через личный
+        self.mends = 0           # сверок маршрутов к пирам
 
     def start(self, _profile):
         self.starts += 1
@@ -80,6 +81,10 @@ class _Tunnel:
             return self.side_fail
         side.proc = _Alive()
         return ""
+
+    def mend_peer_routes(self):
+        self.mends += 1
+        return []
 
     def out_now(self):
         return self.out
@@ -198,6 +203,25 @@ def test_сам_упавший_sing_box_поднимается_заново(monk
     _rounds(core, 1)
 
     assert core.tunnel.starts == 1
+
+
+def test_маршруты_к_пирам_сверяются_каждый_круг(monkeypatch):
+    core = _core(monkeypatch)
+
+    _rounds(core, 3)
+
+    assert core.tunnel.mends == 3
+
+
+def test_на_новой_сети_и_без_шлюза_маршруты_не_сверяются(monkeypatch):
+    """Ставить пира через старый шлюз бессмысленно: маршруты поставит переподключение."""
+    core = _core(monkeypatch)
+    _net(core, HOME)
+    _rounds(core, service.UPLINK_SETTLE - 1)
+    core.prober.set(iface=None, gw="")
+    _rounds(core, 2)
+
+    assert core.tunnel.mends == 0
 
 
 def test_выключенный_туннель_не_трогаем(monkeypatch):
