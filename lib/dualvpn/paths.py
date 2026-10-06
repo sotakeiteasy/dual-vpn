@@ -77,6 +77,8 @@ OWNED_FILE = os.path.join(STATE, "owned")
 
 # Адрес tun из buildconfig.py — по нему опознаём свой интерфейс.
 TUN_IP = "172.19.0.1"
+# Второй адрес той же /30: его sing-box отдаёт системе как DNS туннеля.
+TUN_DNS = "172.19.0.2"
 
 SERVICE_NAME = "DualVPN"
 SERVICE_DISPLAY = "DualVPN"

@@ -21,6 +21,7 @@ import ctypes
 import json
 import os
 import random
+import re
 import socket
 import struct
 import subprocess
@@ -435,6 +436,60 @@ def flush_dns():
     except Exception:                                      # noqa: BLE001
         pass
     PS.run("Clear-DnsClientCache -ErrorAction SilentlyContinue")
+
+
+# ------------------------------------------------------------- DNS: NRPT
+#
+# Windows опрашивает DNS всех адаптеров сразу. Положительный ответ принимает
+# первый же, а на NXDOMAIN от туннеля ждёт остальные: DNS роутера на Wi-Fi
+# молчит, и несуществующее корп-имя отвечало ровно через 12 с таймаута.
+# Правило NRPT говорит: имена этих доменов спрашивать только у DNS туннеля —
+# тогда NXDOMAIN окончателен сразу. Правило касается лишь корп-доменов,
+# остальные имена идут как раньше.
+
+NRPT_COMMENT = "DualVPN"
+
+_DOMAIN_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
+
+
+def nrpt_namespaces(domains):
+    """Домены из конфига → суффиксы NRPT вида '.corp.example'.
+
+    Имя уходит в командную строку PowerShell, поэтому всё, что не похоже
+    на домен, отбрасываем: домены приходят из site.env, который правит
+    пользователь, и кавычка в нём не должна дойти до интерпретатора.
+    """
+    out = []
+    for d in domains:
+        d = str(d).strip().strip(".").lower()
+        if d and _DOMAIN_RE.match(d) and f".{d}" not in out:
+            out.append(f".{d}")
+    return out
+
+
+def nrpt_set(domains, server):
+    """Ставит правило «домены → DNS туннеля». Идемпотентно, True — если встало."""
+    nrpt_clear()
+    names = nrpt_namespaces(domains)
+    if not names or not re.match(r"^[\d.]+$", str(server)):
+        return False
+    quoted = ",".join(f"'{n}'" for n in names)
+    out = PS.run(
+        "$ErrorActionPreference='Stop'\n"
+        f"Add-DnsClientNrptRule -Namespace {quoted} -NameServers '{server}'"
+        f" -Comment '{NRPT_COMMENT}' | Out-Null\n"
+        "'ok'"
+    )
+    return out.endswith("ok")
+
+
+def nrpt_clear():
+    """Снимает наши правила — по комментарию, чужие NRPT не трогаем."""
+    PS.run(
+        "Get-DnsClientNrptRule -ErrorAction SilentlyContinue"
+        f" | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }}"
+        " | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue"
+    )
 
 
 # ----------------------------------------------------------------- IPv6

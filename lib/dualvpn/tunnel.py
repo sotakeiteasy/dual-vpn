@@ -356,6 +356,13 @@ class Tunnel:
         winnet.add_routes(missing)
         self.log("→ маршруты выставлены")
 
+        names = self._corp_domains()
+        if names and winnet.nrpt_set(names, paths.TUN_DNS):
+            self.log(f"→ корп-домены спрашиваю только у DNS туннеля: {', '.join(names)}")
+        elif names:
+            self.log("!! правило NRPT не встало: несуществующие корп-имена "
+                     "будут отвечать по 12 с")
+
         self._keep_awake(True)
         self.uplink = (up_idx, gw)
         self.log("→ работает")
@@ -409,6 +416,20 @@ class Tunnel:
                     if ip:
                         out.append(ip)
         return sorted(set(out))
+
+    @staticmethod
+    def _corp_domains():
+        """Домены, которые собранный конфиг отдаёт корп-DNS."""
+        try:
+            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
+                cfg = json.load(fh)
+        except (OSError, ValueError):
+            return []
+        names = []
+        for rule in cfg.get("dns", {}).get("rules", []):
+            if rule.get("server") == "dns-corp":
+                names += rule.get("domain_suffix", [])
+        return names
 
     def _keep_awake(self, on):
         try:
@@ -499,6 +520,9 @@ class Tunnel:
 
         # 5. IPv6 — на случай, если прошлый запуск убили жёстко.
         winnet.v6_unblock()
+        # Правило NRPT смотрит на DNS туннеля, которого после стопа нет:
+        # оставшись, оно сломало бы корп-домены без туннеля совсем.
+        winnet.nrpt_clear()
 
         # 6. Кеш резолвера: в нём осели ответы корп-DNS, недоступного без
         # туннеля, и без сброса корп-домены висят ещё несколько минут.
