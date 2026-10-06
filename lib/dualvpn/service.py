@@ -48,6 +48,10 @@ RECONNECT_GAP = 10.0
 DEAD_RE = re.compile(
     r"ERROR .*open connection to (\S+) "
     r"using outbound/wireguard\[([^\]]+)\]: context deadline exceeded")
+# Таймауты в журнале бывают и при живом корпе (6 октября в 12:03 перезапуск
+# порвал оба туннеля, а человек видел, что всё работает): прежде чем
+# переподключать, сторож сам спрашивает корп-DNS через туннель.
+CORP_TAG = "wg-corp"
 DEAD_HITS = 3
 DEAD_ADDRS = 2
 DEAD_WINDOW = 60.0
@@ -434,11 +438,18 @@ class Core:
                     f"{len(dead)} за {now - dead[0][0]:.0f} с, адреса: {', '.join(addrs)}")
             if now >= self._dead_after:
                 self._dead_hits = ()
-                self._dead_after = now + DEAD_GAP
-                self.log(f"!! {what} — переподключаю")
-                return None, 0, self._reconnect()
+                # Корп ответил — дальше, как без таймаутов: смену сети
+                # проверяем ниже, счёт её кругов не сбрасываем.
+                ip = self.prober.corp_answer() if tag == CORP_TAG else ""
+                if ip:
+                    self.log(f"!! {what} — но корп отвечает (DNS {ip} за "
+                             f"{time.monotonic() - now:.1f} с), не переподключаю")
+                else:
+                    self._dead_after = now + DEAD_GAP
+                    self.log(f"!! {what} — переподключаю")
+                    return None, 0, self._reconnect()
             # Внутри паузы смену сети всё равно проверяем ниже.
-            if self._dead_noted != self._dead_after:
+            elif self._dead_noted != self._dead_after:
                 self._dead_noted = self._dead_after
                 self.log(f"!! {what} — туннель мёртв, но с прошлого "
                          f"переподключения нет {DEAD_GAP:.0f} с, жду")

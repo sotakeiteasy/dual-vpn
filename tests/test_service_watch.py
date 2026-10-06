@@ -302,6 +302,73 @@ def test_недописанная_строка_дочитывается_на_с�
     assert core.tunnel.starts == 1
 
 
+def _corp_dead():
+    return (_timeout("172.15.0.228:3000", "wg-corp"),
+            _timeout("10.160.138.4:443", "wg-corp"),
+            _timeout("10.160.138.4:443", "wg-corp"))
+
+
+def _corp_says(monkeypatch, core, ip):
+    asked = []
+    monkeypatch.setattr(core.prober, "corp_answer", lambda: asked.append(1) or ip)
+    return asked
+
+
+def test_таймауты_корпа_при_живом_корпе_не_переподключают(monkeypatch, tmp_path):
+    """6 октября в 12:03 таймауты корпа перезапустили sing-box, хотя корп работал."""
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    asked = _corp_says(monkeypatch, core, "10.20.0.4")
+    _append(log, *_corp_dead())
+
+    _rounds(core, 1)
+
+    assert core.tunnel.starts == 0
+    assert asked == [1]
+    [line] = _said(core, "корп отвечает")
+    assert "wg-corp" in line and "DNS 10.20.0.4" in line
+    assert core._dead_hits == ()
+
+
+def test_таймауты_корпа_при_молчащем_корпе_переподключают(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    asked = _corp_says(monkeypatch, core, "")
+    _append(log, *_corp_dead())
+
+    _rounds(core, 1)
+
+    assert core.tunnel.starts == 1
+    assert asked == [1]
+    assert not _said(core, "корп отвечает")
+
+
+def test_мёртвый_личный_корп_не_спрашивает(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    asked = _corp_says(monkeypatch, core, "10.20.0.4")
+    _append(log, *_three_dead())
+
+    _rounds(core, 1)
+
+    assert core.tunnel.starts == 1
+    assert asked == []
+
+
+def test_живой_корп_не_сбивает_счёт_новой_сети(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _sing_log(core, tmp_path)
+    _corp_says(monkeypatch, core, "10.20.0.4")
+    _net(core, HOME)
+    state = _rounds(core, service.UPLINK_SETTLE - 1)
+
+    _append(log, *_corp_dead())
+    _rounds(core, 1, state)
+
+    assert core.tunnel.starts == 1
+    assert core.tunnel.uplink == HOME
+
+
 # ------------------------------------------------------------ журнал сторожа
 
 def _said(core, text):

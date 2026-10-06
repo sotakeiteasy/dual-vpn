@@ -251,13 +251,15 @@ class Prober:
         v6 = self._get("https://api6.ipify.org", 6)
         self.set(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
 
-    def _slow_corp_dns(self):
+    def corp_answer(self):
+        """Адрес CORP_PROBE от корп-DNS через туннель; "" — молчит или
+        спрашивать нечего (нет CORP_PROBE или корп-DNS в конфиге)."""
         probe_host = paths.site_env().get("CORP_PROBE", "")
         dns = self.corp_dns()
-        if dns and probe_host:
-            self.set(corp_dns=dns, corp_ip=self._dns_ask(dns, probe_host))
-        else:
-            self.set(corp_dns=dns, corp_ip="")
+        return self._dns_ask(dns, probe_host) if dns and probe_host else ""
+
+    def _slow_corp_dns(self):
+        self.set(corp_dns=self.corp_dns(), corp_ip=self.corp_answer())
 
     def _slow_corp_http(self):
         probe_host = paths.site_env().get("CORP_PROBE", "")

@@ -9,6 +9,8 @@ import time
 import urllib.error
 import urllib.request
 
+import pytest
+
 from dualvpn import probe
 
 
@@ -263,3 +265,24 @@ def test_dns_ask_потерянный_пакет_повторяется(monkeypa
                         lambda name, server, timeout: next(answers))
 
     assert probe.Prober._dns_ask("10.0.0.1", "corp") == "10.0.0.8"
+
+
+def test_corp_answer_спрашивает_корп_dns_из_конфига(monkeypatch):
+    asked = []
+    monkeypatch.setattr(probe.paths, "site_env", lambda: {"CORP_PROBE": "git.corp"})
+    monkeypatch.setattr(probe.Prober, "corp_dns", lambda self: "10.0.0.1")
+    monkeypatch.setattr(probe.winnet, "resolve4_via",
+                        lambda name, server, timeout: asked.append((name, server))
+                        or "10.0.0.8")
+
+    assert probe.Prober().corp_answer() == "10.0.0.8"
+    assert asked == [("git.corp", "10.0.0.1")]
+
+
+def test_corp_answer_без_corp_probe_не_спрашивает(monkeypatch):
+    monkeypatch.setattr(probe.paths, "site_env", lambda: {})
+    monkeypatch.setattr(probe.Prober, "corp_dns", lambda self: "10.0.0.1")
+    monkeypatch.setattr(probe.winnet, "resolve4_via",
+                        lambda *a, **kw: pytest.fail("спросил без CORP_PROBE"))
+
+    assert probe.Prober().corp_answer() == ""
