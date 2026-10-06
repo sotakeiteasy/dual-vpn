@@ -93,12 +93,12 @@ Filename: "{sys}\icacls.exe"; \
     /grant:r ""*S-1-5-11"":(OI)(CI)RX"; \
   Flags: runhidden waituntilterminated
 
-; --- Служба. Снимаем прошлую до установки новой: при обновлении в реестре
-; остаётся путь к старой папке, и служба стартовала бы из уже удалённой.
+; --- Служба. Прошлую не снимаем: «service install» у существующей службы сам
+; переходит в update (ChangeServiceConfig) и переписывает путь к exe. Снятие
+; перед установкой только помечало службу на удаление, если кто-то держал её
+; дескриптор, и install падал с 1072 — служба пропадала до перезагрузки.
 Filename: "{app}\{#MyCli}"; Parameters: "service stop"; \
   Flags: runhidden waituntilterminated skipifdoesntexist; StatusMsg: "Обновляю службу..."
-Filename: "{app}\{#MyCli}"; Parameters: "service remove"; \
-  Flags: runhidden waituntilterminated skipifdoesntexist
 Filename: "{app}\{#MyCli}"; Parameters: "service install"; \
   Flags: runhidden waituntilterminated; StatusMsg: "Устанавливаю службу..."
 ; Автозапуск службы: значок в трее без неё бесполезен, а ждать ручного
