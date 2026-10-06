@@ -284,9 +284,118 @@ def test_корп_dns_по_tcp_через_корп_туннель():
     servers, rules = buildconfig.dns_section(["10.0.0.53"], ["corp.example"])
 
     assert servers[0] == {"type": "tcp", "tag": "dns-corp",
-                          "server": "10.0.0.53", "detour": "wg-corp"}
+                          "server": "10.0.0.53", "detour": "corp-socks"}
     assert servers[1]["tag"] == "dns-personal"
     assert rules == [{"domain_suffix": ["corp.example"], "server": "dns-corp"}]
+
+
+def test_без_корп_доменов_правила_dns_нет():
+    """Пустой domain_suffix sing-box считает совпадением со всем: любое имя
+    уходило в корп-DNS — проверено живьём на 1.14.2-lx.11."""
+    servers, rules = buildconfig.dns_section(["10.0.0.53"], [])
+    assert servers[0]["tag"] == "dns-corp"
+    assert rules == []
+
+
+def test_публичный_dns_идёт_выходом_с_запасным_direct():
+    """Через awg-personal напрямую при мёртвом личном не резолвилось бы
+    ничего — и запасной direct был бы бесполезен."""
+    servers, _ = buildconfig.dns_section([], [])
+    assert servers[0]["detour"] == "out"
+
+
+# ----------------------------------------------------- сборка целиком
+
+@pytest.fixture
+def built(tmp_path, monkeypatch):
+    """Собирает оба конфига из CORP и PERSONAL_AWG во временную папку."""
+    state = tmp_path / "state"
+    for kind, text in (("corp", CORP), ("personal", PERSONAL_AWG)):
+        d = tmp_path / "conf" / kind
+        d.mkdir(parents=True)
+        (d / f"{kind}.conf").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(buildconfig, "CONF_CORP", str(tmp_path / "conf" / "corp"))
+    monkeypatch.setattr(buildconfig, "CONF_PERSONAL",
+                        str(tmp_path / "conf" / "personal"))
+    monkeypatch.setattr(buildconfig, "STATE", str(state))
+    monkeypatch.setattr(paths, "CORP_JSON", str(state / "corp.json"))
+    monkeypatch.setattr(buildconfig, "running_pid", lambda: "")
+    monkeypatch.setattr(buildconfig.sys, "argv", ["buildconfig"])
+    for key in ("SB_PERSONAL", "SB_CORP_EXCLUDE", "CORP_DOMAINS"):
+        monkeypatch.delenv(key, raising=False)
+
+    def load():
+        buildconfig.main(log=lambda line: None)
+        return (json.loads((state / "config.json").read_text(encoding="utf-8")),
+                json.loads((state / "corp.json").read_text(encoding="utf-8")))
+    return load
+
+
+def _by_tag(items, tag):
+    return next(i for i in items if i.get("tag") == tag)
+
+
+def test_корп_живёт_в_своём_конфиге(built):
+    """Сторож перезапускает корп один, не трогая tun и личный туннель."""
+    main, corp = built()
+
+    assert [e["tag"] for e in main["endpoints"]] == ["awg-personal"]
+    assert [e["tag"] for e in corp["endpoints"]] == ["wg-corp"]
+    assert corp["route"]["final"] == "wg-corp"
+    # Автоопределение привязало бы сокет к tun основного процесса.
+    assert corp["route"]["auto_detect_interface"] is False
+
+
+def test_корп_подсети_и_корп_dns_идут_в_socks_с_паролем(built):
+    main, corp = built()
+
+    rule = next(r for r in main["route"]["rules"] if "ip_cidr" in r
+                and r["outbound"] != "direct")
+    assert rule == {"ip_cidr": ["10.10.0.0/16", "192.168.77.0/24"],
+                    "outbound": "corp-socks"}
+    assert _by_tag(main["dns"]["servers"], "dns-corp")["detour"] == "corp-socks"
+
+    socks = _by_tag(main["outbounds"], "corp-socks")
+    inbound = _by_tag(corp["inbounds"], "socks-in")
+    assert inbound["listen"] == "127.0.0.1"
+    assert socks["server"] == "127.0.0.1"
+    assert socks["server_port"] == inbound["listen_port"]
+    assert inbound["users"] == [{"username": socks["username"],
+                                 "password": socks["password"]}]
+    assert len(socks["password"]) >= 24
+
+
+def test_пароль_socks_новый_на_каждую_сборку(built):
+    first, _ = built()
+    second, _ = built()
+    assert (_by_tag(first["outbounds"], "corp-socks")["password"]
+            != _by_tag(second["outbounds"], "corp-socks")["password"])
+
+
+def test_остальное_через_личный_с_запасным_direct(built):
+    main, _ = built()
+
+    assert main["route"]["final"] == "out"
+    out = _by_tag(main["outbounds"], "out")
+    assert out["type"] == "selector"
+    assert out["outbounds"] == ["awg-personal", "direct"]
+    assert out["default"] == "awg-personal"
+    assert buildconfig.api_of(main)[0].startswith("127.0.0.1:")
+    assert buildconfig.api_of(main)[1]
+
+
+def test_перезапуск_корпа_меняет_только_адрес_пира(built, monkeypatch):
+    """Основной процесс работает и знает порт и пароль socks — они остаются."""
+    main, before = built()
+    monkeypatch.setattr(buildconfig, "peer_host", lambda host, tag, log: "198.51.100.99")
+
+    assert buildconfig.refresh_corp_peer(log=lambda line: None) == "198.51.100.99"
+
+    after = json.loads(open(paths.CORP_JSON, encoding="utf-8").read())
+    assert after["endpoints"][0]["peers"][0]["address"] == "198.51.100.99"
+    after["endpoints"][0]["peers"][0]["address"] = "198.51.100.10"
+    assert after == before
+    assert buildconfig.corp_link(main)["port"] == before["inbounds"][0]["listen_port"]
 
 
 def test_без_корп_dns_только_личный():

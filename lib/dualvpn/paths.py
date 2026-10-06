@@ -66,6 +66,8 @@ UI_DIR = (os.path.join(BUNDLE, "dualvpn", "ui") if getattr(sys, "frozen", False)
           else os.path.join(BASE, "lib", "dualvpn", "ui"))
 
 CONFIG_JSON = os.path.join(STATE, "config.json")
+# Корп-туннель — отдельный процесс sing-box со своим конфигом.
+CORP_JSON = os.path.join(STATE, "corp.json")
 STATUS_JSON = os.path.join(STATE, "status.json")
 PROFILE_FILE = os.path.join(STATE, "profile")
 REAL_IP_FILE = os.path.join(STATE, "real-ip")

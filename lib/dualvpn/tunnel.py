@@ -17,9 +17,12 @@ import ctypes
 import datetime
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
+import urllib.parse
+import urllib.request
 
 from . import buildconfig, paths, winnet
 
@@ -35,6 +38,13 @@ SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE",
 HALVES = ("0.0.0.0/1", "128.0.0.0/1")
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Сколько ждём, пока корп-процесс откроет socks на loopback.
+CORP_WAIT = 15
+
+# Чем clash_api меряет выход. Только по имени: голый 1.1.1.1 sing-box
+# через selector не меряет и отвечает таймаутом даже живому туннелю.
+DELAY_URL = "http://cp.cloudflare.com/generate_204"
 
 # Сколько ждём реальный адрес от запуска запроса. Обычно он приходит за
 # секунду, но на плохой сети запрос висел до 15 с и держал всё включение.
@@ -52,11 +62,16 @@ class Tunnel:
 
     def __init__(self, log):
         self.log = log
+        # Основной процесс: tun, маршрутизация, DNS и личный туннель.
         self.proc = None
         self.logfile = None
         # (путь, смещение) начала текущего запуска в журнале sing-box: сторож
         # службы читает оттуда ошибки соединений. None — туннель не запущен.
         self.log_start = None
+        # Корп-процесс со своим журналом: его перезапускают отдельно.
+        self.corp_proc = None
+        self.corp_logfile = None
+        self.corp_log_start = None
         # Индекс нашего tun, каким мы его запомнили. Нужен уборке после того,
         # как интерфейс исчез, а журнал уже удалён.
         self._tun_hint = None
@@ -164,8 +179,9 @@ class Tunnel:
 
     # -------------------------------------------------------------- логи
 
-    def open_log(self):
-        """Свежий файл лога, старые сверх KEEP_LOGS удаляются.
+    def open_log(self, prefix="vpn"):
+        """Свежий файл лога <prefix>-<дата>.log, открытый на дозапись;
+        старые сверх KEEP_LOGS удаляются — у каждого префикса свои десять.
 
         При битом конфиге sing-box падает, служба поднимает его снова, и каждый
         заход создавал бы новый файл: за две минуты история из десяти запусков
@@ -175,13 +191,13 @@ class Tunnel:
         paths.ensure_dirs()
         existing = sorted(
             (os.path.join(paths.LOGS, f) for f in os.listdir(paths.LOGS)
-             if f.startswith("vpn-") and f.endswith(".log")),
+             if f.startswith(f"{prefix}-") and f.endswith(".log")),
         )
         if existing and time.time() - os.path.getmtime(existing[-1]) < 60:
             path = existing[-1]
         else:
             stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            path = os.path.join(paths.LOGS, f"vpn-{stamp}.log")
+            path = os.path.join(paths.LOGS, f"{prefix}-{stamp}.log")
             existing.append(path)
         # Имя — это дата, поэтому сортировка по имени хронологическая.
         for old in existing[:-KEEP_LOGS]:
@@ -189,12 +205,11 @@ class Tunnel:
                 os.remove(old)
             except OSError:
                 pass
-        self.logfile = open(path, "a", encoding="utf-8", errors="replace")
-        self.logfile.write(
+        fh = open(path, "a", encoding="utf-8", errors="replace")
+        fh.write(
             f"\n=== {datetime.datetime.now():%Y-%m-%d %H:%M:%S} DualVPN ===\n")
-        self.logfile.flush()
-        self.log_start = (path, self.logfile.tell())
-        return path
+        fh.flush()
+        return fh
 
     # -------------------------------------------------------------- старт
 
@@ -209,6 +224,11 @@ class Tunnel:
                 and profile == os.environ.get("SB_PERSONAL", "")
                 and winnet.tun_index(paths.TUN_IP) is not None):
             self.log("→ уже работает")
+            # Основной жив, а корп упал: поднимаем только его, иначе
+            # «Включить» отвечало бы «работает» при мёртвой рабочей сети.
+            if self.corp_proc is None or self.corp_proc.poll() is not None:
+                self.log("→ корп-процесс не работает, поднимаю")
+                self._report_corp(self._start_corp())
             return ""
 
         # Уборка за прошлым запуском — до того, как поднимем свой. Прошлый мог
@@ -271,16 +291,18 @@ class Tunnel:
         # timeout обязателен: без него зависший sing-box повесил бы
         # весь start навсегда, а клиент ждёт ответ по каналу без таймаута —
         # снаружи это ровно ««Включить» зависло».
-        try:
-            check = subprocess.run(
-                [paths.SINGBOX, "check", "-c", paths.CONFIG_JSON],
-                capture_output=True, text=True,
-                encoding="utf-8", errors="replace",
-                timeout=20, creationflags=_NO_WINDOW)
-        except subprocess.TimeoutExpired:
-            return "sing-box check не ответил за 20с"
-        if check.returncode != 0:
-            return f"конфиг не прошёл проверку: {(check.stderr or '').strip()}"
+        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON):
+            try:
+                check = subprocess.run(
+                    [paths.SINGBOX, "check", "-c", cfg_path],
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                    timeout=20, creationflags=_NO_WINDOW)
+            except subprocess.TimeoutExpired:
+                return "sing-box check не ответил за 20с"
+            if check.returncode != 0:
+                return (f"конфиг {os.path.basename(cfg_path)} не прошёл "
+                        f"проверку: {(check.stderr or '').strip()}")
 
         # Шлюз по умолчанию определяем ДО старта, пока туннель не перебил
         # маршруты. Ничего не захардкожено: работает и на Wi-Fi, и на раздаче.
@@ -316,7 +338,14 @@ class Tunnel:
                      f"утечку сравнить будет не с чем")
         self._save_real_ip(real_ip[0] if real_ip else "")
 
-        log_path = self.open_log()
+        # Корп — до основного: тот сразу начнёт отдавать корп-подсети и
+        # корп-DNS в socks. Упал корп — включение идёт дальше: интернету он
+        # не нужен, а поднимет его сторож службы или повторное «Включить».
+        self._report_corp(self._start_corp())
+
+        self.logfile = self.open_log()
+        log_path = self.logfile.name
+        self.log_start = (log_path, self.logfile.tell())
         self.log(f"→ журнал sing-box: {log_path}")
         self.log("→ запускаю sing-box…")
         self.proc = subprocess.Popen(
@@ -333,6 +362,8 @@ class Tunnel:
         while time.time() < deadline:
             time.sleep(0.25)
             if self.proc.poll() is not None:
+                # Корп без основного никому не нужен: в socks никто не зайдёт.
+                self._stop_corp()
                 return f"sing-box упал на старте: {_fatal_line(log_path)}"
             tun_idx = winnet.tun_index(paths.TUN_IP)
             if tun_idx is not None:
@@ -393,18 +424,16 @@ class Tunnel:
             pass
 
     def _peer_ips(self):
-        """Адреса пиров из собранного конфига, имена резолвим сейчас.
+        """Адреса пиров из обоих собранных конфигов, имена резолвим сейчас.
 
         Пока DNS ещё системный: после подъёма туннеля он уйдёт внутрь, и имя
         сервера станет нерезолвимым ровно тогда, когда оно нужнее всего.
         """
         out = []
-        try:
-            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
-                cfg = json.load(fh)
-        except (OSError, ValueError):
-            return out
-        for ep in cfg.get("endpoints", []):
+        endpoints = []
+        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON):
+            endpoints += _load_json(cfg_path).get("endpoints", [])
+        for ep in endpoints:
             for peer in ep.get("peers", []):
                 host = (peer.get("address") or "").strip()
                 if not host:
@@ -420,16 +449,139 @@ class Tunnel:
     @staticmethod
     def _corp_domains():
         """Домены, которые собранный конфиг отдаёт корп-DNS."""
-        try:
-            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
-                cfg = json.load(fh)
-        except (OSError, ValueError):
-            return []
         names = []
-        for rule in cfg.get("dns", {}).get("rules", []):
+        for rule in _load_json(paths.CONFIG_JSON).get("dns", {}).get("rules", []):
             if rule.get("server") == "dns-corp":
                 names += rule.get("domain_suffix", [])
         return names
+
+    # -------------------------------------------------------- корп-процесс
+
+    def _start_corp(self):
+        """Запускает корп-процесс и ждёт, пока он откроет socks. '' или ошибка.
+
+        Ждём именно socks, а не просто живой процесс: основной отдаёт корп-
+        подсети на этот порт, и до его открытия первые запросы получили бы
+        отказ соединения.
+        """
+        link = buildconfig.corp_link(_load_json(paths.CONFIG_JSON))
+        if not link or not link.get("port"):
+            return "в собранном конфиге нет связи с корп-процессом"
+        self._stop_corp()
+        self.corp_logfile = self.open_log("corp")
+        log_path = self.corp_logfile.name
+        self.corp_log_start = (log_path, self.corp_logfile.tell())
+        self.log(f"→ запускаю корп-процесс, журнал: {log_path}")
+        self.corp_proc = subprocess.Popen(
+            [paths.SINGBOX, "run", "-c", paths.CORP_JSON, "--disable-color"],
+            cwd=paths.BIN,
+            stdout=self.corp_logfile, stderr=subprocess.STDOUT,
+            creationflags=_NO_WINDOW,
+        )
+        deadline = time.time() + CORP_WAIT
+        while time.time() < deadline:
+            if self.corp_proc.poll() is not None:
+                return f"корп-процесс упал на старте: {_fatal_line(log_path)}"
+            if _port_open(link["port"]):
+                return ""
+            time.sleep(0.25)
+        self._stop_corp()
+        return f"корп-процесс не открыл socks за {CORP_WAIT}с"
+
+    def _report_corp(self, err):
+        if err:
+            self.log(f"!! {err} — рабочая сеть недоступна, интернет работает")
+
+    def _stop_corp(self):
+        """Гасит только корп-процесс и закрывает его журнал."""
+        _end(self.corp_proc)
+        self.corp_proc = None
+        if self.corp_logfile is not None:
+            try:
+                self.corp_logfile.close()
+            except OSError:
+                pass
+            self.corp_logfile = None
+        self.corp_log_start = None
+
+    def restart_corp(self):
+        """Перезапускает один корп-процесс. '' или текст ошибки.
+
+        tun, маршруты и личный туннель не трогаем: интернет на это время не
+        моргает. Пира корпа резолвим заново — сменился адрес, ставим и на
+        него host-маршрут через тот же аплинк, иначе пакеты к нему ушли бы в tun.
+        """
+        if self.uplink is None:
+            return "туннель не поднят"
+        self._stop_corp()
+        try:
+            ip = buildconfig.refresh_corp_peer(self.log)
+        except SystemExit as exc:
+            # Конфиг остался прежним — пробуем с прошлым адресом пира.
+            self.log(f"!! адрес корп-пира не обновить: {exc}")
+            ip = ""
+        if ip:
+            up_idx, gw = self.uplink
+            if not any(r.get("NextHop") == gw
+                       for r in winnet.routes_for(f"{ip}/32")):
+                self.own("host", ip, gw, up_idx)
+                winnet.add_routes([(f"{ip}/32", up_idx, gw, 1)])
+                self.log(f"→ корп-пир теперь {ip}, маршрут мимо туннеля поставлен")
+        err = self._start_corp()
+        if not err:
+            self.log("→ корп-процесс перезапущен")
+        return err
+
+    # ----------------------------------------------------- выход наружу
+
+    def _clash(self, path, method="GET", body=None, timeout=5):
+        """Запрос к clash_api основного процесса; ответ — разобранный JSON.
+
+        Прокси обходим явно: urllib берёт системный прокси Windows, и запрос
+        на 127.0.0.1 ушёл бы к нему. Ошибки — OSError (HTTPError тоже он).
+        """
+        api = buildconfig.api_of(_load_json(paths.CONFIG_JSON))
+        if api is None:
+            raise OSError("в конфиге нет clash_api")
+        addr, secret = api
+        req = urllib.request.Request(
+            f"http://{addr}{path}", method=method,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {secret}",
+                     "Content-Type": "application/json"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=timeout) as resp:
+            data = resp.read()
+        return json.loads(data) if data else {}
+
+    def set_out(self, tag):
+        """Переключает выход наружу на tag без перезапуска. True — вышло."""
+        try:
+            self._clash(f"/proxies/{buildconfig.OUT_TAG}", "PUT", {"name": tag})
+        except (OSError, ValueError) as exc:
+            self.log(f"!! выход на {tag} не переключить: {exc}")
+            return False
+        self.log(f"→ выход наружу: {tag}")
+        return True
+
+    def out_now(self):
+        """Текущий выход наружу или '', если основной процесс не ответил."""
+        try:
+            return self._clash(f"/proxies/{buildconfig.OUT_TAG}").get("now", "")
+        except (OSError, ValueError):
+            return ""
+
+    def delay(self, tag, timeout_ms=3000):
+        """Задержка до DELAY_URL через выход tag в мс; None — не дошло."""
+        query = urllib.parse.urlencode({"url": DELAY_URL, "timeout": timeout_ms})
+        try:
+            reply = self._clash(
+                f"/proxies/{urllib.parse.quote(tag)}/delay?{query}",
+                timeout=timeout_ms / 1000 + 2)
+        except (OSError, ValueError):
+            return None
+        ms = reply.get("delay")
+        return ms if isinstance(ms, int) and ms > 0 else None
 
     def _keep_awake(self, on):
         try:
@@ -465,14 +617,10 @@ class Tunnel:
         if self._tun_hint is None:
             self._tun_hint = self._our_tun_index()
 
-        # 1. Процесс. Сначала свой, потом любой оставшийся от прошлых запусков.
-        if self.proc is not None and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        # 1. Процессы. Сначала свои, потом любой оставшийся от прошлых запусков.
+        _end(self.proc)
         self.proc = None
+        self._stop_corp()
         self._kill_strays()
 
         if self.logfile is not None:
@@ -573,6 +721,41 @@ class Tunnel:
             self.log(f"→ готово, сеть вернулась в исходное состояние (шлюз {gw})")
         else:
             self.log("!! маршрут по умолчанию отсутствует — сеть не поднята?")
+
+
+def _load_json(path):
+    """Собранный конфиг как словарь; нет или битый — пустой."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _port_open(port):
+    """Принимает ли кто-то TCP на этом порту loopback."""
+    try:
+        socket.create_connection(("127.0.0.1", port), 0.5).close()
+        return True
+    except OSError:
+        return False
+
+
+def _end(proc):
+    """Гасит наш процесс sing-box: по-хорошему, потом принудительно."""
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        # Дожидаемся смерти: новый корп-процесс займёт тот же порт socks.
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _fatal_line(log_path):

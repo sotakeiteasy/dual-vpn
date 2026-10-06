@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-Собирает config.json для sing-box-lx из обычных WireGuard/AmneziaWG .conf файлов.
+Собирает конфиги sing-box-lx из обычных WireGuard/AmneziaWG .conf файлов.
 
     conf/personal/<имя>.conf   личный AmneziaWG  -> весь остальной трафик
     conf/corp/<имя>.conf       корпоративный WG  -> подсети из его AllowedIPs
+
+Процессов два: state/config.json — tun, маршрутизация, DNS и личный туннель;
+state/corp.json — корп-туннель за socks на loopback. Так сбой корпа чинится
+перезапуском одного корп-процесса, а сбой личного — переключением выхода
+на direct, без перезапуска чего-либо.
 
 Рабочий ровно один. Личных сколько угодно, нужный выбирает профиль:
     set SB_PERSONAL=nl-1 && python -m dualvpn.buildconfig
@@ -21,6 +26,7 @@ import json
 import socket
 import os
 import re
+import secrets
 import sys
 import threading
 
@@ -323,22 +329,8 @@ def resolve_peer(name, tag, log=print):
     return ip
 
 
-def endpoint(conf, tag, default_mtu, log=print):
-    """Строит sing-box endpoint из разобранного .conf."""
-    iface, peer = conf["interface"], conf["peer"]
-
-    for required, where in (("privatekey", iface), ("publickey", peer),
-                            ("endpoint", peer), ("allowedips", peer)):
-        if required not in where:
-            sys.exit(f"[{tag}] в конфиге нет обязательного поля {required}")
-
-    host, _, port = peer["endpoint"].rpartition(":")
-    if not port.isdigit():
-        sys.exit(f"[{tag}] Endpoint должен быть host:port, получено {peer['endpoint']!r}")
-
-    # Имя резолвим ЗДЕСЬ, пока системный DNS ещё обычный. Иначе sing-box при
-    # старте попробует резолвить его через свой же туннель, который в этот
-    # момент не поднят, и упадёт с "context deadline exceeded".
+def peer_host(host, tag, log=print):
+    """Адрес пира для конфига: IP как есть, имя — резолвим."""
     if not re.match(r"^[\d.]+$", host) and ":" not in host:
         name = host
         host = resolve_peer(name, tag, log)
@@ -358,6 +350,26 @@ def endpoint(conf, tag, default_mtu, log=print):
             if pub:
                 log(f"  [{tag}] {name}: {host} -> публичный {pub}")
                 host = pub
+    return host
+
+
+def endpoint(conf, tag, default_mtu, log=print):
+    """Строит sing-box endpoint из разобранного .conf."""
+    iface, peer = conf["interface"], conf["peer"]
+
+    for required, where in (("privatekey", iface), ("publickey", peer),
+                            ("endpoint", peer), ("allowedips", peer)):
+        if required not in where:
+            sys.exit(f"[{tag}] в конфиге нет обязательного поля {required}")
+
+    host, _, port = peer["endpoint"].rpartition(":")
+    if not port.isdigit():
+        sys.exit(f"[{tag}] Endpoint должен быть host:port, получено {peer['endpoint']!r}")
+
+    # Имя резолвим ЗДЕСЬ, пока системный DNS ещё обычный. Иначе sing-box при
+    # старте попробует резолвить его через свой же туннель, который в этот
+    # момент не поднят, и упадёт с "context deadline exceeded".
+    host = peer_host(host, tag, log)
 
     ep = {
         "type": "wireguard",
@@ -464,16 +476,22 @@ def dns_section(corp_dns, domains):
     Windows к этому времени уже отвечал «хост не найден». У TCP потеря
     пакета — повтор через доли секунды, а не таймаут всего запроса.
     """
+    # Публичный DNS идёт тем же выходом, что и трафик: упал личный туннель —
+    # переключатель OUT_TAG уводит в direct и его. Иначе без личного не
+    # резолвилось бы ни одно имя, и запасной выход был бы бесполезен.
     servers = [{
         "type": "udp", "tag": "dns-personal",
-        "server": "8.8.8.8", "detour": "awg-personal",
+        "server": "8.8.8.8", "detour": OUT_TAG,
     }]
     rules = []
     if corp_dns:
         servers.insert(0, {
             "type": "tcp", "tag": "dns-corp",
-            "server": corp_dns[0], "detour": "wg-corp",
+            "server": corp_dns[0], "detour": CORP_SOCKS_TAG,
         })
+    # Пустой domain_suffix sing-box считает совпадением со всем: без корп-
+    # доменов любое имя уходило бы в корп-DNS.
+    if corp_dns and domains:
         rules.append({"domain_suffix": domains, "server": "dns-corp"})
     return servers, rules
 
@@ -481,6 +499,113 @@ def dns_section(corp_dns, domains):
 # Частные диапазоны: всё, что не отдано корпу, ходит напрямую.
 LOCAL_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
               "169.254.0.0/16", "224.0.0.0/4"]
+
+# Корп живёт в отдельном процессе sing-box (state/corp.json): сторож
+# перезапускает его один, не трогая tun, маршруты и личный туннель. Основной
+# процесс отдаёт ему корп-подсети через socks на loopback.
+PERSONAL_TAG = "awg-personal"
+CORP_TAG = "wg-corp"
+CORP_SOCKS_TAG = "corp-socks"
+# Выход для всего, что не корп и не локальная сеть: личный туннель, а пока
+# он мёртв — напрямую. Переключает служба через clash_api, без перезапуска.
+OUT_TAG = "out"
+DIRECT_TAG = "direct"
+
+
+def _free_port():
+    """Свободный порт на loopback. Его могут занять между проверкой и
+    стартом sing-box — тогда старт упадёт с понятной ошибкой в журнале."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def new_link():
+    """Порт, логин и пароль socks между процессами — новые на каждую сборку.
+
+    Порт на loopback открыт любому локальному процессу; без пароля чужая
+    программа ходила бы в рабочую сеть нашим туннелем.
+    """
+    return {"port": _free_port(),
+            "username": secrets.token_hex(8),
+            "password": secrets.token_urlsafe(24)}
+
+
+def new_api():
+    """Адрес и секрет clash_api основного процесса."""
+    return {"port": _free_port(), "secret": secrets.token_urlsafe(24)}
+
+
+def write_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(tmp, path)
+    # На Windows chmod почти ничего не значит — приватные ключи закрывает не
+    # он, а ACL каталога данных, который выставляет установщик. Строку
+    # оставляем ради запусков из исходников под WSL и ради явности.
+    os.chmod(path, 0o600)
+
+
+def corp_config(ep_corp, link):
+    """Конфиг корп-процесса: socks-вход на loopback и endpoint wg-corp."""
+    return {
+        "log": {"level": log_level(), "timestamp": True},
+        "inbounds": [{
+            "type": "socks", "tag": "socks-in",
+            "listen": "127.0.0.1", "listen_port": link["port"],
+            "users": [{"username": link["username"],
+                       "password": link["password"]}],
+        }],
+        "endpoints": [ep_corp],
+        "route": {
+            "final": CORP_TAG,
+            # Без автоопределения: оно привязало бы сокет к интерфейсу по
+            # умолчанию, а это tun основного процесса — корп ушёл бы в
+            # личный туннель. Пакеты к пиру ведёт host-маршрут через аплинк.
+            "auto_detect_interface": False,
+        },
+    }
+
+
+def corp_link(main_cfg):
+    """Порт и логин socks из собранного основного конфига, иначе None."""
+    for ob in main_cfg.get("outbounds", []):
+        if ob.get("tag") == CORP_SOCKS_TAG:
+            return {"port": ob.get("server_port"),
+                    "username": ob.get("username"),
+                    "password": ob.get("password")}
+    return None
+
+
+def api_of(main_cfg):
+    """(адрес, секрет) clash_api из основного конфига, иначе None."""
+    api = main_cfg.get("experimental", {}).get("clash_api") or {}
+    if not api.get("external_controller"):
+        return None
+    return api["external_controller"], api.get("secret", "")
+
+
+def refresh_corp_peer(log=print):
+    """Заново резолвит пира корпа и переписывает адрес в state/corp.json.
+
+    Зовётся перед перезапуском одного корп-процесса: основной работает, и
+    порт с паролем socks должны остаться прежними — их знает он. Возвращает
+    IPv4 пира. Ошибки — sys.exit с текстом, как у сборки.
+    """
+    try:
+        with open(paths.CORP_JSON, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"корп-конфиг не прочитать: {exc}")
+    host = parse_conf(pick_corp())["peer"]["endpoint"].rpartition(":")[0]
+    ip = peer_host(host, CORP_TAG, log)
+    for ep in cfg.get("endpoints", []):
+        if ep.get("tag") == CORP_TAG and ep.get("peers"):
+            ep["peers"][0]["address"] = ip
+    write_json(paths.CORP_JSON, cfg)
+    return ip
 
 
 def running_pid():
@@ -521,8 +646,10 @@ def main(log=print):
         sys.exit(f"sing-box уже работает (pid {pid}) — конфиг не трогаю.\n"
                  f"Останови его (`vpn stop`) или пересобери в другой файл:\n"
                  f"  python3 {os.path.relpath(__file__, BASE)} --out /tmp/test.json")
+    corp_path = paths.CORP_JSON
     if "--out" in sys.argv:
         out_path = sys.argv[sys.argv.index("--out") + 1]
+        corp_path = os.path.splitext(out_path)[0] + ".corp.json"
 
     p_path = pick_personal()
     c_path = pick_corp()
@@ -649,6 +776,9 @@ def main(log=print):
 
     dns_servers, dns_rules = dns_section(corp_dns, domains)
 
+    link = new_link()
+    api = new_api()
+
     config = {
         "log": {"level": log_level(), "timestamp": True},
         "dns": {
@@ -657,7 +787,7 @@ def main(log=print):
             "final": "dns-personal",
             "strategy": "ipv4_only",
         },
-        "endpoints": [ep_personal, ep_corp],
+        "endpoints": [ep_personal],
         "inbounds": [{
             "type": "tun", "tag": "tun-in",
             "mtu": int(os.environ.get("SB_TUN_MTU", ep_personal["mtu"])),
@@ -670,12 +800,26 @@ def main(log=print):
             "strict_route": os.environ.get("SB_STRICT_ROUTE") != "0",
             "stack": stack,
         }],
-        "outbounds": [{"type": "direct", "tag": "direct"}],
+        "outbounds": [
+            {"type": "direct", "tag": DIRECT_TAG},
+            {"type": "socks", "tag": CORP_SOCKS_TAG, "version": "5",
+             "server": "127.0.0.1", "server_port": link["port"],
+             "username": link["username"], "password": link["password"]},
+            # Рвать соединения при смене выхода: открытые через мёртвый
+            # личный туннель иначе висят до своих таймаутов.
+            {"type": "selector", "tag": OUT_TAG,
+             "outbounds": [PERSONAL_TAG, DIRECT_TAG], "default": PERSONAL_TAG,
+             "interrupt_exist_connections": True},
+        ],
+        "experimental": {"clash_api": {
+            "external_controller": f"127.0.0.1:{api['port']}",
+            "secret": api["secret"],
+        }},
         "route": {
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
-                {"ip_cidr": routes, "outbound": "wg-corp"},
+                {"ip_cidr": routes, "outbound": CORP_SOCKS_TAG},
                 # Локальная сеть — напрямую, не в туннель. Без этого запросы
                 # к соседним устройствам (NAS, принтер, роутер) уходили в
                 # личный туннель и висли там по 15 секунд.
@@ -683,7 +827,7 @@ def main(log=print):
                 # свои подсети из этих же диапазонов уже забрал выше.
                 {"ip_cidr": LOCAL_NETS, "outbound": "direct"},
             ],
-            "final": "awg-personal",
+            "final": OUT_TAG,
             # SB_NO_AUTODETECT=1 — не перепривязывать сокеты к интерфейсу.
             # Наш скрипт меняет маршруты сразу после старта, и при включённом
             # автоопределении sing-box может перепривязать UDP-сокет туннеля
@@ -695,13 +839,8 @@ def main(log=print):
         },
     }
 
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(config, fh, indent=2, ensure_ascii=False)
-        fh.write("\n")
-    # На Windows chmod почти ничего не значит — приватные ключи в config.json
-    # закрывает не он, а ACL каталога данных, который выставляет установщик.
-    # Строку оставляем ради запусков из исходников под WSL и ради явности.
-    os.chmod(out_path, 0o600)
+    write_json(out_path, config)
+    write_json(corp_path, corp_config(ep_corp, link))
 
     print(f"собрано: {out_path}")
     print(f"  из     : {os.path.basename(p_path)} + {os.path.basename(c_path)}")

@@ -297,11 +297,16 @@ class Api:
     def _howto(st):
         site = paths.site_env()
         nets, endpoints = [], []
-        try:
-            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
-                cfg = json.load(fh)
+        # Корп живёт в своём процессе (corp.json), основной отдаёт ему корп-
+        # подсети правилом на socks-выход buildconfig.CORP_SOCKS_TAG.
+        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON):
+            try:
+                with open(cfg_path, encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+            except (OSError, ValueError):
+                continue
             for rule in cfg.get("route", {}).get("rules", []):
-                if rule.get("outbound") == "wg-corp":
+                if rule.get("outbound") == "corp-socks":
                     nets = rule.get("ip_cidr") or []
             for ep in cfg.get("endpoints", []):
                 peers = ep.get("peers") or [{}]
@@ -312,8 +317,6 @@ class Api:
                     "awg": any(k in ep for k in ("jc", "s1", "h1")),
                     "peer": peers[0].get("address", ""),
                 })
-        except (OSError, ValueError):
-            pass
         return {
             "endpoints": endpoints,
             "corp_nets": nets,
