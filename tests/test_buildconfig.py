@@ -205,15 +205,17 @@ def _known(tmp_path):
     return json.loads((tmp_path / "peer-ips.json").read_text(encoding="utf-8"))
 
 
-def test_системный_dns_первым_и_адрес_запоминается(peer, monkeypatch, tmp_path):
-    """В корп-сети системный DNS отдаёт внутренний адрес — публичный не спрашиваем."""
+def test_системный_dns_главный_и_адрес_запоминается(peer, monkeypatch, tmp_path):
+    """В корп-сети системный DNS отдаёт внутренний адрес, а публичный оттуда
+    молчит — ответ публичного DNS его не перебивает."""
     conf, asked = peer
     _system_dns(monkeypatch, "10.20.0.1")
+    monkeypatch.setattr(buildconfig.winnet, "resolve4_via",
+                        lambda name, server, timeout=4.0: "203.0.113.9")
 
     ep = buildconfig.endpoint(conf, "wg-corp", 1280)
 
     assert ep["peers"][0]["address"] == "10.20.0.1"
-    assert asked == []
     assert _known(tmp_path) == {"vpn.example.com": "10.20.0.1"}
 
 
@@ -228,7 +230,7 @@ def test_без_системного_dns_адрес_через_публичны�
     ep = buildconfig.endpoint(conf, "wg-corp", 1280, lines.append)
 
     assert ep["peers"][0]["address"] == "203.0.113.9"
-    assert asked == ["8.8.8.8", "1.1.1.1"]
+    assert sorted(asked) == ["1.1.1.1", "8.8.8.8"]
     assert "203.0.113.9 через 1.1.1.1" in lines[0]
     assert _known(tmp_path) == {"vpn.example.com": "203.0.113.9"}
 
@@ -252,6 +254,34 @@ def test_зависший_системный_dns_не_держит_дольше_
     assert ep["peers"][0]["address"] == "203.0.113.9"
 
 
+def _silent_dns(monkeypatch, release):
+    """Все DNS молчат: системный висит, публичные дожидаются своего таймаута."""
+    monkeypatch.setattr(buildconfig.socket, "getaddrinfo",
+                        lambda *a, **kw: release.wait(5) and [])
+    monkeypatch.setattr(buildconfig.winnet, "resolve4_via",
+                        lambda name, server, timeout=4.0:
+                        release.wait(min(timeout, 0.5)) and "")
+
+
+def test_все_dns_спрашиваются_разом(peer, monkeypatch, tmp_path):
+    """По очереди молчащие системный, 8.8.8.8 и 1.1.1.1 стоили 12 с — три потолка."""
+    conf, _ = peer
+    (tmp_path / "peer-ips.json").write_text(
+        json.dumps({"vpn.example.com": "10.20.0.1"}), encoding="utf-8")
+    monkeypatch.setattr(buildconfig, "SYSTEM_DNS_WAIT", 0.5)
+    release = threading.Event()
+    _silent_dns(monkeypatch, release)
+    started = time.monotonic()
+
+    try:
+        ep = buildconfig.endpoint(conf, "wg-corp", 1280, lambda line: None)
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 1.0
+    assert ep["peers"][0]["address"] == "10.20.0.1"
+
+
 def test_без_всякого_dns_берётся_прошлый_адрес(peer, monkeypatch, tmp_path):
     conf, asked = peer
     (tmp_path / "peer-ips.json").write_text(
@@ -262,7 +292,7 @@ def test_без_всякого_dns_берётся_прошлый_адрес(peer
     ep = buildconfig.endpoint(conf, "wg-corp", 1280, lines.append)
 
     assert ep["peers"][0]["address"] == "10.20.0.1"
-    assert asked == ["8.8.8.8", "1.1.1.1"]
+    assert sorted(asked) == ["1.1.1.1", "8.8.8.8"]
     assert "прошлый адрес 10.20.0.1" in lines[0]
 
 
@@ -407,7 +437,8 @@ def test_перезапуск_туннеля_меняет_только_адре�
     """Основной процесс работает и знает порт и пароль socks — они остаются."""
     main, *sides = built()
     before = dict(zip(("corp", "personal"), sides))[kind]
-    monkeypatch.setattr(buildconfig, "peer_host", lambda host, tag, log: "198.51.100.99")
+    monkeypatch.setattr(buildconfig, "peer_host",
+                        lambda host, tag, log, quick=False: "198.51.100.99")
 
     assert buildconfig.refresh_peer(kind, log=lambda line: None) == "198.51.100.99"
 
@@ -417,6 +448,48 @@ def test_перезапуск_туннеля_меняет_только_адре�
     assert after == before
     assert (buildconfig.side_link(main, kind)["port"]
             == before["inbounds"][0]["listen_port"])
+
+
+@pytest.fixture
+def named_corp(built, tmp_path, monkeypatch):
+    """Собранные конфиги, после чего у корп-пира имя вместо адреса."""
+    built()
+    monkeypatch.setattr(paths, "PEER_IPS_FILE", str(tmp_path / "peer-ips.json"))
+    monkeypatch.setattr(buildconfig, "SYSTEM_DNS_WAIT", 2.0)
+    monkeypatch.setattr(buildconfig, "REFRESH_DNS_WAIT", 0.2)
+    (tmp_path / "conf" / "corp" / "corp.conf").write_text(
+        CORP.replace("198.51.100.10:51820", "vpn.example.com:51820"),
+        encoding="utf-8")
+
+
+def test_перезапуск_с_прошлым_адресом_не_ждёт_молчащий_dns(named_corp, monkeypatch,
+                                                         tmp_path):
+    """Сторож ждал 12 с, пока все DNS молчали, и всё равно брал прошлый адрес."""
+    (tmp_path / "peer-ips.json").write_text(
+        json.dumps({"vpn.example.com": "10.20.0.1"}), encoding="utf-8")
+    release = threading.Event()
+    _silent_dns(monkeypatch, release)
+    started = time.monotonic()
+
+    try:
+        ip = buildconfig.refresh_peer("corp", log=lambda line: None)
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 1.0
+    assert ip == "10.20.0.1"
+
+
+def test_перезапуск_без_прошлого_адреса_ждёт_дольше(named_corp, monkeypatch):
+    """Без прошлого адреса короткий потолок оставил бы туннель вовсе без пира."""
+    def slow(name, *a, **kw):
+        time.sleep(0.5)
+        return [(None, None, None, "", ("10.20.0.7", 0))]
+    monkeypatch.setattr(buildconfig.socket, "getaddrinfo", slow)
+    monkeypatch.setattr(buildconfig.winnet, "resolve4_via",
+                        lambda name, server, timeout=4.0: "")
+
+    assert buildconfig.refresh_peer("corp", log=lambda line: None) == "10.20.0.7"
 
 
 def test_без_корп_dns_только_личный():

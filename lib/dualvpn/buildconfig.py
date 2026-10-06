@@ -236,36 +236,61 @@ def split_list(value):
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
-# Сколько ждём системный DNS за адресом пира. Без потолка getaddrinfo висел
+# Сколько ждём DNS за адресом пира. Без потолка getaddrinfo висел
 # 12 с, когда DNS роутера не отвечал, — и столько же стояло переподключение.
 SYSTEM_DNS_WAIT = 4.0
-# Запасные DNS, если системный не ответил. Только запасные: в корп-сети
+# А столько — когда перезапускаем один боковой процесс и прошлый адрес пира
+# известен: сторож ждал 12 с, пока все DNS молчали, а взял в итоге прошлый.
+REFRESH_DNS_WAIT = 1.5
+# Запасные DNS: спрашиваем разом с системным, но их ответ берём, только
+# если системный не ответил. Только запасные: в корп-сети
 # системный отдаёт внутренний адрес пира, а публичный оттуда молчит.
 PUBLIC_DNS = ("8.8.8.8", "1.1.1.1")
 
 
-def _resolve_system(name):
-    """A-запись через системный DNS, не дольше SYSTEM_DNS_WAIT.
+def _ask_dns(name, wait):
+    """Спрашивает системный и запасные DNS разом, ждёт не дольше wait.
 
-    getaddrinfo не прервать, поэтому он идёт в фоновом потоке: зависший
-    поток доживёт своё сам, а сборка пойдёт дальше по запасным путям.
+    Возвращает (системный, {сервер: IPv4}); системный — адрес, исключение
+    или None, если промолчал. Ответ системного главный, поэтому запасных
+    ждём, только пока он не ответил сам. Спрашивать по очереди стоило до
+    трёх потолков подряд. getaddrinfo не прервать, поэтому каждый запрос
+    идёт в фоновом потоке: зависший доживёт своё сам.
     """
-    box = []
+    answers = {}
+    ready = threading.Condition()
 
-    def run():
+    def system():
         try:
-            box.append(socket.getaddrinfo(name, None, socket.AF_INET)[0][4][0])
+            return socket.getaddrinfo(name, None, socket.AF_INET)[0][4][0]
         except (OSError, IndexError) as exc:
-            box.append(exc)
+            return OSError(str(exc))
 
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    worker.join(SYSTEM_DNS_WAIT)
-    if not box:
-        raise TimeoutError(f"системный DNS молчит {SYSTEM_DNS_WAIT:g} с")
-    if isinstance(box[0], Exception):
-        raise OSError(str(box[0]))
-    return box[0]
+    def run(source, ask):
+        answer = ask()
+        with ready:
+            answers[source] = answer
+            ready.notify_all()
+
+    asks = {None: system}
+    for server in PUBLIC_DNS:
+        asks[server] = lambda server=server: winnet.resolve4_via(
+            name, server, timeout=wait)
+    for source, ask in asks.items():
+        threading.Thread(target=run, args=(source, ask), daemon=True).start()
+
+    def settled():
+        sys_answer = answers.get(None)
+        if isinstance(sys_answer, str):
+            return True
+        publics = [answers.get(s) for s in PUBLIC_DNS]
+        return sys_answer is not None and (any(publics)
+                                           or len(answers) == len(asks))
+
+    with ready:
+        ready.wait_for(settled, wait)
+        found = dict(answers)
+    return found.pop(None, None), {s: ip for s, ip in found.items() if ip}
 
 
 def _known_peer_ips():
@@ -302,23 +327,27 @@ def _remember_peer_ip(name, ip):
         pass
 
 
-def resolve_peer(name, tag, log=print):
+def resolve_peer(name, tag, log=print, quick=False):
     """Адрес пира: системный DNS, затем публичный, затем прошлый удачный.
 
     Без запасных путей переподключение зависело от DNS роутера: тот молчал,
     и туннель не поднимался, хотя адрес сервера не менялся месяцами.
+    quick — перезапуск одного бокового процесса: при известном прошлом
+    адресе DNS ждём REFRESH_DNS_WAIT, а не SYSTEM_DNS_WAIT.
     """
-    try:
-        ip = _resolve_system(name)
-    except OSError as exc:
+    known = _known_peer_ips().get(name)
+    wait = REFRESH_DNS_WAIT if quick and known else SYSTEM_DNS_WAIT
+    ip, publics = _ask_dns(name, wait)
+    if not isinstance(ip, str):
+        exc = ip or TimeoutError(f"системный DNS молчит {wait:g} с")
         for server in PUBLIC_DNS:
-            ip = winnet.resolve4_via(name, server)
+            ip = publics.get(server)
             if ip:
                 log(f"  [{tag}] {name}: системный DNS не ответил ({exc}), "
                     f"{ip} через {server}")
                 break
         else:
-            ip = _known_peer_ips().get(name)
+            ip = known
             if not ip:
                 sys.exit(f"[{tag}] не удалось резолвить {name}: {exc}; "
                          f"публичный DNS не ответил, прошлого адреса нет")
@@ -329,11 +358,11 @@ def resolve_peer(name, tag, log=print):
     return ip
 
 
-def peer_host(host, tag, log=print):
+def peer_host(host, tag, log=print, quick=False):
     """Адрес пира для конфига: IP как есть, имя — резолвим."""
     if not re.match(r"^[\d.]+$", host) and ":" not in host:
         name = host
-        host = resolve_peer(name, tag, log)
+        host = resolve_peer(name, tag, log, quick)
 
         # НЕ подменять частный адрес публичным. Корп-сервер доступен по
         # внутреннему адресу (имя из конфига -> адрес внутри сети), и именно на
@@ -613,7 +642,7 @@ def refresh_peer(kind, log=print):
     conf = pick_corp() if kind == "corp" else pick_personal()
     tag = SIDES[kind][0]
     host = parse_conf(conf)["peer"]["endpoint"].rpartition(":")[0]
-    ip = peer_host(host, tag, log)
+    ip = peer_host(host, tag, log, quick=True)
     for ep in cfg.get("endpoints", []):
         if ep.get("tag") == tag and ep.get("peers"):
             ep["peers"][0]["address"] = ip
