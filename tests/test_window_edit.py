@@ -4,6 +4,7 @@
 служба сама отдала в статусе.
 """
 
+import ntpath
 import os
 
 from dualvpn import ipc, paths, window
@@ -36,7 +37,8 @@ def test_личный_конфиг_открывается_в_блокноте_с
     api.send("edit_config", {"name": "nl-1", "kind": "personal"})
 
     exe, args, show = runs[0]
-    assert os.path.isabs(exe) and exe.lower().endswith("system32\\notepad.exe")
+    # Путь Windows: на Linux-раннере os.path его не разберёт.
+    assert ntpath.isabs(exe) and ntpath.normpath(exe).lower().endswith("system32\\notepad.exe")
     assert args == [os.path.join(paths.CONF_PERSONAL, "nl-1.conf")] and show
 
 
