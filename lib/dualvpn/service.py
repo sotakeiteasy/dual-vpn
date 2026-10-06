@@ -43,19 +43,23 @@ RECONNECT_GAP = 10.0
 # Мёртвый туннель: keepalive идёт, а TCP через него не открывается (5 октября личный
 # молчал две минуты, корп — до замены конфига). Сетевой пинг давал бы постоянный
 # трафик и ложное «молчит», поэтому смотрим на живые соединения в журнале
-# sing-box. Один адрес может лежать сам — нужны разные; переподключение при этом
-# не чаще DEAD_GAP, чтобы лежащий сервер не дёргал маршруты по кругу.
+# процесса туннеля. Один адрес может лежать сам — нужны разные. Перезапускается
+# только процесс этого туннеля, tun и второй туннель не трогаем (полный
+# перезапуск по таймерам человек запретил 6 октября: «я руками сам перезапущу»);
+# один и тот же — не чаще DEAD_GAP, чтобы лежащий сервер не дёргал его по кругу.
 DEAD_RE = re.compile(
     r"ERROR .*open connection to (\S+) "
-    r"using outbound/wireguard\[([^\]]+)\]: context deadline exceeded")
+    r"using (?:outbound|endpoint)/wireguard\[([^\]]+)\]: context deadline exceeded")
 # Таймауты в журнале бывают и при живом корпе (6 октября в 12:03 перезапуск
 # порвал оба туннеля, а человек видел, что всё работает): прежде чем
-# переподключать, сторож сам спрашивает корп-DNS через туннель.
-CORP_TAG = "wg-corp"
+# перезапускать, сторож сам спрашивает корп-DNS через туннель.
 DEAD_HITS = 3
 DEAD_ADDRS = 2
 DEAD_WINDOW = 60.0
-DEAD_GAP = 300.0
+DEAD_GAP = 60.0
+# Пока выход идёт напрямую, личный проверяем задержкой через его socks не чаще
+# этого: проверка ждёт до 5 с, а круг сторожа — раз в FAST_EVERY.
+BACK_EVERY = 15.0
 # Пауза между кругами сторожа длиннее этого (при шаге FAST_EVERY) — компьютер спал:
 # после пробуждения сеть и туннель чаще всего и ломаются, и без отметки
 # о сне дыра в штампах журнала читается как зависшая служба.
@@ -74,6 +78,9 @@ CONN_RE = re.compile(
 PREMATCH_RE = re.compile(
     r"pre-match: .* connection from \S+ to (\S+) via (?:endpoint|outbound)/\w+\[([^\]]+)\]")
 DNS_RE = re.compile(r"\[(\d+) [^\]]*\] dns: \w+ \w+ (\S+?)\.? \d+ IN (\w+) (\S+?)\.?$")
+# Штамп строки sing-box и заголовка запуска из open_log: по нему команда log сводит
+# журналы трёх процессов в один.
+STAMP_RE = re.compile(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
 # Туннели живут в своих процессах: в журнале основного их трафик идёт через
 # socks-выходы. В статистику — под тегом самого туннеля, как до разделения.
 SOCKS_TAGS = {socks: tag for tag, socks in buildconfig.SIDES.values()}
@@ -97,21 +104,22 @@ class Core:
         self.log_lock = threading.Lock()
         self._paths = {}         # тег → Counter адресов с прошлой записи в файл
         self._ip_names = {}      # IP → имя из DNS-ответа
+        # Начало запуска в журнале (log_start основного процесса или туннеля) →
+        # до какого байта сторож дочитал.
+        self._log_at = {}
+        # kind туннеля → раньше чего его процесс снова не перезапускаем, и для
+        # какой паузы уже записали «жду»: раз за паузу, не каждый круг.
+        self._side_after = {}
+        self._side_noted = {}
 
     # Сколько ещё попыток поднять туннель после неудачного переподключения.
     # Команда человека (start/stop) их отменяет: он уже решил сам.
     _retry_left = 0
 
-    # Чтение журнала sing-box сторожем: для какого запуска (Tunnel.log_start)
-    # и до какого байта дочитано; таймауты (время, тег, адрес) за DEAD_WINDOW;
-    # раньше чего мёртвый туннель снова не переподключаем.
-    _log_from = None
-    _log_pos = 0
+    # Таймауты (время, тег, адрес) за DEAD_WINDOW.
     _dead_hits = ()
-    _dead_after = 0.0
-    # Для какой паузы DEAD_GAP уже записали «мёртв, но жду»: раз за паузу, не
-    # каждый круг.
-    _dead_noted = None
+    # Когда в следующий раз проверять, везёт ли личный, пока выход напрямую.
+    _back_at = 0.0
     # Когда статистику адресов снова писать в PATHS_FILE.
     _paths_at = 0.0
 
@@ -257,8 +265,10 @@ class Core:
         cur = {"corp": (self._corp() or [""])[0],
                "personal": probe.Prober.current_profile()}
         result = {
+            # Запасной выход напрямую — личный не работает, хоть интернет и есть.
             "personal": ("up" if st.get("exit_ip")
-                         and st.get("exit_state") != "leak" else "error"),
+                         and st.get("exit_state") not in ("leak", "direct")
+                         else "error"),
             "corp": ("up" if st.get("corp_ip") or st.get("corp_http")
                      else "error" if corp_probe else ""),
         }
@@ -345,6 +355,9 @@ class Core:
                 self.tunnel.stop()
                 return {"ok": False, "error": err}
             self.log(f"→ туннель поднят за {took:.1f} с")
+            # Личный мог не подняться: проверка выхода на подъёме должна знать
+            # это до первого круга сторожа, иначе увидит «утечку».
+            self.prober.set(out=self.tunnel.out_now())
             return {"ok": True}
         finally:
             self._probe_now()
@@ -404,6 +417,8 @@ class Core:
         st = self.prober.snapshot()
         cur = (st.get("iface"), st.get("gw") or "")
         had = self.tunnel.uplink
+        if not had and st.get("out"):
+            self.prober.set(out="")
 
         if self._retry_left:
             if had:                       # туннель уже подняли — повторы не нужны
@@ -423,39 +438,19 @@ class Core:
                      f"поднимаю заново")
             return None, 0, self._reconnect()
         with self.log_lock:
-            lines = self._read_log()
+            lines, side_lines = self._read_logs()
             self._count_paths(lines)
             if time.monotonic() >= self._paths_at:
                 self._save_paths()
         if cur[1]:
-            dead = self._dead_tunnel(lines)
+            # Смену сети после этого всё равно проверяем ниже, счёт её
+            # кругов не сбрасываем.
+            self._mind_sides(side_lines)
         else:
             # Без шлюза таймауты — от сети, а не от туннеля: не копим, иначе
-            # они сработают сразу после её возвращения, и не переподключаем —
-            # без сети туннель только снимется.
-            dead, self._dead_hits = None, ()
-        if dead:
-            now = time.monotonic()
-            tag, addrs = dead[0][1], sorted({h[2] for h in dead})
-            what = (f"через {tag} соединения не открываются: таймаутов "
-                    f"{len(dead)} за {now - dead[0][0]:.0f} с, адреса: {', '.join(addrs)}")
-            if now >= self._dead_after:
-                self._dead_hits = ()
-                # Корп ответил — дальше, как без таймаутов: смену сети
-                # проверяем ниже, счёт её кругов не сбрасываем.
-                ip = self.prober.corp_answer() if tag == CORP_TAG else ""
-                if ip:
-                    self.log(f"!! {what} — но корп отвечает (DNS {ip} за "
-                             f"{time.monotonic() - now:.1f} с), не переподключаю")
-                else:
-                    self._dead_after = now + DEAD_GAP
-                    self.log(f"!! {what} — переподключаю")
-                    return None, 0, self._reconnect()
-            # Внутри паузы смену сети всё равно проверяем ниже.
-            elif self._dead_noted != self._dead_after:
-                self._dead_noted = self._dead_after
-                self.log(f"!! {what} — туннель мёртв, но с прошлого "
-                         f"переподключения нет {DEAD_GAP:.0f} с, жду")
+            # они сработают сразу после её возвращения, и не перезапускаем —
+            # без сети туннель не оживёт.
+            self._dead_hits = ()
         if not cur[1] or cur == had:
             if seen:
                 self.log(f"→ сеть моргнула: интерфейс {seen[0]}, шлюз {seen[1]} "
@@ -472,17 +467,25 @@ class Core:
                  f"интерфейс {cur[0]}, шлюз {cur[1]} — переподключаю")
         return None, 0, self._reconnect()
 
-    def _read_log(self):
-        """Новые целые строки журнала sing-box с прошлого круга, только текущего
-        запуска: старые ошибки прошлого сеанса в том же файле не в счёт."""
-        start = self.tunnel.log_start
+    def _read_logs(self):
+        """Новые строки: (основного журнала, журналов обоих туннелей). Порознь:
+        трафик туннелей виден в обоих, и в статистику адресов идёт только основной."""
+        starts = [self.tunnel.log_start] + [s.log_start for s in self.tunnel.sides]
+        # Позиции прошлых запусков больше не нужны.
+        self._log_at = {k: v for k, v in self._log_at.items() if k in starts}
+        return (self._read_log(starts[0]),
+                [line for start in starts[1:] for line in self._read_log(start)])
+
+    def _read_log(self, start):
+        """Новые целые строки журнала sing-box с прошлого круга, только запуска
+        start (log_start процесса): старые ошибки прошлого сеанса в том же
+        файле не в счёт."""
         if start is None:
             return []
-        if start != self._log_from:
-            self._log_from, self._log_pos = start, start[1]
+        pos = self._log_at.get(start, start[1])
         try:
             with open(start[0], "rb") as fh:
-                fh.seek(self._log_pos)
+                fh.seek(pos)
                 data = fh.read(LOG_TAIL_BYTES)
         except OSError:
             return []
@@ -491,25 +494,120 @@ class Core:
         end = data.rfind(b"\n") + 1
         if not end and len(data) == LOG_TAIL_BYTES:
             end = len(data)
-        self._log_pos += end
+        self._log_at[start] = pos + end
         return data[:end].decode("utf-8", "replace").splitlines()
 
-    def _dead_tunnel(self, lines):
-        """Таймауты (время круга, тег, адрес) туннеля, через который за DEAD_WINDOW
-        не открылось DEAD_HITS соединений к хотя бы DEAD_ADDRS разным адресам,
-        или None. Паузу DEAD_GAP не смотрит: это решает сторож."""
+    def _dead_tunnels(self, lines):
+        """{тег: таймауты (время круга, тег, адрес)} туннелей, через которые за
+        DEAD_WINDOW не открылось DEAD_HITS соединений к хотя бы DEAD_ADDRS разным адресам.
+        Паузу DEAD_GAP не смотрит: это решает сторож."""
         now = time.monotonic()
         hits = [h for h in self._dead_hits if now - h[0] < DEAD_WINDOW]
         for line in lines:
             m = DEAD_RE.search(line)
             if m:
                 hits.append((now, m.group(2), m.group(1).rpartition(":")[0]))
-        self._dead_hits = hits
-        for tag in sorted({h[1] for h in hits}):
+        self._dead_hits = tuple(hits)
+        dead = {}
+        for tag in {h[1] for h in hits}:
             mine = [h for h in hits if h[1] == tag]
             if len(mine) >= DEAD_HITS and len({h[2] for h in mine}) >= DEAD_ADDRS:
-                return mine
-        return None
+                dead[tag] = mine
+        return dead
+
+    def _mind_sides(self, lines):
+        """Упавший или мёртвый туннель — перезапуск только его процесса, не чаще
+        DEAD_GAP. Пока личный не везёт, выход наружу напрямую: главное — чтобы
+        интернет работал; везёт снова — выход обратно через него."""
+        dead = self._dead_tunnels(lines)
+        personal = self.tunnel.personal
+        out, carries = self.tunnel.out_now(), None
+        if out == buildconfig.DIRECT_TAG and personal.alive():
+            out, carries = self._try_back()
+        self.prober.set(out=out)
+        for side in self.tunnel.sides:
+            hits = dead.get(side.tag)
+            # Живой личный, через который проверка не дошла: трафика через него
+            # нет, и таймаутов в журнале не будет.
+            stuck = side is personal and carries is False
+            if side.alive() and not hits and not stuck:
+                continue
+            if side is personal and out != buildconfig.DIRECT_TAG:
+                # Выход уводим сразу, без паузы: интернет не должен ждать перезапуска.
+                if self.tunnel.set_out(buildconfig.DIRECT_TAG):
+                    out = buildconfig.DIRECT_TAG
+                    self.prober.set(out=out)
+                    self.prober.remeasure()
+            now = time.monotonic()
+            after = self._side_after.get(side.kind, 0.0)
+            if now < after:
+                if self._side_noted.get(side.kind) != after:
+                    self._side_noted[side.kind] = after
+                    self.log(f"!! {side.title} туннель не работает, но с прошлого "
+                             f"перезапуска нет {DEAD_GAP:.0f} с, жду")
+                continue
+            # Таймауты того туннеля разобраны: чем бы ни кончилось, счёт заново.
+            self._dead_hits = tuple(h for h in self._dead_hits if h[1] != side.tag)
+            why = self._side_down(side, hits)
+            if why:
+                self._side_after[side.kind] = now + DEAD_GAP
+                self.log(f"!! {why} — перезапускаю {side.title} процесс")
+                self._restart_side(side)
+
+    def _side_down(self, side, hits):
+        """Что с туннелем, для журнала, или '' — корп всё-таки отвечает."""
+        if not side.alive():
+            if side.proc is None:
+                return f"{side.title} процесс не запущен"
+            return f"{side.title} процесс завершился сам (код {side.proc.returncode})"
+        if not hits:
+            return f"через {side.tag} не дошла проверка выхода"
+        now = time.monotonic()
+        what = (f"через {side.tag} соединения не открываются: таймаутов "
+                f"{len(hits)} за {now - hits[0][0]:.0f} с, "
+                f"адреса: {', '.join(sorted({h[2] for h in hits}))}")
+        if side is self.tunnel.corp:
+            ip = self.prober.corp_answer()
+            if ip:
+                self.log(f"!! {what} — но корп отвечает (DNS {ip} за "
+                         f"{time.monotonic() - now:.1f} с), не перезапускаю")
+                return ""
+        return what
+
+    def _try_back(self):
+        """Выход напрямую, личный процесс жив: если задержка через него
+        дошла — вернуть выход на него. (выход, везёт ли): None — не проверяли,
+        рано по BACK_EVERY."""
+        now = time.monotonic()
+        if now < self._back_at:
+            return buildconfig.DIRECT_TAG, None
+        self._back_at = now + BACK_EVERY
+        ms = self.tunnel.delay(buildconfig.PERSONAL_SOCKS_TAG)
+        if ms is None:
+            return buildconfig.DIRECT_TAG, False
+        if not self.tunnel.set_out(buildconfig.PERSONAL_SOCKS_TAG):
+            return buildconfig.DIRECT_TAG, True
+        self.log(f"→ личный везёт (проверка за {ms} мс) — выход снова через него")
+        self.prober.remeasure()
+        return buildconfig.PERSONAL_SOCKS_TAG, True
+
+    def _restart_side(self, side):
+        """Перезапуск процесса одного туннеля — под замком start/stop: «Выключить»
+        посреди него оставило бы процесс, который уже никто не снимет."""
+        if not self.lock.acquire(blocking=False):
+            return
+        try:
+            if self.tunnel.uplink is None or self.prober.stop_event.is_set():
+                return
+            self.busy = f"перезапускаю {side.title} туннель"
+            err = self.tunnel.restart_side(side)
+            if err:
+                self.log(f"!! {err}")
+            elif side is self.tunnel.corp:
+                self.prober.remeasure()
+        finally:
+            self.busy = ""
+            self.lock.release()
 
     # ------------------------------------------------------ куда что ходит
 
@@ -584,7 +682,7 @@ class Core:
         Не бросает: статистика не должна мешать выключить VPN."""
         try:
             with self.log_lock:
-                self._count_paths(self._read_log())
+                self._count_paths(self._read_log(self.tunnel.log_start))
                 self._save_paths()
         except Exception as exc:                           # noqa: BLE001
             self.log(f"!! статистика адресов: {exc}")
@@ -731,27 +829,43 @@ class Core:
 
     @staticmethod
     def _tail_log(lines):
-        """Последние строки журнала sing-box — их показывает окно.
+        """Последние строки журналов sing-box — основного и обоих туннелей,
+        по времени. Их показывает окно; строки туннеля помечены его именем."""
+        out = []
+        for prefix, mark in (("vpn", ""), ("corp", "[корп] "),
+                             ("personal", "[личный] ")):
+            stamp = ""
+            for line in _tail_file(prefix):
+                m = STAMP_RE.search(line[:40])
+                # Строка без штампа (трассировка, обрывок) — за предыдущей своего журнала.
+                stamp = m.group(1) if m else stamp
+                out.append((stamp, mark + line))
+        out.sort(key=lambda item: item[0])        # устойчиво: порядок журнала цел
+        return [line for _, line in out[-lines:]]
 
-        Читаем только хвост файла: за долгую сессию журнал вырастает
-        до мегабайт, а окно спрашивает его раз в две секунды — целиком это
-        было бы чтение и разбор всего файла на каждый опрос.
-        """
-        try:
-            files = sorted(f for f in os.listdir(paths.LOGS)
-                           if f.startswith("vpn-") and f.endswith(".log"))
-            if not files:
-                return []
-            with open(os.path.join(paths.LOGS, files[-1]), "rb") as fh:
-                size = fh.seek(0, os.SEEK_END)
-                fh.seek(max(0, size - LOG_TAIL_BYTES))
-                data = fh.read()
-        except OSError:
+
+def _tail_file(prefix):
+    """Хвост свежего журнала <prefix>-*.log строками.
+
+    Читаем только хвост файла: за долгую сессию журнал вырастает
+    до мегабайт, а окно спрашивает его раз в две секунды — целиком это
+    было бы чтение и разбор всего файла на каждый опрос.
+    """
+    try:
+        files = sorted(f for f in os.listdir(paths.LOGS)
+                       if f.startswith(f"{prefix}-") and f.endswith(".log"))
+        if not files:
             return []
-        out = data.decode("utf-8", errors="replace").splitlines()
-        if size > LOG_TAIL_BYTES:
-            out = out[1:]          # первая строка хвоста обрезана посередине
-        return out[-lines:]
+        with open(os.path.join(paths.LOGS, files[-1]), "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - LOG_TAIL_BYTES))
+            data = fh.read()
+    except OSError:
+        return []
+    out = data.decode("utf-8", errors="replace").splitlines()
+    if size > LOG_TAIL_BYTES:
+        out = out[1:]          # первая строка хвоста обрезана посередине
+    return out
 
 
 # ------------------------------------------------------- обвязка Windows

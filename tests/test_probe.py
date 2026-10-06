@@ -34,6 +34,21 @@ def _run_loop(monkeypatch, net, slow):
     return p, loop
 
 
+@pytest.mark.parametrize("out, state", [("direct", "direct"), ("personal-socks", "leak")])
+def test_адрес_провайдера_на_запасном_выходе_не_утечка(monkeypatch, tmp_path, out, state):
+    real = tmp_path / "real-ip"
+    real.write_text("5.6.7.8", encoding="utf-8")
+    monkeypatch.setattr(probe.paths, "REAL_IP_FILE", str(real))
+    monkeypatch.setattr(probe.Prober, "peer_addrs", lambda self: {})
+    monkeypatch.setattr(probe.Prober, "_exit_info", lambda self: {"ip": "5.6.7.8"})
+    p = probe.Prober()
+    p.set(out=out)
+
+    p._slow_exit()
+
+    assert p.snapshot()["exit_state"] == state
+
+
 def _stop_loop(p, loop):
     p.stop_event.set()
     loop.join(2)

@@ -20,6 +20,9 @@ class _Tunnel:
     def stop(self):
         self.net.up = False
 
+    def out_now(self):
+        return "personal-socks" if self.net.up else ""
+
 
 def _core(monkeypatch, up):
     """Core без службы: туннель и опрос сети подменены одной «сетью»."""
@@ -30,6 +33,7 @@ def _core(monkeypatch, up):
     core.last_error = ""
     core.log_lock = threading.Lock()
     core._paths, core._ip_names = {}, {}
+    core._log_at, core._side_after, core._side_noted = {}, {}, {}
     core.tunnel = _Tunnel(net)
     core.prober = probe.Prober()
     monkeypatch.setattr(core.prober, "probe_fast", lambda: core.prober.set(

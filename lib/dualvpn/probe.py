@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import paths, winnet
+from . import buildconfig, paths, winnet
 
 # Быстрый опрос — несколько WMI-запросов по 10–20 мс (см. winnet). Пока они
 # шли через запуск PowerShell, цикл стоил секунды и приходилось реже.
@@ -231,6 +231,10 @@ class Prober:
             # сказать». Молча считать неизвестность утечкой — значит пугать зря.
             if not ip:
                 state = "unknown"
+            elif self.snapshot().get("out") == buildconfig.DIRECT_TAG:
+                # Личный не работает, служба сама увела выход напрямую: адрес
+                # провайдера тут ожидаем, это не утечка.
+                state = "direct"
             elif ip == peers.get("awg-personal"):
                 state = "tunnel"          # одноногий сервер, адреса совпали
             elif real and ip == real:

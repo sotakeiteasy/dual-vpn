@@ -190,6 +190,8 @@ class Tray:
             return "DualVPN — выключен" + (f" ({err})" if err else "")
         who = st.get("profile") or "personal"
         exit_ip = st.get("exit_ip") or "—"
+        if st.get("out") == "direct":
+            return "DualVPN — запасной выход напрямую: личный не работает"
         if st.get("exit_state") == "leak":
             return f"DualVPN — УТЕЧКА, виден адрес провайдера ({exit_ip})"
         return f"DualVPN — работает · {who} · выход {exit_ip}"
@@ -584,8 +586,8 @@ def _conf_colors(st, corp_probe, checking):
         return last.get("corp") or "off", last.get("personal") or "off"
     if checking or st.get("busy"):
         return "busy", "busy"
-    personal = ("up" if st.get("exit_ip") and st.get("exit_state") != "leak"
-                else "error")
+    personal = ("up" if st.get("exit_ip") and st.get("out") != "direct"
+                and st.get("exit_state") not in ("leak", "direct") else "error")
     if st.get("corp_ip") or st.get("corp_http"):
         corp = "up"
     else:

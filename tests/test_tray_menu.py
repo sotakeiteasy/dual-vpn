@@ -22,9 +22,19 @@ def test_оба_работают_зелёные():
 @pytest.mark.parametrize("st", [
     {**UP, "exit_ip": ""},
     {**UP, "exit_state": "leak"},
+    {**UP, "exit_state": "direct"},
+    {**UP, "out": "direct"},
 ])
-def test_личный_без_выхода_или_с_утечкой_красный(st):
+def test_личный_без_выхода_с_утечкой_или_на_запасном_красный(st):
     assert tray._conf_colors(st, True, False)[1] == "error"
+
+
+def test_запасной_выход_в_подсказке_значка():
+    app = tray.Tray.__new__(tray.Tray)
+    app.status = {**UP, "out": "direct", "exit_state": "direct"}
+
+    assert "запасной выход" in app._title()
+    assert "УТЕЧКА" not in app._title()
 
 
 def test_рабочий_по_http_тоже_зелёный():

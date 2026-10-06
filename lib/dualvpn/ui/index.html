@@ -376,6 +376,9 @@ function render(s) {
   // Корп жив, если ответил хоть кто-то: DNS или сайт. Трей и итог проверки
   // считают так же — иначе окно показывало «молчит» при открытом сайте.
   const up = s.up, corp = !!(s.corp_ip || s.corp_http), leak = s.v6_leak;
+  // Личный не работает, и служба увела выход напрямую: адрес провайдера тогда
+  // ожидаем, это не утечка.
+  const direct = s.out === 'direct' || s.exit_state === 'direct';
 
   // Четыре состояния, а не два: «корп не отвечает» — отдельный случай,
   // при котором личный туннель работает и интернет есть.
@@ -391,12 +394,17 @@ function render(s) {
   // этой ветки заголовок мигал бы «Выключено» или прошлой ошибкой.
   else if (s.busy === 'переподключаю') { cls='warn'; title='Переподключаю';
                   sub='сменилась сеть — поднимаю туннель заново'; }
+  // Сторож перезапускает процесс одного туннеля: up при этом истинный, tun цел.
+  else if (up && (s.busy || '').startsWith('перезапускаю')) { cls='warn'; title='Перезапускаю';
+                  sub=s.busy + ', интернет работает'; }
   else if (leak) { cls='bad';  title='Утечка IPv6';        sub='часть трафика идёт мимо туннеля: ' + leak; }
   // Не поднялся и не просто выключен — показываем причину, а не пустоту.
   else if (!up && s.last_error) { cls='bad'; title='Не запускается'; sub = s.last_error; }
   else if (!up)  { cls='off';  title='Выключено';          sub='туннели не подняты'; }
   // Заголовок обязан отражать все три строки ниже, иначе получается прямое
   // противоречие: сверху «всё работает», а в личном — «мимо туннеля».
+  else if (direct) { cls='warn'; title='Запасной выход';
+                     sub='личный не работает, интернет идёт напрямую'; }
   else if (s.exit_state === 'leak') { cls='bad'; title='Трафик мимо туннеля';
                                       sub='тебя видно адресом провайдера ' + (s.exit_ip || ''); }
   else if (!corp){ cls='warn'; title='Корп не отвечает';   sub='личный туннель работает, интернет есть'; }
@@ -426,9 +434,10 @@ function render(s) {
                       : last[k] === 'error' ? 'выключен · не работал' : 'выключен';
   document.getElementById('tunnels').innerHTML =
     row('личный', up ? (s.exit_ip || '—') : '—',
-        !up ? offChip('personal') : checking ? 'warn' : s.exit_state === 'leak' ? 'bad'
+        !up ? offChip('personal') : direct ? 'bad' : checking ? 'warn' : s.exit_state === 'leak' ? 'bad'
             : s.exit_state === 'tunnel' ? 'ok' : 'off',
-        !up ? offLabel('personal') : checking ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
+        !up ? offLabel('personal') : direct ? 'не работает · выход напрямую'
+            : checking ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
             : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
     row('корп', up ? (s.corp_ip || (s.corp_http ? 'HTTP ' + s.corp_http : '—')) : '—',
         !up ? offChip('corp') : checking ? 'warn' : (corp ? 'ok' : 'bad'),

@@ -56,7 +56,11 @@ def _print_status(st):
           + (f"  !! утечка {st['v6_leak']}" if st.get("v6_leak") else ""))
     if up:
         state = {"tunnel": "через туннель", "leak": "!! УТЕЧКА, адрес провайдера",
+                 "direct": "запасной, напрямую: личный не работает",
                  "unknown": "не удалось проверить"}.get(st.get("exit_state"), "?")
+        # Выход сторож переключает раньше, чем проверка выхода его перемерит.
+        if st.get("out") == "direct":
+            state = "запасной, напрямую: личный не работает"
         print(f"  выход    : {st.get('exit_ip') or '—'} "
               f"{st.get('exit_country') or ''} {st.get('exit_city') or ''} — {state}")
         print(f"  корп-DNS : {st.get('corp_dns') or 'нет'} "
