@@ -259,7 +259,7 @@ class Tunnel:
 
         self.log("→ собираю конфиг из conf\\…")
         try:
-            buildconfig.main()
+            buildconfig.main(log=self.log)
         except SystemExit as exc:
             # buildconfig сообщает об ошибках через sys.exit с текстом.
             return str(exc) or "не удалось собрать конфиг — правь conf\\*.conf"

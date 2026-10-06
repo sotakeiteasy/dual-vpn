@@ -5,9 +5,14 @@
 не падает, а тихо собирает туннель не туда.
 """
 
+import json
+import socket
+import threading
+import time
+
 import pytest
 
-from dualvpn import buildconfig
+from dualvpn import buildconfig, paths
 
 
 CORP = """
@@ -167,6 +172,108 @@ def test_порт_обязан_быть_числом(tmp_path):
     text = CORP.replace("198.51.100.10:51820", "198.51.100.10:не-порт")
     conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", text))
     with pytest.raises(SystemExit):
+        buildconfig.endpoint(conf, "wg-corp", 1280)
+
+
+# ------------------------------------------------------ резолв адреса пира
+
+@pytest.fixture
+def peer(tmp_path, monkeypatch):
+    """Конфиг с именем сервера, файл прошлых адресов во временной папке."""
+    monkeypatch.setattr(paths, "PEER_IPS_FILE", str(tmp_path / "peer-ips.json"))
+    monkeypatch.setattr(buildconfig, "SYSTEM_DNS_WAIT", 0.2)
+    asked = []
+
+    def via(name, server, timeout=4.0):
+        asked.append(server)
+        return ""
+    monkeypatch.setattr(buildconfig.winnet, "resolve4_via", via)
+    text = CORP.replace("198.51.100.10:51820", "vpn.example.com:51820")
+    conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", text))
+    return conf, asked
+
+
+def _system_dns(monkeypatch, answer):
+    def getaddrinfo(name, *a, **kw):
+        if isinstance(answer, Exception):
+            raise answer
+        return [(None, None, None, "", (answer, 0))]
+    monkeypatch.setattr(buildconfig.socket, "getaddrinfo", getaddrinfo)
+
+
+def _known(tmp_path):
+    return json.loads((tmp_path / "peer-ips.json").read_text(encoding="utf-8"))
+
+
+def test_системный_dns_первым_и_адрес_запоминается(peer, monkeypatch, tmp_path):
+    """В корп-сети системный DNS отдаёт внутренний адрес — публичный не спрашиваем."""
+    conf, asked = peer
+    _system_dns(monkeypatch, "10.20.0.1")
+
+    ep = buildconfig.endpoint(conf, "wg-corp", 1280)
+
+    assert ep["peers"][0]["address"] == "10.20.0.1"
+    assert asked == []
+    assert _known(tmp_path) == {"vpn.example.com": "10.20.0.1"}
+
+
+def test_без_системного_dns_адрес_через_публичный(peer, monkeypatch, tmp_path):
+    conf, asked = peer
+    _system_dns(monkeypatch, socket.gaierror(11001, "getaddrinfo failed"))
+    monkeypatch.setattr(buildconfig.winnet, "resolve4_via",
+                        lambda name, server, timeout=4.0:
+                        asked.append(server) or ("" if server == "8.8.8.8" else "203.0.113.9"))
+    lines = []
+
+    ep = buildconfig.endpoint(conf, "wg-corp", 1280, lines.append)
+
+    assert ep["peers"][0]["address"] == "203.0.113.9"
+    assert asked == ["8.8.8.8", "1.1.1.1"]
+    assert "203.0.113.9 через 1.1.1.1" in lines[0]
+    assert _known(tmp_path) == {"vpn.example.com": "203.0.113.9"}
+
+
+def test_зависший_системный_dns_не_держит_дольше_потолка(peer, monkeypatch):
+    """getaddrinfo висел 12 с, пока DNS роутера молчал, — столько стоило переподключение."""
+    conf, asked = peer
+    release = threading.Event()
+    monkeypatch.setattr(buildconfig.socket, "getaddrinfo",
+                        lambda *a, **kw: release.wait(5) and [])
+    monkeypatch.setattr(buildconfig.winnet, "resolve4_via",
+                        lambda name, server, timeout=4.0: "203.0.113.9")
+    started = time.monotonic()
+
+    try:
+        ep = buildconfig.endpoint(conf, "wg-corp", 1280, lambda line: None)
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 2
+    assert ep["peers"][0]["address"] == "203.0.113.9"
+
+
+def test_без_всякого_dns_берётся_прошлый_адрес(peer, monkeypatch, tmp_path):
+    conf, asked = peer
+    (tmp_path / "peer-ips.json").write_text(
+        json.dumps({"vpn.example.com": "10.20.0.1"}), encoding="utf-8")
+    _system_dns(monkeypatch, socket.gaierror(11001, "getaddrinfo failed"))
+    lines = []
+
+    ep = buildconfig.endpoint(conf, "wg-corp", 1280, lines.append)
+
+    assert ep["peers"][0]["address"] == "10.20.0.1"
+    assert asked == ["8.8.8.8", "1.1.1.1"]
+    assert "прошлый адрес 10.20.0.1" in lines[0]
+
+
+@pytest.mark.parametrize("saved", [None, "{битый", '{"vpn.example.com": "не-адрес"}'])
+def test_без_dns_и_прошлого_адреса_сборка_прекращается(peer, monkeypatch, tmp_path, saved):
+    conf, _ = peer
+    if saved is not None:
+        (tmp_path / "peer-ips.json").write_text(saved, encoding="utf-8")
+    _system_dns(monkeypatch, socket.gaierror(11001, "getaddrinfo failed"))
+
+    with pytest.raises(SystemExit, match="vpn.example.com"):
         buildconfig.endpoint(conf, "wg-corp", 1280)
 
 

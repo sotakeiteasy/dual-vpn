@@ -55,7 +55,7 @@ class FakeBuild:
     def __init__(self):
         self.on_main = lambda: None
 
-    def main(self):
+    def main(self, log=print):
         self.on_main()
 
 

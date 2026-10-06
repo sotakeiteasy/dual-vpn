@@ -22,6 +22,7 @@ import socket
 import os
 import re
 import sys
+import threading
 
 # Раскладку знает paths.py — здесь только имена.
 from . import paths, winnet
@@ -229,7 +230,100 @@ def split_list(value):
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
-def endpoint(conf, tag, default_mtu):
+# Сколько ждём системный DNS за адресом пира. Без потолка getaddrinfo висел
+# 12 с, когда DNS роутера не отвечал, — и столько же стояло переподключение.
+SYSTEM_DNS_WAIT = 4.0
+# Запасные DNS, если системный не ответил. Только запасные: в корп-сети
+# системный отдаёт внутренний адрес пира, а публичный оттуда молчит.
+PUBLIC_DNS = ("8.8.8.8", "1.1.1.1")
+
+
+def _resolve_system(name):
+    """A-запись через системный DNS, не дольше SYSTEM_DNS_WAIT.
+
+    getaddrinfo не прервать, поэтому он идёт в фоновом потоке: зависший
+    поток доживёт своё сам, а сборка пойдёт дальше по запасным путям.
+    """
+    box = []
+
+    def run():
+        try:
+            box.append(socket.getaddrinfo(name, None, socket.AF_INET)[0][4][0])
+        except (OSError, IndexError) as exc:
+            box.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(SYSTEM_DNS_WAIT)
+    if not box:
+        raise TimeoutError(f"системный DNS молчит {SYSTEM_DNS_WAIT:g} с")
+    if isinstance(box[0], Exception):
+        raise OSError(str(box[0]))
+    return box[0]
+
+
+def _known_peer_ips():
+    """Последние удачные адреса пиров: {имя: IPv4}."""
+    try:
+        with open(paths.PEER_IPS_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for name, ip in data.items():
+        try:
+            if isinstance(ip, str) and ipaddress.ip_address(ip).version == 4:
+                out[name] = ip
+        except ValueError:
+            pass
+    return out
+
+
+def _remember_peer_ip(name, ip):
+    """Запоминает удачный адрес. Не вышло записать — не беда, сборка важнее."""
+    known = _known_peer_ips()
+    if known.get(name) == ip:
+        return
+    known[name] = ip
+    tmp = paths.PEER_IPS_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(known, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, paths.PEER_IPS_FILE)
+    except OSError:
+        pass
+
+
+def resolve_peer(name, tag, log=print):
+    """Адрес пира: системный DNS, затем публичный, затем прошлый удачный.
+
+    Без запасных путей переподключение зависело от DNS роутера: тот молчал,
+    и туннель не поднимался, хотя адрес сервера не менялся месяцами.
+    """
+    try:
+        ip = _resolve_system(name)
+    except OSError as exc:
+        for server in PUBLIC_DNS:
+            ip = winnet.resolve4_via(name, server)
+            if ip:
+                log(f"  [{tag}] {name}: системный DNS не ответил ({exc}), "
+                    f"{ip} через {server}")
+                break
+        else:
+            ip = _known_peer_ips().get(name)
+            if not ip:
+                sys.exit(f"[{tag}] не удалось резолвить {name}: {exc}; "
+                         f"публичный DNS не ответил, прошлого адреса нет")
+            log(f"  [{tag}] {name}: ни один DNS не ответил ({exc}), "
+                f"беру прошлый адрес {ip}")
+            return ip
+    _remember_peer_ip(name, ip)
+    return ip
+
+
+def endpoint(conf, tag, default_mtu, log=print):
     """Строит sing-box endpoint из разобранного .conf."""
     iface, peer = conf["interface"], conf["peer"]
 
@@ -247,10 +341,7 @@ def endpoint(conf, tag, default_mtu):
     # момент не поднят, и упадёт с "context deadline exceeded".
     if not re.match(r"^[\d.]+$", host) and ":" not in host:
         name = host
-        try:
-            host = socket.getaddrinfo(name, None, socket.AF_INET)[0][4][0]
-        except OSError as exc:
-            sys.exit(f"[{tag}] не удалось резолвить {name}: {exc}")
+        host = resolve_peer(name, tag, log)
 
         # НЕ подменять частный адрес публичным. Корп-сервер доступен по
         # внутреннему адресу (имя из конфига -> адрес внутри сети), и именно на
@@ -265,7 +356,7 @@ def endpoint(conf, tag, default_mtu):
             pub = winnet.resolve4_via(name, "8.8.8.8") or \
                   winnet.resolve4_via(name, "1.1.1.1")
             if pub:
-                print(f"  [{tag}] {name}: {host} -> публичный {pub}")
+                log(f"  [{tag}] {name}: {host} -> публичный {pub}")
                 host = pub
 
     ep = {
@@ -417,7 +508,7 @@ def log_level():
     return level if level in LOG_LEVELS else "info"
 
 
-def main():
+def main(log=print):
     os.makedirs(STATE, exist_ok=True)
     out_path = os.path.join(STATE, "config.json")
 
@@ -446,8 +537,8 @@ def main():
     # nl-1 рукопожатие проходило, а данные не пролезали — туннель выглядел
     # поднятым, но интернета не было. Конфиги со своим MTU (personal.conf)
     # это не затрагивает: там значение берётся из файла.
-    ep_personal = endpoint(personal, "awg-personal", 1280)
-    ep_corp = endpoint(corp, "wg-corp", 1280)
+    ep_personal = endpoint(personal, "awg-personal", 1280, log)
+    ep_corp = endpoint(corp, "wg-corp", 1280, log)
 
     # Переключатели для диагностики, без правки файлов:
     #   SB_STACK=system|gvisor|mixed   сетевой стек tun

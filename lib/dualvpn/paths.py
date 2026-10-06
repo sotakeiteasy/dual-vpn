@@ -69,6 +69,9 @@ CONFIG_JSON = os.path.join(STATE, "config.json")
 STATUS_JSON = os.path.join(STATE, "status.json")
 PROFILE_FILE = os.path.join(STATE, "profile")
 REAL_IP_FILE = os.path.join(STATE, "real-ip")
+# Последние удачные адреса пиров {имя: IPv4}: запасной путь, когда не отвечает
+# ни один DNS. Адрес сервера не секрет, поэтому в state\, а не в conf\.
+PEER_IPS_FILE = os.path.join(STATE, "peer-ips.json")
 
 # Журнал того, что мы навесили на систему: единственный источник правды для
 # уборки. Переживает и падение службы, и перезагрузку, поэтому «аварийно
