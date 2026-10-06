@@ -27,8 +27,8 @@ from . import buildconfig, paths, winnet
 # Быстрый опрос — несколько WMI-запросов по 10–20 мс (см. winnet). Пока они
 # шли через запуск PowerShell, цикл стоил секунды и приходилось реже.
 FAST_EVERY = 2.0
-# Сколько check_now ждёт уже идущую проверку: при плохой сети она до ~30 с —
-# столько стоит адрес выхода со всеми запасными сервисами.
+# Сколько check_now ждёт уже идущую проверку: при плохой сети она до ~12 с —
+# столько стоит корп-HTTPS с повтором; запас — на медленный резолв имён.
 CHECK_WAIT = 40.0
 # Корп-проверка: пакет через WireGuard теряется и при живом туннеле, поэтому
 # одна неудача ещё не «молчит» — повторяем. Попытки короче прежних 12 с, и
@@ -46,6 +46,30 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _from_ipinfo(text):
+    """JSON-объект или {}: при 429 сервисы отвечают и текстом, и числом."""
+    try:
+        data = json.loads(text or "{}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _from_ipwho(text):
+    """Ответ ipwho.is — в поля ipinfo."""
+    raw = _from_ipinfo(text)
+    if not raw.get("ip"):
+        return {}
+    return {"ip": raw["ip"], "country": raw.get("country_code", ""),
+            "city": raw.get("city", ""),
+            "org": (raw.get("connection") or {}).get("org", "")}
+
+
+def _from_plain(text):
+    """Голый адрес без страны."""
+    return {"ip": text} if re.match(r"^[\d.]+$", text or "") else {}
+
+
 class Prober:
     def __init__(self, log=None):
         # Журнал службы: итог сетевой проверки нужен рядом со строками сторожа,
@@ -54,7 +78,7 @@ class Prober:
         self.st = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        # При плохой сети probe_slow идёт до ~30 с (самая долгая часть). Без
+        # При плохой сети probe_slow идёт до ~12 с (самая долгая часть). Без
         # флага проверка по запросу и проверка на подъёме туннеля шли бы
         # разом и наперегонки писали exit_ip — следующая ждёт, пока
         # закончится эта.
@@ -149,25 +173,27 @@ class Prober:
         Выход VPN — общий адрес на многих клиентов, и ipinfo.io с него быстро
         начинает отвечать 429 Too Many Requests. С одним сервисом адрес выхода
         тогда не определялся никогда, и окно вечно показывало «проверяю».
+
+        Спрашиваем все разом, берём первый годный по порядку: со страной
+        лучше голого адреса. По очереди таймауты складывались до 28 с.
         """
-        try:
-            info = json.loads(self._get("https://ipinfo.io/json", 8) or "{}")
-            if info.get("ip"):
-                return info
-        except ValueError:
-            pass
-        try:
-            raw = json.loads(self._get("https://ipwho.is/", 8) or "{}")
-            if raw.get("ip"):
-                return {"ip": raw["ip"], "country": raw.get("country_code", ""),
-                        "city": raw.get("city", ""),
-                        "org": (raw.get("connection") or {}).get("org", "")}
-        except ValueError:
-            pass
-        for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
-            ip = self._get(url, 6)
-            if re.match(r"^[\d.]+$", ip or ""):
-                return {"ip": ip}
+        asks = (("https://ipinfo.io/json", 8, _from_ipinfo),
+                ("https://ipwho.is/", 8, _from_ipwho),
+                ("https://api.ipify.org", 6, _from_plain),
+                ("https://ifconfig.me/ip", 6, _from_plain))
+        got = [{} for _ in asks]
+
+        def ask(i, url, timeout, parse):
+            got[i] = parse(self._get(url, timeout))
+
+        threads = [threading.Thread(target=ask, args=(i, *item), daemon=True)
+                   for i, item in enumerate(asks)]
+        for t in threads:
+            t.start()
+        for i, t in enumerate(threads):
+            t.join()
+            if got[i].get("ip"):
+                return got[i]
         return {}
 
     def probe_slow(self):

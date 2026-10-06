@@ -180,6 +180,53 @@ def test_части_probe_slow_идут_параллельно_а_не_скла�
                                "_slow_exit", "_slow_v6"]
 
 
+def _exit_services(monkeypatch, answers):
+    """Сервисы адреса выхода без сети: url → (через сколько, ответ)."""
+    def get(url, _timeout):
+        wait, text = answers.get(url, (0.0, ""))
+        time.sleep(wait)
+        return text
+
+    monkeypatch.setattr(probe.Prober, "_get", staticmethod(get))
+
+
+def test_сервисы_выхода_спрашиваются_разом_а_не_по_очереди(monkeypatch):
+    _exit_services(monkeypatch, {
+        "https://ipinfo.io/json": (0.3, ""),
+        "https://ipwho.is/": (0.3, "429"),
+        "https://api.ipify.org": (0.3, ""),
+        "https://ifconfig.me/ip": (0.3, "5.6.7.8"),
+    })
+
+    t0 = time.monotonic()
+    info = probe.Prober()._exit_info()
+
+    assert info == {"ip": "5.6.7.8"}
+    assert time.monotonic() - t0 < 0.9
+
+
+def test_быстрый_голый_адрес_не_перебивает_адрес_со_страной(monkeypatch):
+    _exit_services(monkeypatch, {
+        "https://ipinfo.io/json": (0.2, '{"ip": "1.2.3.4", "country": "NL"}'),
+        "https://api.ipify.org": (0.0, "1.2.3.4"),
+    })
+
+    info = probe.Prober()._exit_info()
+
+    assert info == {"ip": "1.2.3.4", "country": "NL"}
+
+
+def test_ipwho_разбирается_в_поля_ipinfo(monkeypatch):
+    _exit_services(monkeypatch, {
+        "https://ipwho.is/": (0.0, '{"ip": "1.2.3.4", "country_code": "NL", '
+                                   '"city": "Amsterdam", "connection": {"org": "AS1"}}'),
+    })
+
+    info = probe.Prober()._exit_info()
+
+    assert info == {"ip": "1.2.3.4", "country": "NL", "city": "Amsterdam", "org": "AS1"}
+
+
 def _slow_parts(monkeypatch, up=True, **st):
     """Части probe_slow без сети: каждая кладёт в снимок свою долю st.
     Быстрый опрос после них видит туннель поднятым, если up."""
