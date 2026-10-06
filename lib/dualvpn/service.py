@@ -117,6 +117,11 @@ class Core:
     # Сколько ещё попыток поднять туннель после неудачного переподключения.
     # Команда человека (start/stop) их отменяет: он уже решил сам.
     _retry_left = 0
+    # Номер последней команды человека и тот, что сторож видел в начале круга:
+    # круг ждёт проверок по нескольку секунд, и решение, принятое до «Выключить»,
+    # после него уже не в силе.
+    _human = 0
+    _round_human = 0
 
     # Таймауты (время, тег, адрес) за DEAD_WINDOW.
     _dead_hits = ()
@@ -337,7 +342,10 @@ class Core:
             # после неё: поднятый тогда туннель уже некому было бы снять.
             if reconnect and self.prober.stop_event.is_set():
                 return {"ok": False, "error": "служба останавливается"}
+            if reconnect and self._round_human != self._human:
+                return {"ok": False, "error": "человек уже решил сам"}
             if not reconnect:
+                self._human += 1
                 self._retry_left = 0
             self.busy = "переподключаю" if reconnect else "включаю"
             if reconnect:
@@ -371,6 +379,7 @@ class Core:
         if not self.lock.acquire(blocking=False):
             return {"ok": False, "error": f"уже идёт: {self.busy or 'операция'}"}
         try:
+            self._human += 1
             self._retry_left = 0
             self.busy = "выключаю"
             self._flush_paths()
@@ -417,6 +426,7 @@ class Core:
         какую новую сеть видим, сколько кругов подряд и когда следующий повтор."""
         if self.busy:
             return None, 0, retry_at
+        self._round_human = self._human
         st = self.prober.snapshot()
         cur = (st.get("iface"), st.get("gw") or "")
         had = self.tunnel.uplink
@@ -427,7 +437,9 @@ class Core:
             if had:                       # туннель уже подняли — повторы не нужны
                 self._retry_left = 0
             elif cur[1] and time.monotonic() >= retry_at:
-                self._retry_left -= 1
+                # Не ниже нуля: «Выключить» между проверкой и уменьшением обнуляет
+                # счётчик, и -1 взводил бы повторы без конца.
+                self._retry_left = max(self._retry_left - 1, 0)
                 self.log(f"→ ещё раз поднимаю туннель: повтор "
                          f"{RECONNECT_TRIES - self._retry_left} из {RECONNECT_TRIES}")
                 retry_at = self._reconnect(retries=0)
@@ -612,7 +624,8 @@ class Core:
         if not self.lock.acquire(blocking=False):
             return
         try:
-            if self.tunnel.uplink is None or self.prober.stop_event.is_set():
+            if (self.tunnel.uplink is None or self.prober.stop_event.is_set()
+                    or self._round_human != self._human):
                 return
             self.busy = f"перезапускаю {side.title} туннель"
             err = self.tunnel.restart_side(side)

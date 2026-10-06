@@ -274,6 +274,44 @@ def test_выключение_человеком_отменяет_повторы
     assert core.tunnel.starts == 1
 
 
+def test_выключение_посреди_круга_новую_сеть_не_включает(monkeypatch):
+    core = _core(monkeypatch)
+    _net(core, HOME)
+    state = _rounds(core, service.UPLINK_SETTLE - 1)
+    # Последний круг ждёт проверку личного, а человек тем временем выключает.
+    core.tunnel.out = buildconfig.DIRECT_TAG
+    monkeypatch.setattr(core.tunnel, "delay", lambda _tag: core._do_stop() and None)
+
+    _rounds(core, 1, state)
+
+    assert core.tunnel.starts == 0
+    assert core.tunnel.uplink is None
+
+
+def test_выключение_между_проверкой_и_повтором_повторы_не_зацикливает(monkeypatch):
+    core = _core(monkeypatch)
+    core.tunnel.fail = True
+    _net(core, HOME)
+    state = _rounds(core, service.UPLINK_SETTLE)
+    starts = core.tunnel.starts
+    real = service.time.monotonic
+    stopped = []
+
+    def monotonic():
+        # «Выключить» успевает между проверкой счётчика повторов и его уменьшением.
+        if not stopped:
+            stopped.append(core._do_stop())
+        return real()
+
+    monkeypatch.setattr(service, "time", type(
+        "T", (), {"monotonic": staticmethod(monotonic), "time": service.time.time}))
+
+    _rounds(core, service.RECONNECT_TRIES * 3, state)
+
+    assert core.tunnel.starts == starts
+    assert core._retry_left == 0
+
+
 def test_после_остановки_службы_туннель_не_поднимается(monkeypatch):
     core = _core(monkeypatch)
     core.tunnel.proc = _Proc()
@@ -470,6 +508,23 @@ def test_выключение_посреди_круга_перезапуск_н�
     core = _core(monkeypatch)
     core.tunnel.corp.proc = _Proc()
     core.lock.acquire()                          # идёт «Выключить»
+
+    _rounds(core, 1)
+
+    assert core.tunnel.restarts == []
+
+
+def test_выключил_и_включил_посреди_круга_новый_туннель_не_перезапускает(monkeypatch):
+    core = _core(monkeypatch)
+    core.tunnel.out = buildconfig.DIRECT_TAG
+
+    def delay(_tag):
+        # Пока круг ждёт проверку личного, человек выключает и включает снова.
+        core._do_stop()
+        core._do_start()
+        return None
+
+    monkeypatch.setattr(core.tunnel, "delay", delay)
 
     _rounds(core, 1)
 
