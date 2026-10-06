@@ -172,6 +172,22 @@ def test_порт_обязан_быть_числом(tmp_path):
 
 # ---------------------------------------------------------------- DNS
 
+def test_корп_dns_по_tcp_через_корп_туннель():
+    """По UDP ответы корп-DNS терялись, и запрос висел до таймаута sing-box."""
+    servers, rules = buildconfig.dns_section(["10.0.0.53"], ["corp.example"])
+
+    assert servers[0] == {"type": "tcp", "tag": "dns-corp",
+                          "server": "10.0.0.53", "detour": "wg-corp"}
+    assert servers[1]["tag"] == "dns-personal"
+    assert rules == [{"domain_suffix": ["corp.example"], "server": "dns-corp"}]
+
+
+def test_без_корп_dns_только_личный():
+    servers, rules = buildconfig.dns_section([], ["corp.example"])
+    assert [s["tag"] for s in servers] == ["dns-personal"]
+    assert rules == []
+
+
 def test_числовой_endpoint_не_даёт_доменов(tmp_path):
     """Иначе домен сервера пошёл бы резолвиться через корп-DNS, который
     доступен только когда туннель уже поднят — замкнутый круг."""

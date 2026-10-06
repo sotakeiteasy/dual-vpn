@@ -364,6 +364,29 @@ def dns_domains(conf):
     return domains
 
 
+def dns_section(corp_dns, domains):
+    """Серверы и правила DNS: корп-домены — в корп-DNS, остальное — 8.8.8.8.
+
+    Корп-DNS спрашиваем по TCP. По UDP sing-box держит к нему один сокет
+    через wg-corp; ответы на нём терялись (больше половины запросов шли
+    3–10 с), и новый сокет sing-box открывал только по таймауту — клиент
+    Windows к этому времени уже отвечал «хост не найден». У TCP потеря
+    пакета — повтор через доли секунды, а не таймаут всего запроса.
+    """
+    servers = [{
+        "type": "udp", "tag": "dns-personal",
+        "server": "8.8.8.8", "detour": "awg-personal",
+    }]
+    rules = []
+    if corp_dns:
+        servers.insert(0, {
+            "type": "tcp", "tag": "dns-corp",
+            "server": corp_dns[0], "detour": "wg-corp",
+        })
+        rules.append({"domain_suffix": domains, "server": "dns-corp"})
+    return servers, rules
+
+
 # Частные диапазоны: всё, что не отдано корпу, ходит напрямую.
 LOCAL_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
               "169.254.0.0/16", "224.0.0.0/4"]
@@ -533,17 +556,7 @@ def main():
         if not endpoint_host.endswith(d.lower())
     )
 
-    dns_servers = [{
-        "type": "udp", "tag": "dns-personal",
-        "server": "8.8.8.8", "detour": "awg-personal",
-    }]
-    dns_rules = []
-    if corp_dns:
-        dns_servers.insert(0, {
-            "type": "udp", "tag": "dns-corp",
-            "server": corp_dns[0], "detour": "wg-corp",
-        })
-        dns_rules.append({"domain_suffix": domains, "server": "dns-corp"})
+    dns_servers, dns_rules = dns_section(corp_dns, domains)
 
     config = {
         "log": {"level": log_level(), "timestamp": True},
