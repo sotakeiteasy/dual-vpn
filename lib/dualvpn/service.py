@@ -50,11 +50,13 @@ RECONNECT_GAP = 10.0
 DEAD_RE = re.compile(
     r"ERROR .*open connection to (\S+) "
     r"using (?:outbound|endpoint)/wireguard\[([^\]]+)\]: context deadline exceeded")
-# Таймауты в журнале бывают и при живом корпе (6 октября в 12:03 перезапуск
+# Таймауты в журнале бывают и при живом туннеле (6 октября в 12:03 перезапуск
 # порвал оба туннеля, а человек видел, что всё работает): прежде чем
-# перезапускать, сторож сам спрашивает корп-DNS через туннель.
+# перезапускать, сторож сам спрашивает корп-DNS или задержку через socks личного.
+# Адреса не считаем: 6 октября в 13:25 оба туннеля молчали три минуты, а таймауты
+# шли к одному адресу (проверка сети Windows, корп-DNS) — порог «два разных»
+# сторожа не будил, и интернет стоял.
 DEAD_HITS = 3
-DEAD_ADDRS = 2
 DEAD_WINDOW = 60.0
 DEAD_GAP = 60.0
 # Пока выход идёт напрямую, личный проверяем задержкой через его socks не чаще
@@ -499,7 +501,7 @@ class Core:
 
     def _dead_tunnels(self, lines):
         """{тег: таймауты (время круга, тег, адрес)} туннелей, через которые за
-        DEAD_WINDOW не открылось DEAD_HITS соединений к хотя бы DEAD_ADDRS разным адресам.
+        DEAD_WINDOW не открылось DEAD_HITS соединений.
         Паузу DEAD_GAP не смотрит: это решает сторож."""
         now = time.monotonic()
         hits = [h for h in self._dead_hits if now - h[0] < DEAD_WINDOW]
@@ -511,7 +513,7 @@ class Core:
         dead = {}
         for tag in {h[1] for h in hits}:
             mine = [h for h in hits if h[1] == tag]
-            if len(mine) >= DEAD_HITS and len({h[2] for h in mine}) >= DEAD_ADDRS:
+            if len(mine) >= DEAD_HITS:
                 dead[tag] = mine
         return dead
 
@@ -531,6 +533,13 @@ class Core:
             # нет, и таймаутов в журнале не будет.
             stuck = side is personal and carries is False
             if side.alive() and not hits and not stuck:
+                continue
+            if (side is personal and hits and not stuck and side.alive()
+                    and out != buildconfig.DIRECT_TAG
+                    and self.tunnel.delay(buildconfig.PERSONAL_SOCKS_TAG) is not None):
+                # Лежит чужой адрес, а не туннель: выход не трогаем.
+                self._dead_hits = tuple(h for h in self._dead_hits
+                                        if h[1] != side.tag)
                 continue
             if side is personal and out != buildconfig.DIRECT_TAG:
                 # Выход уводим сразу, без паузы: интернет не должен ждать перезапуска.

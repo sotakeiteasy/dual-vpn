@@ -298,15 +298,29 @@ def test_таймауты_в_основном_журнале_туннель_не
     assert core.tunnel.restarts == [] and core.tunnel.starts == 0
 
 
-def test_таймауты_к_одному_адресу_не_перезапускают(monkeypatch, tmp_path):
-    """Лежит один сайт, а не туннель."""
+def test_таймауты_к_одному_адресу_при_живой_задержке_не_трогают(monkeypatch, tmp_path):
+    """Лежит один сайт, а не туннель: личный отвечает через свой socks."""
     core = _core(monkeypatch)
+    core.tunnel.delay_ms = 120
     log = _side_log(core, tmp_path)
     _append(log, *[_timeout("160.79.104.10:443")] * 5)
 
     _rounds(core, 3)
 
-    assert core.tunnel.restarts == []
+    assert core.tunnel.restarts == [] and core.tunnel.outs == []
+
+
+def test_таймауты_к_одному_адресу_без_задержки_уводят_выход_и_перезапускают(
+        monkeypatch, tmp_path):
+    """13:25 6 октября: таймауты шли к одному адресу, личный молчал."""
+    core = _core(monkeypatch)
+    log = _side_log(core, tmp_path)
+    _append(log, *[_timeout("2.16.106.32:80")] * 3)
+
+    _rounds(core, 1)
+
+    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.outs == [buildconfig.DIRECT_TAG]
 
 
 def test_таймауты_разных_туннелей_не_складываются(monkeypatch, tmp_path):
