@@ -143,6 +143,8 @@ class Core:
     def start(self):
         paths.ensure_dirs()
         self.log(f"=== служба запущена, версия {paths.version()} ===")
+        # Запасного пути через PowerShell нет: каждый отказ WMI и COM — в журнал.
+        winnet.on_error = lambda msg: self.log(f"!! {msg}")
         self._migrate()
         threading.Thread(target=self.prober.run, daemon=True).start()
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -163,7 +165,6 @@ class Core:
         with self.lock:
             self._flush_paths()
             self.tunnel.stop()
-        winnet.PS.close()
 
     # ----------------------------------------------------------- автозапуск
 
