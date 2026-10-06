@@ -467,14 +467,83 @@ def nrpt_namespaces(domains):
     return out
 
 
+_NRPT_CLEAR_PS = (
+    "Get-DnsClientNrptRule -ErrorAction SilentlyContinue"
+    f" | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }}"
+    " | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue"
+)
+
+
+def _wmi_dns():
+    """Подключение к root/Microsoft/Windows/DNS, своё на каждый поток.
+
+    Там живут классы командлетов DnsClient: Add-DnsClientNrptRule — обёртка
+    над PS_DnsClientNrptRule.Add, только с запуском PowerShell и загрузкой
+    модуля, а это ~1.7 с на вызов против десятков мс напрямую.
+    """
+    svc = getattr(_tls, "wmi_dns", None)
+    if svc is None:
+        _wmi()                      # CoInitialize в этом потоке
+        import win32com.client
+        svc = win32com.client.GetObject("winmgmts:root/Microsoft/Windows/DNS")
+        _tls.wmi_dns = svc
+    return svc
+
+
+def _nrpt_call(method, **args):
+    """Статический метод PS_DnsClientNrptRule: Get, Add или Remove.
+
+    Для Get — список правил (у каждого .Name и .Comment), для остальных —
+    пустой список. None — WMI не ответил или метод вернул ошибку.
+    Правила только через Get: перечисление класса запросом их не видит.
+    """
+    global last_error
+    try:
+        cls = _wmi_dns().Get("PS_DnsClientNrptRule")
+        params = cls.Methods_(method).InParameters.SpawnInstance_()
+        for name, value in args.items():
+            params.Properties_.Item(name).Value = value
+        out = cls.ExecMethod_(method, params)
+        # Add и Remove без PassThru выходных параметров не отдают вовсе:
+        # None здесь — успех, сбой метода приходит исключением COM. Пустой
+        # выход Get по той же причине значит «правил нет».
+        if out is not None and out.ReturnValue:
+            last_error = f"WMI: PS_DnsClientNrptRule.{method} вернул {out.ReturnValue}"
+            return None
+        if method != "Get" or out is None:
+            return []
+        return list(out.Properties_.Item("cmdletOutput").Value or ())
+    except Exception as exc:                               # noqa: BLE001
+        last_error = f"WMI: {exc}"
+        _tls.wmi_dns = None
+        return None
+
+
+def _nrpt_clear_wmi():
+    """Снимает наши правила через WMI. False — WMI не справился."""
+    rules = _nrpt_call("Get")
+    if rules is None:
+        return False
+    ours = [r.Name for r in rules if r.Comment == NRPT_COMMENT]
+    return all(_nrpt_call("Remove", Name=name, Force=True) is not None
+               for name in ours)
+
+
 def nrpt_set(domains, server):
     """Ставит правило «домены → DNS туннеля». Идемпотентно, True — если встало."""
-    nrpt_clear()
     names = nrpt_namespaces(domains)
     if not names or not re.match(r"^[\d.]+$", str(server)):
+        nrpt_clear()
         return False
+    if _nrpt_clear_wmi() and _nrpt_call(
+            "Add", Namespace=names, NameServers=[server],
+            Comment=NRPT_COMMENT) is not None:
+        return True
+    # WMI не справился — снятие и постановка одним PowerShell, не двумя:
+    # каждый запуск с модулем DnsClient стоит ~1.7 с.
     quoted = ",".join(f"'{n}'" for n in names)
     out = PS.run(
+        _NRPT_CLEAR_PS + "\n"
         "$ErrorActionPreference='Stop'\n"
         f"Add-DnsClientNrptRule -Namespace {quoted} -NameServers '{server}'"
         f" -Comment '{NRPT_COMMENT}' | Out-Null\n"
@@ -485,11 +554,8 @@ def nrpt_set(domains, server):
 
 def nrpt_clear():
     """Снимает наши правила — по комментарию, чужие NRPT не трогаем."""
-    PS.run(
-        "Get-DnsClientNrptRule -ErrorAction SilentlyContinue"
-        f" | Where-Object {{ $_.Comment -eq '{NRPT_COMMENT}' }}"
-        " | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue"
-    )
+    if not _nrpt_clear_wmi():
+        PS.run(_NRPT_CLEAR_PS)
 
 
 # ----------------------------------------------------------------- IPv6

@@ -23,6 +23,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from . import buildconfig, paths, winnet
 
@@ -379,7 +380,12 @@ class Tunnel:
         # Туннели — до основного: тот сразу начнёт отдавать им трафик
         # и DNS в socks. Упал туннель — включение идёт дальше: без корпа работает
         # интернет, без личного — выход напрямую, а упавший поднимет сторож.
-        side_err = {side.kind: self._start_side(side) for side in self.sides}
+        # Оба сразу: каждый ждёт свой socks ~0.8 с, по очереди ожидания
+        # складывались. Журналы у них разные, общего состояния нет; map
+        # пробрасывает исключение потока сюда, как и при запуске по очереди.
+        with ThreadPoolExecutor(len(self.sides)) as pool:
+            side_err = dict(zip([side.kind for side in self.sides],
+                                pool.map(self._start_side, self.sides)))
         for side in self.sides:
             self._report_side(side, side_err[side.kind])
 

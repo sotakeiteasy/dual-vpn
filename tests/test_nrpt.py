@@ -3,8 +3,17 @@
 
 import json
 
+import pytest
+
 from dualvpn import paths, winnet
 from dualvpn.tunnel import Tunnel
+
+
+@pytest.fixture(autouse=True)
+def no_wmi(monkeypatch):
+    """По умолчанию WMI «не отвечает»: прогон на Windows не должен трогать
+    живое правило туннеля. Тесты пути через WMI подменяют его сами."""
+    monkeypatch.setattr(winnet, "_nrpt_call", lambda method, **args: None)
 
 
 def test_домены_становятся_суффиксами_nrpt():
@@ -52,6 +61,71 @@ def test_nrpt_set_ставит_правило_на_dns_туннеля(monkeypatc
     add = next(c for c in calls if "Add-DnsClientNrptRule" in c)
     assert "'.corp.example'" in add and f"'{paths.TUN_DNS}'" in add
     assert "-Comment 'DualVPN'" in add
+
+
+class FakeNrptWmi:
+    """PS_DnsClientNrptRule: правила в памяти, вызовы методов — в журнал."""
+
+    def __init__(self, rules=()):
+        self.rules = list(rules)
+        self.calls = []
+
+    def __call__(self, method, **args):
+        self.calls.append((method, args))
+        if method == "Get":
+            return list(self.rules)
+        if method == "Remove":
+            self.rules = [r for r in self.rules if r.Name != args["Name"]]
+        if method == "Add":
+            self.rules.append(Rule("{new}", args["Comment"]))
+        return []
+
+
+class Rule:
+    def __init__(self, name, comment):
+        self.Name, self.Comment = name, comment
+
+
+def test_nrpt_set_через_wmi_без_powershell(monkeypatch):
+    """PowerShell с модулем DnsClient стоил ~1.7 с на вызов, включение ждало два."""
+    wmi = FakeNrptWmi([Rule("{old}", "DualVPN"), Rule("{чужое}", "Corp IT")])
+    monkeypatch.setattr(winnet, "_nrpt_call", wmi)
+    ps = []
+    monkeypatch.setattr(winnet.PS, "run", lambda script, timeout=30: ps.append(script) or "")
+
+    assert winnet.nrpt_set(["corp.example"], paths.TUN_DNS) is True
+
+    assert ps == []
+    assert ("Remove", {"Name": "{old}", "Force": True}) in wmi.calls
+    assert ("Add", {"Namespace": [".corp.example"], "NameServers": [paths.TUN_DNS],
+                    "Comment": "DualVPN"}) in wmi.calls
+    assert [r.Name for r in wmi.rules] == ["{чужое}", "{new}"]
+
+
+def test_nrpt_clear_через_wmi_снимает_только_свои(monkeypatch):
+    wmi = FakeNrptWmi([Rule("{a}", "DualVPN"), Rule("{b}", "Corp IT")])
+    monkeypatch.setattr(winnet, "_nrpt_call", wmi)
+    ps = []
+    monkeypatch.setattr(winnet.PS, "run", lambda script, timeout=30: ps.append(script) or "")
+
+    winnet.nrpt_clear()
+
+    assert ps == []
+    assert [r.Name for r in wmi.rules] == ["{b}"]
+
+
+def test_nrpt_set_без_wmi_снимает_и_ставит_одним_powershell(monkeypatch):
+    calls = []
+    monkeypatch.setattr(winnet.PS, "run",
+                        lambda script, timeout=30: calls.append(script) or "ok")
+
+    assert winnet.nrpt_set(["corp.example"], paths.TUN_DNS) is True
+
+    assert len(calls) == 1
+    clear, add = (calls[0].index("Remove-DnsClientNrptRule"),
+                  calls[0].index("Add-DnsClientNrptRule"))
+    assert clear < add
+    assert "$_.Comment -eq 'DualVPN'" in calls[0]
 
 
 def test_nrpt_clear_снимает_только_свои_по_комментарию(monkeypatch):

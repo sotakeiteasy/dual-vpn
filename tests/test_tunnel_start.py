@@ -257,15 +257,36 @@ def test_проверяются_все_конфиги_и_туннели_стар
 
     assert tun.start() == ""
 
-    assert seen["checked"] == [paths.CONFIG_JSON, paths.CORP_JSON,
-                               paths.PERSONAL_JSON]
-    assert seen["started"] == [paths.CORP_JSON, paths.PERSONAL_JSON,
-                               paths.CONFIG_JSON]
-    assert seen["socks"] == [1080, 1081]
+    assert sorted(seen["checked"]) == sorted(
+        [paths.CONFIG_JSON, paths.CORP_JSON, paths.PERSONAL_JSON])
+    # Туннели стартуют вместе, порядок между ними не задан; основной — после.
+    assert sorted(seen["started"][:2]) == sorted(
+        [paths.CORP_JSON, paths.PERSONAL_JSON])
+    assert seen["started"][2:] == [paths.CONFIG_JSON]
+    assert sorted(seen["socks"]) == [1080, 1081]
     for side in tun.sides:
         assert side.log_start[0].startswith(paths.LOGS)
         assert f"{side.kind}-" in side.log_start[0]
     assert "vpn-" in tun.log_start[0]
+
+
+def _no_net(_url, timeout=None):
+    raise OSError("нет сети")
+
+
+def test_туннели_ждут_свой_socks_одновременно(env, monkeypatch):
+    """По очереди ожидания складывались: ~0.8 с включения на каждый процесс."""
+    tun, _build, seen = env
+    seen["socks_open"] = False
+    monkeypatch.setattr(tunnel, "SIDE_WAIT", 1.0)
+    monkeypatch.setattr(tun, "set_out", lambda _tag: True)
+    monkeypatch.setattr(urllib.request, "urlopen", _no_net)
+
+    began = time.time()
+    assert tun.start() == ""
+
+    # Порознь — два SIDE_WAIT (2 с), вместе — один.
+    assert time.time() - began < 1.7
 
 
 def test_порт_открыт_только_когда_его_слушают():
