@@ -545,8 +545,15 @@ class Tray:
             "dualvpn", _icon_image("off"), f"DualVPN {paths.version()}",
             menu=self._menu())
         self._hook_menu()
+        self.icon.run(setup=self._setup)
+
+    def _setup(self, icon):
+        """Опрос — только после показа значка. pystray ставит видимость не
+        разом: собирает картинку, показывает, и лишь потом visible=True.
+        Опрос, сменивший цвет в этом окне, терял картинку: значок оставался
+        серым при работающем VPN, а следующие опросы цвет уже не меняли."""
+        icon.visible = True
         threading.Thread(target=self.poll, daemon=True).start()
-        self.icon.run()
 
 
 def _clip(text, limit):

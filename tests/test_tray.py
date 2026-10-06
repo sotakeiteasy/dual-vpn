@@ -160,6 +160,24 @@ def test_после_включения_значок_зелёный_без_ожи
     assert _wait_state(t, "up") == "up"
 
 
+def test_опрос_начинается_только_после_показа_значка(monkeypatch):
+    """Цвет, сменённый до visible=True, pystray терял: значок серел при up."""
+    seen = []
+    t = tray.Tray()
+    icon = _Icon()
+    icon.visible = False
+    t.icon = icon
+    monkeypatch.setattr(t, "poll", lambda: seen.append(icon.visible))
+
+    t._setup(icon)
+
+    for _ in range(100):
+        if seen:
+            break
+        time.sleep(0.01)
+    assert seen == [True]
+
+
 def test_левый_клик_по_значку_не_включает_vpn():
     pytest.importorskip("pystray")
 
