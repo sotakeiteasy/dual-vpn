@@ -170,6 +170,7 @@ def test_части_probe_slow_идут_параллельно_а_не_скла�
 
     for name in ("_slow_exit", "_slow_v6", "_slow_corp_dns", "_slow_corp_http"):
         monkeypatch.setattr(probe.Prober, name, part(name))
+    monkeypatch.setattr(probe.Prober, "probe_fast", lambda self: None)
 
     t0 = time.monotonic()
     probe.Prober().probe_slow()
@@ -179,8 +180,9 @@ def test_части_probe_slow_идут_параллельно_а_не_скла�
                                "_slow_exit", "_slow_v6"]
 
 
-def _slow_parts(monkeypatch, **st):
-    """Части probe_slow без сети: каждая кладёт в снимок свою долю st."""
+def _slow_parts(monkeypatch, up=True, **st):
+    """Части probe_slow без сети: каждая кладёт в снимок свою долю st.
+    Быстрый опрос после них видит туннель поднятым, если up."""
     def part(*keys):
         def run(self):
             self.set(**{k: st[k] for k in keys if k in st})
@@ -191,6 +193,8 @@ def _slow_parts(monkeypatch, **st):
     monkeypatch.setattr(probe.Prober, "_slow_v6", part("v6_leak"))
     monkeypatch.setattr(probe.Prober, "_slow_corp_dns", part("corp_ip"))
     monkeypatch.setattr(probe.Prober, "_slow_corp_http", part("corp_http"))
+    monkeypatch.setattr(probe.Prober, "probe_fast",
+                        lambda self: self.set(tun=45 if up else None, r_low=up))
 
 
 def test_итог_проверки_сети_в_журнале(monkeypatch):
@@ -207,6 +211,20 @@ def test_итог_проверки_сети_в_журнале(monkeypatch):
     assert "корп DNS 10.1.1.1" in line
     assert "корп HTTPS молчит" in line
     assert "утечка IPv6 2a00::1" in line
+
+
+def test_туннель_опустился_во_время_проверки_выход_не_tunnel(monkeypatch):
+    # 13:52 06.10: проверку начали при живом туннеле, кончили после его
+    # остановки — адрес провайдера ушёл в журнал с меткой «tunnel».
+    _slow_parts(monkeypatch, up=False, exit_ip="46.242.14.241", exit_state="tunnel")
+    monkeypatch.setattr(probe.paths, "site_env", lambda: {})
+    logged = []
+    p = probe.Prober(logged.append)
+
+    p.probe_slow()
+
+    assert p.snapshot()["exit_state"] == "unknown"
+    assert "выход 46.242.14.241, unknown" in logged[0]
 
 
 def test_итог_без_хоста_корпа_так_и_пишет(monkeypatch):

@@ -361,7 +361,17 @@ class Tunnel:
         # туннель, и адрес выхода записался бы как «реальный» — пробер видел бы
         # утечку в рабочем туннеле. Опоздавший ответ поэтому отбрасываем.
         fetch.join(max(0.0, fetch_deadline - time.time()))
-        if not real_ip:
+        # Наших половинок ещё нет — значит, эти стоят у другого поднятого VPN
+        # (Amnezia, WireGuard). Запрос ушёл через него, и его выход записался бы
+        # как «реальный»: пробер потом звал бы адрес провайдера туннелем.
+        foreign = sorted({r.get("InterfaceIndex") for half in HALVES
+                          for r in winnet.routes_for(half)})
+        if foreign:
+            real_ip = []
+            self.log(f"!! поднят другой VPN (интерфейс "
+                     f"{', '.join(map(str, foreign))}): его маршруты спорят с "
+                     f"нашими, реальный адрес не записываю")
+        elif not real_ip:
             self.log(f"→ реальный адрес не узнал за {REAL_IP_WAIT}с — "
                      f"утечку сравнить будет не с чем")
         self._save_real_ip(real_ip[0] if real_ip else "")

@@ -234,6 +234,20 @@ def test_опоздавший_ответ_не_записывается(env, monk
         assert fh.read() == ""
 
 
+def test_при_чужом_vpn_реальный_адрес_не_записывается(env, monkeypatch):
+    """Половинки Amnezia стоят до наших: ifconfig.me ответил её выходом."""
+    tun, _build, seen = env
+    ifconfig = FakeIfconfig("198.51.100.99")
+    ifconfig.release.set()
+    monkeypatch.setattr(urllib.request, "urlopen", ifconfig)
+    seen["net"].added.append(("0.0.0.0/1", 31, "0.0.0.0", 0))
+
+    assert tun.start() == ""
+
+    assert seen["real_ip"] == ""
+    assert any("поднят другой VPN (интерфейс 31)" in line for line in seen["log"])
+
+
 # ---------------------------------------------------------- три процесса
 
 

@@ -192,6 +192,15 @@ class Prober:
             t.start()
         for t in parts:
             t.join()
+        # Туннель опустили, пока шла проверка: адрес выхода мерил уже прямую
+        # сеть, и метка по нему врала бы — адрес провайдера звался «tunnel».
+        try:
+            self.probe_fast()
+        except Exception:
+            pass                  # WMI не ответил — судим по прошлому кругу
+        s = self.snapshot()
+        if not (s.get("tun") and s.get("r_low")):
+            self.set(exit_state="unknown", exit_is_peer=False)
         if self.log:
             self.log(self._slow_summary(time.monotonic() - began, took))
 
