@@ -351,6 +351,9 @@ let LAST = {};
 let PENDING = null;    // команда отправлена, состояние ещё не догнало
 let AUTOSTART_PENDING = false;
 let CHECKING = false;  // идёт проверка туннелей по кнопке или при открытии
+// Конфиги этой проверки, чей ответ ещё не пришёл: личный не ждёт корпа.
+const CHECK_SIDES = ['corp', 'personal'];
+let CHECK_LEFT = new Set();
 
 // Рестарт нельзя ждать сравнением с желаемым состоянием: жмут его при поднятом
 // туннеле, и «уже как надо» получается сразу. Ждём полный цикл: упал и поднялся.
@@ -425,7 +428,8 @@ function render(s) {
   // Пока идёт проверка — по кнопке, при открытии окна или сама после подъёма
   // туннеля — прежний ответ устарел: «молчит» от прошлой проверки читалось
   // бы как свежий результат.
-  const checking = up && (CHECKING || s.checking);
+  // Каждый конфиг по себе: молчащий корп не держит «проверяю» у личного.
+  const checking = k => up && ((CHECKING && CHECK_LEFT.has(k)) || s['checking_' + k]);
   // Без VPN мерить нечем — показываем, как этот же файл конфига отработал в
   // прошлый раз: сломанный заменяют до включения, а не после.
   const last = s.last || {};
@@ -434,14 +438,14 @@ function render(s) {
                       : last[k] === 'error' ? 'выключен · не работал' : 'выключен';
   document.getElementById('tunnels').innerHTML =
     row('личный', up ? (s.exit_ip || '—') : '—',
-        !up ? offChip('personal') : direct ? 'bad' : checking ? 'warn' : s.exit_state === 'leak' ? 'bad'
+        !up ? offChip('personal') : direct ? 'bad' : checking('personal') ? 'warn' : s.exit_state === 'leak' ? 'bad'
             : s.exit_state === 'tunnel' ? 'ok' : 'off',
         !up ? offLabel('personal') : direct ? 'не работает · выход напрямую'
-            : checking ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
+            : checking('personal') ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
             : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
     row('корп', up ? (s.corp_ip || (s.corp_http ? 'HTTP ' + s.corp_http : '—')) : '—',
-        !up ? offChip('corp') : checking ? 'warn' : (corp ? 'ok' : 'bad'),
-        !up ? offLabel('corp') : checking ? 'проверяю…' : (corp ? 'отвечает' : 'молчит')) +
+        !up ? offChip('corp') : checking('corp') ? 'warn' : (corp ? 'ok' : 'bad'),
+        !up ? offLabel('corp') : checking('corp') ? 'проверяю…' : (corp ? 'отвечает' : 'молчит')) +
     row('выход', up ? [s.exit_country, s.exit_city].filter(Boolean).join(' ') || '—' : '—',
         'off', '—');
 
@@ -837,12 +841,18 @@ document.getElementById('sheet-del').onclick =
                             kind: document.getElementById('sheet').dataset.kind});
 document.getElementById('btn-check').onclick = () => {
   CHECKING = true;
+  CHECK_LEFT = new Set(CHECK_SIDES);
   send('check');
   render(LAST);
 };
 // Ответ на check — и при успехе, и при сбое: кнопка не должна застрять.
-function checkStart() { CHECKING = true; render(LAST); }
-function checkDone() { CHECKING = false; render(LAST); }
+function checkStart() { CHECKING = true; CHECK_LEFT = new Set(CHECK_SIDES); render(LAST); }
+// Один конфиг проверен, другой ещё ждёт: перекрашиваем только проверенный.
+function checkSides(s, left) {
+  CHECK_LEFT = new Set(left.filter(k => CHECK_LEFT.has(k)));
+  render(s);
+}
+function checkDone() { CHECKING = false; CHECK_LEFT = new Set(); render(LAST); }
 
 // Сообщаем Python, что страница поднялась: на этом держится сквозной тест —
 // он проверяет всю цепочку от ресурса в бандле до моста обратно.

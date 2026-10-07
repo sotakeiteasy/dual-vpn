@@ -274,6 +274,52 @@ def call(op, **payload):
         raise NotRunning("служба ответила неразборчиво") from exc
 
 
+# Как часто check_by_side спрашивает статус, пока идёт проверка.
+CHECK_POLL = 0.3
+CHECK_SIDES = ("corp", "personal")
+
+
+def check_by_side(on_side, poll=CHECK_POLL):
+    """Команда check, а пока она идёт — статус: каждый конфиг отдаём, как
+    только проверен он сам, а не оба по самому долгому.
+
+    on_side(st, pending) — сторона стала свежей; pending — какие ещё ждут.
+    Возвращает ответ check, как call. Раньше рабочий, который молчит до
+    таймаута, держал «проверяю» и у работающего личного.
+    """
+    st = call("status").get("status") or {}
+    # Проверка уже идёт — check дождётся её, и её ответ тоже свежий; нет —
+    # свежей будет только следующая.
+    need = st.get("check_seq", 0) + (0 if st.get("checking") else 1)
+    result = {}
+
+    def work():
+        try:
+            result["reply"] = call("check")
+        except Exception as exc:                   # noqa: BLE001
+            result["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    pending = set(CHECK_SIDES)
+    while pending:
+        worker.join(poll)
+        if not worker.is_alive():
+            break
+        try:
+            st = call("status").get("status") or {}
+        except NotRunning:
+            continue
+        fresh = {s for s in pending if st.get(f"{s}_seq", 0) >= need}
+        if fresh:
+            pending -= fresh
+            on_side(st, frozenset(pending))
+    worker.join()
+    if "error" in result:
+        raise result["error"]
+    return result["reply"]
+
+
 # ERROR_BROKEN_PIPE: сервер закрыл свой конец — после ответа это нормальный конец.
 _ERROR_BROKEN_PIPE = 109
 

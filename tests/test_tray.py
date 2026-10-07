@@ -232,10 +232,10 @@ def test_без_windll_тёмное_меню_ничего_не_делает(monk
 def test_кружки_без_vpn_берут_итог_прошлой_проверки():
     st = {"up": False, "last": {"corp": "error", "personal": "up"}}
 
-    assert tray._conf_colors(st, True, False) == ("error", "up")
+    assert tray._conf_colors(st, True, frozenset()) == ("error", "up")
 
 
 def test_кружки_без_vpn_и_без_итога_серые():
-    assert tray._conf_colors({"up": False}, True, False) == ("off", "off")
+    assert tray._conf_colors({"up": False}, True, frozenset()) == ("off", "off")
     st = {"up": False, "last": {"corp": "", "personal": ""}}
-    assert tray._conf_colors(st, True, False) == ("off", "off")
+    assert tray._conf_colors(st, True, frozenset()) == ("off", "off")

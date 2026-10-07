@@ -7,6 +7,7 @@
 
 import json
 import sys
+import threading
 import types
 
 import pytest
@@ -87,3 +88,51 @@ def test_сервер_сбрасывает_буфер_до_отключения(
     server._serve_one("pipe")
     assert win.calls == ["FlushFileBuffers", "DisconnectNamedPipe",
                          "CloseHandle"]
+
+
+def _fake_service(monkeypatch, st):
+    """Служба без канала: check ставит личный готовым и ждёт release,
+    а корп отмечает только после него."""
+    release = threading.Event()
+
+    def call(op, **_payload):
+        if op == "check":
+            seq = st["check_seq"] if st["checking"] else st["check_seq"] + 1
+            st.update(check_seq=seq, checking=True, personal_seq=seq)
+            release.wait(2)
+            st.update(corp_seq=seq, checking=False)
+        return {"ok": True, "status": dict(st)}
+
+    monkeypatch.setattr(ipc, "call", call)
+    return release
+
+
+@pytest.mark.parametrize("st", [
+    {"check_seq": 3, "checking": False, "personal_seq": 3, "corp_seq": 3},
+    # Проверка уже шла — check её дождётся, её ответ тоже свежий.
+    {"check_seq": 3, "checking": True, "personal_seq": 2, "corp_seq": 2},
+])
+def test_check_by_side_отдаёт_личный_не_дожидаясь_корпа(monkeypatch, st):
+    release = _fake_service(monkeypatch, st)
+    seen = []
+
+    def on_side(got, pending):
+        seen.append((got["personal_seq"], pending))
+        release.set()
+
+    reply = ipc.check_by_side(on_side, poll=0.01)
+
+    assert seen[0] == (st["check_seq"], frozenset({"corp"}))
+    assert reply["status"]["corp_seq"] == st["check_seq"]
+
+
+def test_check_by_side_прошлый_итог_не_считает_свежим(monkeypatch):
+    st = {"check_seq": 3, "checking": False, "personal_seq": 3, "corp_seq": 3}
+    release = _fake_service(monkeypatch, st)
+    seen = []
+    threading.Timer(0.2, release.set).start()
+
+    ipc.check_by_side(lambda got, pending: seen.append(got["personal_seq"]),
+                      poll=0.01)
+
+    assert all(seq == 4 for seq in seen)

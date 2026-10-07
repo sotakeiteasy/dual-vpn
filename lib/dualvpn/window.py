@@ -282,10 +282,12 @@ class Api:
 
     def _check(self):
         """Проверка туннелей службой сейчас; страница на это время пишет
-        «проверяю…»."""
+        «проверяю…» — у каждого конфига, пока не проверен он сам."""
         self.js("checkStart")
         try:
-            st = ipc.call("check").get("status")
+            st = ipc.check_by_side(
+                lambda st, pending: self.jsn("checkSides", (st, sorted(pending)))
+            ).get("status")
             if st:
                 self.js("render", st)
         except ipc.NotRunning:

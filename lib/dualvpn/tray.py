@@ -87,7 +87,8 @@ class Tray:
         self._state_lock = threading.Lock()
         # Меню и кружки — только в потоке значка (см. WM_SYNC_MENU).
         self._menu_open = False
-        self._checking = False
+        # Конфиги, чей ответ на проверку при открытии меню ещё не пришёл.
+        self._checking = frozenset()
         self._check_gen = 0
         # Задан ли хост проверки рабочей сети. Знает только ответ check;
         # до первой проверки считаем, что задан.
@@ -146,14 +147,14 @@ class Tray:
         return (bool(st), bool(st.get("up")), bool(st.get("busy")),
                 _conf_labels(st))
 
-    def _post(self, msg, wparam=0):
+    def _post(self, msg, wparam=0, lparam=0):
         """Сообщение окну значка. Окна ещё нет — опрос повторит."""
         hwnd = getattr(self.icon, "_hwnd", None)
         if not hwnd:
             return
         import win32gui
         try:
-            win32gui.PostMessage(hwnd, msg, wparam, 0)
+            win32gui.PostMessage(hwnd, msg, wparam, lparam)
         except Exception:                                  # noqa: BLE001
             pass                                           # окно уже закрыто
 
@@ -260,7 +261,8 @@ class Tray:
             if lparam != win32.WM_RBUTTONUP:
                 return orig(wparam, lparam)
             self._check_gen += 1
-            self._checking = bool(self.status.get("up"))
+            self._checking = (frozenset(ipc.CHECK_SIDES)
+                              if self.status.get("up") else frozenset())
             try:
                 self._sync_menu()
                 self._paint_dots()
@@ -280,8 +282,15 @@ class Tray:
         handlers[WM_CHECKED] = self._on_checked
 
     def _check_work(self, gen):
+        """Проверка при открытии меню. Кружок конфига перекрашивается, как
+        только проверен он сам: молчащий рабочий не держит рыжим личный."""
+        def on_side(st, pending):
+            with self._state_lock:
+                self.status = st
+            self._post(WM_CHECKED, gen, _side_bits(pending))
+
         try:
-            reply = ipc.call("check")
+            reply = ipc.check_by_side(on_side)
         except Exception:                                  # noqa: BLE001
             reply = {}             # рыжий всё равно надо погасить — ниже
         if reply.get("status"):
@@ -289,13 +298,14 @@ class Tray:
                 self.status = reply["status"]
         if "corp_probe" in reply:
             self.corp_probe = bool(reply["corp_probe"])
-        self._post(WM_CHECKED, gen)
+        self._post(WM_CHECKED, gen, 0)
 
-    def _on_checked(self, wparam, _lparam):
+    def _on_checked(self, wparam, lparam):
         # Ответ прошлого открытия меню не гасит рыжий у текущего.
         if wparam != self._check_gen:
             return
-        self._checking = False
+        # Только убавляем: поздний ответ стороны не вернёт рыжий готовой.
+        self._checking &= _sides_of(lparam)
         if self._menu_open:
             self._paint_dots()
             _redraw_menus(self.icon._hwnd)
@@ -580,18 +590,29 @@ def _conf_labels(st):
             _clip(personal, NAME_MAX) if personal else "Добавить личный конфиг…")
 
 
+def _side_bits(sides):
+    """Набор сторон — в число для lParam сообщения окну значка."""
+    return sum(1 << i for i, s in enumerate(ipc.CHECK_SIDES) if s in sides)
+
+
+def _sides_of(bits):
+    return frozenset(s for i, s in enumerate(ipc.CHECK_SIDES) if bits >> i & 1)
+
+
 def _conf_colors(st, corp_probe, checking):
     """(рабочий, личный): ключи COLORS для кружков.
 
     VPN выключен — итог прошлой проверки этих же файлов (st["last"]), а если
-    его нет — серые. Идёт проверка — рыжие. Личный работает, если
+    его нет — серые. checking — конфиги, чей ответ трей ещё ждёт: они
+    рыжие, как и те, что служба проверяет сама. Каждый по себе: молчащий
+    рабочий не красит рыжим работающий личный. Личный работает, если
     выход виден и он не мимо туннеля. Рабочий — если хост проверки ответил
     по DNS или HTTP; без CORP_PROBE ответить нечему, и серый честнее красного.
     """
     if not st.get("up"):
         last = st.get("last") or {}
         return last.get("corp") or "off", last.get("personal") or "off"
-    if checking or st.get("busy"):
+    if st.get("busy"):
         return "busy", "busy"
     personal = ("up" if st.get("exit_ip") and st.get("out") != "direct"
                 and st.get("exit_state") not in ("leak", "direct") else "error")
@@ -599,7 +620,10 @@ def _conf_colors(st, corp_probe, checking):
         corp = "up"
     else:
         corp = "error" if corp_probe else "off"
-    return corp, personal
+    busy = {s for s in ipc.CHECK_SIDES
+            if s in checking or st.get(f"checking_{s}")}
+    return ("busy" if "corp" in busy else corp,
+            "busy" if "personal" in busy else personal)
 
 
 @functools.lru_cache(maxsize=None)

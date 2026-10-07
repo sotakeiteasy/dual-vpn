@@ -52,6 +52,22 @@ def test_после_выключения_снимок_уже_без_туннел
     assert core.busy == ""
 
 
+def test_статус_по_сторонам_личный_проверен_корп_ещё_нет(monkeypatch):
+    core = _core(monkeypatch, up=True)
+    for name, value in (("autostart_enabled", False), ("_singbox_version", ""),
+                        ("_profiles", []), ("_corp", []), ("_last_results", {})):
+        monkeypatch.setattr(core, name, lambda value=value: value)
+    core.prober._take_slow()
+    core.prober.set(personal_seq=core.prober.snapshot()["check_seq"])
+
+    st = core._status()
+    assert st["checking"] and st["checking_corp"] and not st["checking_personal"]
+
+    core.prober.slow_busy.clear()
+    st = core._status()
+    assert not st["checking_corp"] and not st["checking_personal"]
+
+
 def test_после_включения_снимок_уже_с_туннелем(monkeypatch):
     core = _core(monkeypatch, up=False)
 

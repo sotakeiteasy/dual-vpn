@@ -233,6 +233,10 @@ class Core:
         # Идёт ли сетевая проверка — и та, что сама после подъёма туннеля:
         # без этого окно до её ответа показывало «корп молчит».
         st["checking"] = self.prober.slow_busy.is_set()
+        # И по сторонам: личный проверен раньше корпа — его кружок уже свежий.
+        for side in probe.SIDE_PARTS:
+            st[f"checking_{side}"] = (st["checking"] and st.get(f"{side}_seq", 0)
+                                      < st.get("check_seq", 0))
         st["last_error"] = self.last_error
         st["autostart"] = self.autostart_enabled()
         st["version"] = paths.version()

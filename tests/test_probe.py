@@ -180,6 +180,26 @@ def test_части_probe_slow_идут_параллельно_а_не_скла�
                                "_slow_exit", "_slow_v6"]
 
 
+def test_личный_проверен_раньше_молчащего_корпа(monkeypatch):
+    corp_go = threading.Event()
+    for name in ("_slow_exit", "_slow_v6", "_slow_corp_dns"):
+        monkeypatch.setattr(probe.Prober, name, lambda self: None)
+    monkeypatch.setattr(probe.Prober, "_slow_corp_http",
+                        lambda self: corp_go.wait(2))
+    monkeypatch.setattr(probe.Prober, "probe_fast", lambda self: None)
+    p = probe.Prober()
+    check = threading.Thread(target=p.check_now, daemon=True)
+    check.start()
+
+    assert _wait(lambda: p.snapshot().get("personal_seq") == 1)
+    assert p.snapshot()["check_seq"] == 1
+    assert p.snapshot().get("corp_seq", 0) == 0
+
+    corp_go.set()
+    check.join(2)
+    assert p.snapshot()["corp_seq"] == 1
+
+
 def _exit_services(monkeypatch, answers):
     """Сервисы адреса выхода без сети: url → (через сколько, ответ)."""
     def get(url, _timeout):

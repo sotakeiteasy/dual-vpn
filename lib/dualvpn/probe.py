@@ -36,6 +36,9 @@ CHECK_WAIT = 40.0
 CORP_TRIES = 2
 CORP_DNS_TIMEOUT = 2.5
 CORP_HTTP_TIMEOUT = 6.0
+# Части проверки, после которых известен итог конфига. Сторона готова, как
+# только кончились её части: личный не ждёт долгого корп-HTTPS.
+SIDE_PARTS = {"personal": ("exit",), "corp": ("dns", "http")}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -89,6 +92,10 @@ class Prober:
         # Служба переподключила туннель: цикл мог не застать его упавшим между
         # двумя кругами, и тогда остались бы ответы прошлой сети.
         self._remeasure = threading.Event()
+        # Номер сетевой проверки. check_seq — последней начатой, <сторона>_seq —
+        # последней, в которой эта сторона уже проверена: по ним трей и окно
+        # красят кружок каждого конфига, не дожидаясь второго.
+        self._seq = 0
 
     def remeasure(self):
         """Сетевая проверка, как на подъёме туннеля, даже если цикл не
@@ -201,6 +208,8 @@ class Prober:
         их таймауты складывались, и проверка «висела» до минуты, хотя каждая
         часть по отдельности укладывается в секунды."""
         took = {}
+        seq = self.snapshot().get("check_seq", 0)
+        left = {side: set(names) for side, names in SIDE_PARTS.items()}
 
         def timed(name, fn):
             began = time.monotonic()
@@ -208,6 +217,12 @@ class Prober:
                 fn()
             finally:
                 took[name] = time.monotonic() - began
+                with self.lock:
+                    for side, names in left.items():
+                        if name in names:
+                            names.discard(name)
+                            if not names:
+                                self.st[f"{side}_seq"] = seq
 
         began = time.monotonic()
         parts = [threading.Thread(target=timed, args=item, daemon=True)
@@ -399,6 +414,9 @@ class Prober:
         with self._slow_gate:
             if self.slow_busy.is_set():
                 return False
+            # Номер — раньше флага: кто увидел флаг, видит и номер этой проверки.
+            self._seq += 1
+            self.set(check_seq=self._seq)
             self.slow_busy.set()
             return True
 
