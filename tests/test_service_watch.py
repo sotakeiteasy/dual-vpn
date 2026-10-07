@@ -651,6 +651,42 @@ def test_в_паузе_мёртвого_смена_сети_переподклю
     assert core.tunnel.starts == 1
 
 
+def test_таймауты_старой_сети_новому_туннелю_не_в_счёт(monkeypatch, tmp_path):
+    """После переподключения туннель другой: два таймаута через мёртвый кабель
+    и один на Wi-Fi — не три подряд."""
+    core = _core(monkeypatch)
+    core.tunnel.delay_ms = None
+    log = _side_log(core, tmp_path)
+    _append(log, _timeout("1.1.1.1:443"), _timeout("8.8.8.8:443"))
+    state = _rounds(core, 1)
+    _net(core, HOME)
+    state = _rounds(core, service.UPLINK_SETTLE, state)
+    assert core.tunnel.starts == 1
+
+    _append(log, _timeout("9.9.9.9:443"))
+    _rounds(core, 1, state)
+
+    assert core.tunnel.restarts == []
+
+
+def test_пауза_перезапуска_со_старой_сети_новую_не_держит(monkeypatch, tmp_path):
+    """Личный перезапускали на кабеле; на Wi-Fi он упал — поднимать сразу, не ждать DEAD_GAP."""
+    core = _core(monkeypatch)
+    core.tunnel.personal.proc = _Proc()
+    state = _rounds(core, 1)
+    assert core.tunnel.restarts == ["personal"]
+    _net(core, HOME)
+    state = _rounds(core, service.UPLINK_SETTLE, state)
+    assert core.tunnel.starts == 1
+
+    core.tunnel.personal.proc = _Proc()
+    waits = len(_said(core, "перезапуска нет"))
+    _rounds(core, 1, state)
+
+    assert core.tunnel.restarts == ["personal", "personal"]
+    assert len(_said(core, "перезапуска нет")) == waits
+
+
 def test_без_шлюза_мёртвый_не_перезапускает(monkeypatch, tmp_path):
     """Wi-Fi отвалился или компьютер проснулся: таймауты от сети, а не от
     туннеля, и без сети перезапуск ничего не даст."""
