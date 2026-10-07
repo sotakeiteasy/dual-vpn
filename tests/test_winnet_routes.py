@@ -127,6 +127,45 @@ def test_wmi_недоступен_все_маршруты_в_журнал(monkey
     assert "нет WMI" in reported[0]
 
 
+def _tables(monkeypatch, routes, interfaces):
+    """Подменяет ответы WMI: маршруты по умолчанию и подключённые интерфейсы
+    (None — WMI про интерфейсы не ответил)."""
+    def query(wql, _props):
+        if "MSFT_NetRoute" in wql:
+            return routes
+        assert "ConnectionState=1" in wql
+        return interfaces
+    monkeypatch.setattr(winnet, "_query", query)
+
+
+def test_аплинк_только_среди_подключённых(monkeypatch):
+    """Кабель выдернут: его маршрут остался в таблице и с меньшей метрикой,
+    но аплинк — живой Wi-Fi, иначе сторож не видит смены сети."""
+    _tables(monkeypatch,
+            [{"InterfaceIndex": 11, "NextHop": "192.168.20.3", "RouteMetric": 0},
+             {"InterfaceIndex": 19, "NextHop": "192.168.19.1", "RouteMetric": 0}],
+            [{"InterfaceIndex": 19, "InterfaceMetric": 35}])
+
+    assert winnet.default_route() == (19, "192.168.19.1")
+
+
+def test_аплинк_нет_если_подключённых_нет(monkeypatch):
+    _tables(monkeypatch,
+            [{"InterfaceIndex": 11, "NextHop": "192.168.20.3", "RouteMetric": 0}],
+            [])
+
+    assert winnet.default_route() == (None, "")
+
+
+def test_аплинк_без_ответа_про_интерфейсы_выбирается_среди_всех(monkeypatch):
+    _tables(monkeypatch,
+            [{"InterfaceIndex": 11, "NextHop": "192.168.20.3", "RouteMetric": 0},
+             {"InterfaceIndex": 46, "NextHop": "172.19.0.2", "RouteMetric": 0}],
+            None)
+
+    assert winnet.default_route() == (11, "192.168.20.3")
+
+
 def test_повтор_одного_сбоя_в_журнал_не_пишется(monkeypatch):
     """Проверки идут каждым кругом пробера — журнал не должен забиваться."""
     reported = _setup(monkeypatch, None)

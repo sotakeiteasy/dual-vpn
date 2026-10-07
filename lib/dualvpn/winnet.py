@@ -121,6 +121,10 @@ def default_route():
     подъёма туннеля «аплинком» оказывался бы сам туннель. Из нескольких
     аплинков (Wi-Fi и кабель) — тот, у кого меньше сумма метрик маршрута и
     интерфейса: так выбирает и сама Windows.
+
+    Только подключённые интерфейсы: у выдернутого кабеля или отвалившегося
+    Wi-Fi маршрут по умолчанию остаётся в таблице, и кабель с метрикой
+    поменьше выигрывал у живого Wi-Fi — сторож не видел смены сети.
     """
     rows = _query("SELECT InterfaceIndex,NextHop,RouteMetric FROM MSFT_NetRoute"
                   " WHERE DestinationPrefix='0.0.0.0/0'",
@@ -128,18 +132,26 @@ def default_route():
     rows = [r for r in rows
             if r.get("NextHop") not in (None, "", "0.0.0.0")
             and not _is_tun_hop(r.get("NextHop"))]
+    metrics = _interface_metrics()
+    if metrics is not None:
+        rows = [r for r in rows if r.get("InterfaceIndex") in metrics]
     if not rows:
         return None, ""
-    metrics = _interface_metrics()
+    metrics = metrics or {}
     best = min(rows, key=lambda r: (r.get("RouteMetric") or 0)
                + metrics.get(r.get("InterfaceIndex"), 0))
     return best.get("InterfaceIndex"), best.get("NextHop", "")
 
 
 def _interface_metrics():
+    """{индекс: метрика} подключённых IPv4-интерфейсов, или None, если WMI
+    не ответил: тогда аплинк выбираем, как прежде, среди всех."""
     rows = _query("SELECT InterfaceIndex,InterfaceMetric FROM MSFT_NetIPInterface"
-                  " WHERE AddressFamily=2", ("InterfaceIndex", "InterfaceMetric"))
-    return {r["InterfaceIndex"]: r.get("InterfaceMetric") or 0 for r in rows or []}
+                  " WHERE AddressFamily=2 AND ConnectionState=1",
+                  ("InterfaceIndex", "InterfaceMetric"))
+    if rows is None:
+        return None
+    return {r["InterfaceIndex"]: r.get("InterfaceMetric") or 0 for r in rows}
 
 
 def tun_index(tun_ip):
