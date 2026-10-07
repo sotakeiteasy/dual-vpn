@@ -573,6 +573,10 @@ class Core:
                 # Выход уводим сразу, без паузы: интернет не должен ждать перезапуска.
                 if self.tunnel.set_out(buildconfig.DIRECT_TAG):
                     out = buildconfig.DIRECT_TAG
+                    # Назад — не раньше BACK_EVERY: 7 октября одна удачная проверка
+                    # через 2 с после увода возвращала трафик в полуживой туннель,
+                    # и выход за 40 с метался пять раз.
+                    self._back_at = time.monotonic() + BACK_EVERY
                     self.prober.set(out=out)
                     self.prober.remeasure()
             now = time.monotonic()

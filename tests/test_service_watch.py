@@ -490,6 +490,25 @@ def test_ожил_личный_выход_возвращается_на_него
     assert core.prober.snapshot()["out"] == buildconfig.PERSONAL_SOCKS_TAG
 
 
+def test_уведённый_выход_не_мечется_обратно_раньше_паузы(monkeypatch, tmp_path):
+    """7 октября в 10:37 выход за 40 с прыгал direct ↔ personal-socks пять раз:
+    одна удачная проверка через 2 с после увода возвращала трафик в полуживой туннель."""
+    core = _core(monkeypatch)
+    log = _side_log(core, tmp_path)
+    _append(log, *_three_dead())
+    state = _rounds(core, 1)
+    assert core.tunnel.outs == [buildconfig.DIRECT_TAG]
+
+    core.tunnel.delay_ms = 300
+    state = _rounds(core, 3, state)
+    assert core.tunnel.outs == [buildconfig.DIRECT_TAG]
+
+    core._back_at = 0.0                          # пауза прошла
+    _rounds(core, 1, state)
+
+    assert core.tunnel.outs == [buildconfig.DIRECT_TAG, buildconfig.PERSONAL_SOCKS_TAG]
+
+
 def test_живой_но_не_везущий_личный_перезапускается(monkeypatch):
     """Выход напрямую — трафика через личный нет, таймаутов не будет: решает проверка."""
     core = _core(monkeypatch)
