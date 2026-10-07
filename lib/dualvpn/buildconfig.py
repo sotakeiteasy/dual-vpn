@@ -239,9 +239,6 @@ def split_list(value):
 # Сколько ждём DNS за адресом пира. Без потолка getaddrinfo висел
 # 12 с, когда DNS роутера не отвечал, — и столько же стояло переподключение.
 SYSTEM_DNS_WAIT = 4.0
-# А столько — когда перезапускаем один боковой процесс и прошлый адрес пира
-# известен: сторож ждал 12 с, пока все DNS молчали, а взял в итоге прошлый.
-REFRESH_DNS_WAIT = 1.5
 # Запасные DNS: спрашиваем разом с системным, но их ответ берём, только
 # если системный не ответил. Только запасные: в корп-сети
 # системный отдаёт внутренний адрес пира, а публичный оттуда молчит.
@@ -327,19 +324,16 @@ def _remember_peer_ip(name, ip):
         pass
 
 
-def resolve_peer(name, tag, log=print, quick=False):
+def resolve_peer(name, tag, log=print):
     """Адрес пира: системный DNS, затем публичный, затем прошлый удачный.
 
     Без запасных путей переподключение зависело от DNS роутера: тот молчал,
     и туннель не поднимался, хотя адрес сервера не менялся месяцами.
-    quick — перезапуск одного бокового процесса: при известном прошлом
-    адресе DNS ждём REFRESH_DNS_WAIT, а не SYSTEM_DNS_WAIT.
     """
     known = _known_peer_ips().get(name)
-    wait = REFRESH_DNS_WAIT if quick and known else SYSTEM_DNS_WAIT
-    ip, publics = _ask_dns(name, wait)
+    ip, publics = _ask_dns(name, SYSTEM_DNS_WAIT)
     if not isinstance(ip, str):
-        exc = ip or TimeoutError(f"системный DNS молчит {wait:g} с")
+        exc = ip or TimeoutError(f"системный DNS молчит {SYSTEM_DNS_WAIT:g} с")
         for server in PUBLIC_DNS:
             ip = publics.get(server)
             if ip:
@@ -358,11 +352,11 @@ def resolve_peer(name, tag, log=print, quick=False):
     return ip
 
 
-def peer_host(host, tag, log=print, quick=False):
+def peer_host(host, tag, log=print):
     """Адрес пира для конфига: IP как есть, имя — резолвим."""
     if not re.match(r"^[\d.]+$", host) and ":" not in host:
         name = host
-        host = resolve_peer(name, tag, log, quick)
+        host = resolve_peer(name, tag, log)
 
         # НЕ подменять частный адрес публичным. Корп-сервер доступен по
         # внутреннему адресу (имя из конфига -> адрес внутри сети), и именно на
@@ -624,30 +618,6 @@ def api_of(main_cfg):
     if not api.get("external_controller"):
         return None
     return api["external_controller"], api.get("secret", "")
-
-
-def refresh_peer(kind, log=print):
-    """Заново резолвит пира бокового процесса и переписывает адрес в его конфиге.
-
-    Зовётся перед перезапуском одного бокового процесса: основной работает, и
-    порт с паролем socks должны остаться прежними — их знает он. Возвращает
-    IPv4 пира. Ошибки — sys.exit с текстом, как у сборки.
-    """
-    path = side_json(kind)
-    try:
-        with open(path, encoding="utf-8") as fh:
-            cfg = json.load(fh)
-    except (OSError, ValueError) as exc:
-        sys.exit(f"{os.path.basename(path)} не прочитать: {exc}")
-    conf = pick_corp() if kind == "corp" else pick_personal()
-    tag = SIDES[kind][0]
-    host = parse_conf(conf)["peer"]["endpoint"].rpartition(":")[0]
-    ip = peer_host(host, tag, log, quick=True)
-    for ep in cfg.get("endpoints", []):
-        if ep.get("tag") == tag and ep.get("peers"):
-            ep["peers"][0]["address"] = ip
-    write_json(path, cfg)
-    return ip
 
 
 def running_pid():

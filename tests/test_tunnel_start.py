@@ -20,7 +20,7 @@ import urllib.request
 
 import pytest
 
-from dualvpn import buildconfig, paths, tunnel
+from dualvpn import buildconfig, paths, tunnel, winnet
 
 
 class FakeNet:
@@ -81,14 +81,9 @@ class FakeBuild:
 
     def __init__(self):
         self.on_main = lambda: None
-        self.corp_ip = "203.0.113.20"
-        self.personal_ip = "203.0.113.10"
 
     def main(self, log=print):
         self.on_main()
-
-    def refresh_peer(self, kind, log=print):
-        return self.corp_ip if kind == "corp" else self.personal_ip
 
     def __getattr__(self, name):
         return getattr(buildconfig, name)
@@ -331,18 +326,16 @@ def test_пропавший_на_старте_маршрут_к_пиру_ста�
 
 
 def test_маршрут_к_пиру_пропал_в_работе_ставится_заново(env):
-    tun, build, seen = env
+    tun, _build, seen = env
     assert tun.start() == ""
-    build.corp_ip = "203.0.113.99"
     assert tun.restart_side(tun.corp) == ""
     net = seen["net"]
-    net.gone = {"203.0.113.99/32", "203.0.113.10/32"}
+    net.gone = {"203.0.113.10/32", "203.0.113.20/32"}
     before = len(net.added)
 
-    # Пир со сменившимся адресом тоже под присмотром.
-    assert tun.mend_peer_routes() == ["203.0.113.10", "203.0.113.99"]
+    assert tun.mend_peer_routes() == ["203.0.113.10", "203.0.113.20"]
     assert net.added[before:] == [("203.0.113.10/32", 18, "192.168.0.1", 1),
-                                  ("203.0.113.99/32", 18, "192.168.0.1", 1)]
+                                  ("203.0.113.20/32", 18, "192.168.0.1", 1)]
 
 
 def test_сверка_маршрутов_без_туннеля_ничего_не_делает(env):
@@ -416,15 +409,19 @@ def test_повторное_включение_возвращает_выход_�
     assert outs == [buildconfig.PERSONAL_SOCKS_TAG]
 
 
-@pytest.mark.parametrize("kind, ip_attr", [("corp", "corp_ip"),
-                                          ("personal", "personal_ip")])
-def test_перезапуск_туннеля_не_трогает_остальные(env, kind, ip_attr):
-    tun, build, seen = env
+@pytest.mark.parametrize("kind", ["corp", "personal"])
+def test_перезапуск_туннеля_не_трогает_остальные(env, monkeypatch, kind):
+    tun, _build, seen = env
     assert tun.start() == ""
     side = getattr(tun, kind)
     other = tun.personal if side is tun.corp else tun.corp
     main, old, other_proc = tun.proc, side.proc, other.proc
-    setattr(build, ip_attr, "203.0.113.99")
+    # DNS изнутри туннеля отдал бы другой адрес: 7 октября в офисе корп-имя
+    # так стало внешним адресом, и корп час перезапускался впустую.
+    for name in ("refresh_peer", "resolve_peer", "peer_host"):
+        monkeypatch.setattr(buildconfig, name, lambda *a, **kw: "203.0.113.99",
+                            raising=False)
+    monkeypatch.setattr(winnet, "resolve4", lambda name: "203.0.113.99")
 
     assert tun.restart_side(side) == ""
 
@@ -432,9 +429,8 @@ def test_перезапуск_туннеля_не_трогает_остальн�
     assert not main.terminated and not other_proc.terminated
     assert tun.proc is main and other.proc is other_proc
     assert side.proc is not old and side.alive()
-    # Новый адрес пира — мимо туннеля, через тот же аплинк.
-    assert ("203.0.113.99/32", 18, "192.168.0.1", 1) in seen["net"].added
-    assert ["host", "203.0.113.99", "192.168.0.1", "18"] in tun.owned_lines()
+    assert not any(r[0] == "203.0.113.99/32" for r in seen["net"].added)
+    assert not any("203.0.113.99" in parts for parts in tun.owned_lines())
 
 
 def test_перезапуск_туннеля_без_туннеля_отказ(env):
