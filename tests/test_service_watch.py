@@ -196,6 +196,21 @@ def test_пропавший_шлюз_не_переподключает(monkeypat
     assert core.tunnel.starts == 0
 
 
+@pytest.mark.parametrize("back, starts", [(HOME, 1), (OFFICE, 0)])
+def test_сеть_пропала_и_вернулась(monkeypatch, back, starts):
+    """Вернулась другой — переподключаемся после устойчивых кругов, как при
+    прямой смене; вернулась та же — туннель не трогаем."""
+    core = _core(monkeypatch)
+    core.prober.set(iface=None, gw="")
+    state = _rounds(core, service.UPLINK_SETTLE * 2)
+
+    _net(core, back)
+    _rounds(core, service.UPLINK_SETTLE, state)
+
+    assert core.tunnel.starts == starts
+    assert core.tunnel.uplink == back
+
+
 def test_сам_упавший_sing_box_поднимается_заново(monkeypatch):
     core = _core(monkeypatch)
     core.tunnel.proc = _Proc()

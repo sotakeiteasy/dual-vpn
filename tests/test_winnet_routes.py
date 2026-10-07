@@ -149,6 +149,18 @@ def test_аплинк_только_среди_подключённых(monkeypat
     assert winnet.default_route() == (19, "192.168.19.1")
 
 
+def test_аплинк_из_двух_подключённых_по_сумме_метрик(monkeypatch):
+    """Кабель вставили к живому Wi-Fi: Windows уводит трафик на кабель по
+    метрике интерфейса, и сторож должен увидеть ту же смену сети."""
+    _tables(monkeypatch,
+            [{"InterfaceIndex": 19, "NextHop": "192.168.19.1", "RouteMetric": 0},
+             {"InterfaceIndex": 11, "NextHop": "192.168.20.3", "RouteMetric": 0}],
+            [{"InterfaceIndex": 19, "InterfaceMetric": 35},
+             {"InterfaceIndex": 11, "InterfaceMetric": 25}])
+
+    assert winnet.default_route() == (11, "192.168.20.3")
+
+
 def test_аплинк_нет_если_подключённых_нет(monkeypatch):
     _tables(monkeypatch,
             [{"InterfaceIndex": 11, "NextHop": "192.168.20.3", "RouteMetric": 0}],
