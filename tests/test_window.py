@@ -90,6 +90,21 @@ class UpdateTests(unittest.TestCase):
         got, _ = self.osa(1, "execution error: User canceled. (-128)")
         self.assertIsNone(got)
 
+    def opened(self, checked_ago):
+        w = self.w
+        w.upd_timer = object()                      # проверки запущены
+        w._upd_checked = window.time.time() - checked_ago
+        w.win = mock.Mock()
+        with mock.patch.object(window, "NSApp"), \
+             mock.patch.object(w, "check_update", create=True) as check:
+            w.show()
+        return check.called
+
+    def test_opening_window_rechecks_when_stale(self):
+        # Релиз вышел после старта — окно не должно ждать плановой проверки.
+        self.assertTrue(self.opened(window.UPDATE_ON_SHOW + 1))
+        self.assertFalse(self.opened(5))
+
     def test_only_installed_app_updates(self):
         self.assertTrue(self.w.updatable())
         self.w.base = "/Users/x/repos/dual-vpn"

@@ -37,6 +37,7 @@ PLIST = f"/Library/LaunchDaemons/{LABEL}.plist"
 TAIL = 400          # сколько строк лога держим в окне
 POLL = 2.0
 UPDATE_EVERY = 6 * 3600     # как часто спрашивать GitHub о новой версии
+UPDATE_ON_SHOW = 600        # при открытии окна — если с прошлой проверки прошло столько
 INSTALLED_APP = "/Applications/DualVPN.app"
 NO_UPDATE = {"state": "", "version": "", "step": "", "error": ""}
 
@@ -112,6 +113,7 @@ class Window:
     upd = NO_UPDATE
     _upd_info = None            # что ставить: ответ update.pick
     upd_timer = None            # плановая проверка; задаётся в start_update_checks
+    _upd_checked = 0.0          # когда последний раз спрашивали GitHub
 
     def __init__(self, base, state, log, ctrl, data=None):
         self.base = base            # код: vpn, скрипты, sing-box
@@ -128,6 +130,11 @@ class Window:
     # ------------------------------------------------------------- создание
 
     def show(self):
+        # Окно открывают, чтобы посмотреть, — тогда и спросить про новую
+        # версию. Одной плановой проверки мало: релиз, вышедший через минуту
+        # после старта, иначе ждал бы её шесть часов.
+        if self.upd_timer is not None and time.time() - self._upd_checked > UPDATE_ON_SHOW:
+            self.check_update()
         if self.win is not None:
             self.win.center()
             self.win.makeKeyAndOrderFront_(None)
@@ -527,6 +534,7 @@ class Window:
     def check_update(self):
         if self.upd["state"] == "working":
             return
+        self._upd_checked = time.time()
         threading.Thread(target=self._check_update, daemon=True).start()
 
     def _check_update(self):
@@ -544,6 +552,7 @@ class Window:
             self.log(f"обновление: есть {info['version']} (стоит {cur})")
             self.upd = dict(NO_UPDATE, state="available", version=info["version"])
         else:
+            self.log(f"обновление: новее {cur} нет")
             self.upd = NO_UPDATE
 
     def start_update(self):
