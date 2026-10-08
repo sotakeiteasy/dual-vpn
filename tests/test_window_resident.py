@@ -79,6 +79,25 @@ def test_прогретое_окно_на_ready_остаётся_спрятан�
     assert "show" not in shown
 
 
+def test_включение_сразу_перерисовывает_статус(monkeypatch):
+    """Не ждёт следующего опроса: иначе «работает» запаздывает на POLL_EVERY."""
+    api, calls, shown = _api(monkeypatch)
+
+    api.send("start")
+    ops = [op for op, _ in calls]
+    assert ops == ["start", "status"] and "render" in shown
+
+
+def test_отказ_включения_тоже_перерисовывает_статус(monkeypatch):
+    api, calls, shown = _api(monkeypatch)
+    monkeypatch.setattr(ipc, "call", lambda op, **kw: calls.append((op, kw)) or
+                        ({"ok": False, "error": "нет"} if op == "start" else {"status": {}}))
+
+    api.send("restart")
+    assert [op for op, _ in calls] == ["stop", "start", "status"]
+    assert "failed" in shown and "render" in shown
+
+
 def test_флажок_автозапуска_уходит_в_службу(monkeypatch):
     monkeypatch.setattr(window, "_is_admin", lambda: True)
     api, calls, shown = _api(monkeypatch)

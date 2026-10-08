@@ -135,13 +135,17 @@ class Api:
                 threading.Thread(target=self._check, daemon=True).start()
         elif name == "check":
             threading.Thread(target=self._check, daemon=True).start()
-        elif name == "start":
-            self._guard(ipc.call("start", profile=""))
-        elif name == "stop":
-            self._guard(ipc.call("stop"))
-        elif name == "restart":
-            ipc.call("stop")
-            self._guard(ipc.call("start", profile=""))
+        elif name in ("start", "stop", "restart"):
+            # Статус — сразу по ответу службы: без этого «работает» ждало
+            # следующего опроса, и включение казалось дольше на POLL_EVERY.
+            try:
+                if name != "start":
+                    reply = ipc.call("stop")
+                if name != "stop":
+                    reply = ipc.call("start", profile="")
+                self._guard(reply)
+            finally:
+                self.refresh()
         elif name == "set_autostart":
             # Флажок лежит в каталоге службы — команда под администратором,
             # как и правка конфигов. Чем бы ни кончился UAC, флажок на
