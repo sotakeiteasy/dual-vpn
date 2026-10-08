@@ -4,6 +4,8 @@
 ;   * заводит C:\ProgramData\DualVPN с раздельными правами на conf\ и state\
 ;   * ставит и запускает службу DualVPN
 ;   * при удалении снимает службу, но оставляет конфиги
+;   * поверх установленной версии спрашивает: обновить или удалить
+;   * тихое обновление возвращает туннель и трей, как они были
 ;
 ; ВАЖНО: файл в UTF-8 С BOM. Без BOM Inno Setup читает его как ANSI, и вся
 ; кириллица в подписях кнопок и сообщениях превращается в мусор. Та же беда,
@@ -18,6 +20,7 @@
 #define MyCli "dualvpn.exe"
 
 [Setup]
+; Тот же GUID — в UninstKey в [Code]: по нему ищется установленная версия.
 AppId={{8F3A5C21-4E7B-4D96-9A1F-2C6B8D4E7A31}
 AppName={#MyName}
 AppVersion={#MyVersion}
@@ -110,7 +113,7 @@ Filename: "{sys}\sc.exe"; \
   Parameters: "failure {#MyName} reset= 86400 actions= restart/5000/restart/10000/restart/30000"; \
   Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyCli}"; Parameters: "service start"; \
-  Flags: runhidden waituntilterminated
+  Flags: runhidden waituntilterminated; AfterInstall: RestoreAfterUpdate
 
 ; runascurrentuser: трей требует администратора, а установщик уже с правами.
 ; По умолчанию postinstall запускает от исходного пользователя без прав, и
@@ -123,7 +126,8 @@ Filename: "{app}\{#MyExe}"; Description: "Запустить {#MyName}"; \
 ; (общих с dualvpn.exe). Пока он жив, деинсталлятор не может удалить папку и
 ; падает на «файл занят» — снятие службы ниже этого не решает вовсе, служба
 ; и трей друг с другом никак не связаны. Убиваем первым делом, до всего.
-Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#MyExe} /F"; \
+; /T — вместе с окном, которое трей держит прогретым (dualvpn.exe window).
+Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#MyExe} /F /T"; \
   Flags: runhidden waituntilterminated; RunOnceId: "KillTray"
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyName} Tray"" /F"; \
   Flags: runhidden waituntilterminated; RunOnceId: "DelTrayTask"
@@ -136,6 +140,10 @@ Filename: "{app}\{#MyCli}"; Parameters: "stop"; \
 ; выходит, и файлы ещё заняты процессом службы, когда их начинают удалять.
 Filename: "{sys}\net.exe"; Parameters: "stop {#MyName}"; \
   Flags: runhidden waituntilterminated; RunOnceId: "StopService"
+; Окно, пережившее трей, держит dualvpn.exe и _internal\. Служба уже
+; остановлена, так что под этим именем остались только окна.
+Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#MyCli} /F /T"; \
+  Flags: runhidden waituntilterminated; RunOnceId: "KillWindow"
 Filename: "{app}\{#MyCli}"; Parameters: "service remove"; \
   Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
 
@@ -147,19 +155,147 @@ Type: filesandordirs; Name: "{commonappdata}\{#MyName}\state"
 Type: filesandordirs; Name: "{app}"
 
 [Code]
-// Перед установкой закрываем трей и останавливаем службу: иначе файлы заняты
-// (служба работает из {app}\dualvpn.exe) и обновление падает на середине,
-// оставляя половину старой версии. net stop, а не sc stop: ждёт, пока служба
-// действительно остановится и опустит туннель.
-function PrepareToInstall(var NeedsRestart: Boolean): String;
+const
+  UninstKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F3A5C21-4E7B-4D96-9A1F-2C6B8D4E7A31}_is1';
+
+var
+  // Меню «уже установлено»; nil — ставим впервые.
+  ActionPage: TInputOptionWizardPage;
+  OldUninstaller: String;
+  // Удаление из меню прошло — закрываем мастер без «Выйти из установки?».
+  Leaving: Boolean;
+  // Что было до обновления: RestoreAfterUpdate возвращает так же.
+  TunnelWasUp, TrayWasRunning: Boolean;
+
+// Закрывает трей, окно и службу: иначе файлы заняты (служба работает из
+// {app}\dualvpn.exe) и обновление падает на середине, оставляя половину
+// старой версии. net stop, а не sc stop: ждёт, пока служба действительно
+// остановится и опустит туннель. dualvpn.exe убиваем только после неё —
+// под этим именем работает и служба, и окно трея.
+procedure StopEverything;
 var
   ResultCode: Integer;
+  Status: AnsiString;
+begin
+  // /T — вместе с окном, которое трей держит прогретым. 0 — было что убить.
+  TrayWasRunning := Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#MyExe} /F /T',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+  // status.json пишет служба (probe.py:write_status), отступ 1 — "up": true.
+  TunnelWasUp := LoadStringFromFile(
+       ExpandConstant('{commonappdata}\{#MyName}\state\status.json'), Status)
+       and (Pos('"up": true', Status) > 0);
+  // Служба не работала — status.json старый, туннеля не было.
+  if not Exec(ExpandConstant('{sys}\net.exe'), 'stop {#MyName}',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    TunnelWasUp := False;
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#MyCli} /F /T',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// После запуска новой службы — как было до обновления. Туннель при
+// включённом автоподключении служба поднимет сама. Трей в обычном режиме
+// запускает галочка на последней странице, а тихий её не показывает:
+// возвращаем его так же, как при входе, — только значок.
+procedure RestoreAfterUpdate;
+var
+  I, ResultCode: Integer;
+begin
+  if TunnelWasUp and not FileExists(ExpandConstant('{commonappdata}\{#MyName}\state\autostart')) then
+    // Канал службы поднимается не сразу после service start.
+    for I := 1 to 5 do
+    begin
+      if Exec(ExpandConstant('{app}\{#MyCli}'), 'start', '', SW_HIDE,
+              ewWaitUntilTerminated, ResultCode) and (ResultCode = 0) then
+        Break;
+      Sleep(3000);
+    end;
+  if TrayWasRunning and WizardSilent then
+    Exec(ExpandConstant('{app}\{#MyExe}'), '--background', '', SW_SHOWNORMAL,
+         ewNoWait, ResultCode);
+end;
+
+// Повторный запуск setup: обновить или удалить. В тихом режиме страниц нет,
+// выбран первый пункт — обновление (так ставит процедура из CLAUDE.md).
+procedure InitializeWizard;
+var
+  OldVersion, Title: String;
+begin
+  if not RegQueryStringValue(HKLM64, UninstKey, 'UninstallString', OldUninstaller) then
+    Exit;
+  RegQueryStringValue(HKLM64, UninstKey, 'DisplayVersion', OldVersion);
+  if OldVersion = '{#MyVersion}' then
+    Title := 'Переустановить версию {#MyVersion}'
+  else
+    Title := 'Обновить до версии {#MyVersion}';
+  if OldVersion = '' then
+    OldVersion := 'прошлая';
+  ActionPage := CreateInputOptionPage(wpWelcome,
+    '{#MyName} уже установлен', 'Установлена версия ' + OldVersion + '. Что сделать?',
+    'При обновлении конфиги, ключи VPN и настройки остаются на месте.',
+    True, False);
+  ActionPage.Add(Title);
+  ActionPage.Add('Удалить {#MyName}, конфиги и ключи VPN оставить');
+  ActionPage.Add('Удалить {#MyName} полностью, вместе с конфигами и ключами VPN');
+  ActionPage.SelectedValueIndex := 0;
+end;
+
+// Данные WebView2 окна (window.py:_storage_path). Только эти папки, не весь
+// %LOCALAPPDATA%\DualVPN: туда кладёт конфиги портативная версия.
+procedure DeleteWindowData;
+begin
+  DelTree(ExpandConstant('{localappdata}\{#MyName}\WebView2-admin'), True, True, True);
+  DelTree(ExpandConstant('{localappdata}\{#MyName}\WebView2-user'), True, True, True);
+  RemoveDir(ExpandConstant('{localappdata}\{#MyName}'));
+end;
+
+// Удаление прежней установкой: её деинсталлятор знает, что она ставила.
+// Трей, окно и службу гасим сами, папки окна чистим тоже — деинсталляторы
+// до этой версии не делали ни того, ни другого. /SILENT: вопрос про конфиги
+// уже задан в меню, а прогресс пусть будет виден.
+function RunUninstaller(Purge: Boolean): Boolean;
+var
+  ResultCode: Integer;
+begin
+  StopEverything;
+  Result := Exec(RemoveQuotes(OldUninstaller), '/SILENT /SUPPRESSMSGBOXES /NORESTART',
+                 '', SW_SHOW, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+  if not Result then
+  begin
+    MsgBox('Удалить не получилось: деинсталлятор вернул ' + IntToStr(ResultCode) + '.' + #13#10 +
+           'Попробуй через «Параметры → Приложения».', mbError, MB_OK);
+    Exit;
+  end;
+  DeleteWindowData;
+  if Purge then
+    DelTree(ExpandConstant('{commonappdata}\{#MyName}'), True, True, True);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (ActionPage = nil) or (CurPageID <> ActionPage.ID) or
+     (ActionPage.SelectedValueIndex = 0) then
+    Exit;
+  Result := False;
+  if RunUninstaller(ActionPage.SelectedValueIndex = 2) then
+  begin
+    MsgBox('{#MyName} удалён.', mbInformation, MB_OK);
+    Leaving := True;
+    WizardForm.Close;
+  end;
+end;
+
+procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
+begin
+  if Leaving then
+    Confirm := False;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
   SmPyd, Old: String;
 begin
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#MyExe} /F',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(ExpandConstant('{sys}\net.exe'), 'stop {#MyName}',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  StopEverything;
 
   // Версии до 0.2.7 писали в журнал событий, и служба журнала держит
   // servicemanager.pyd загруженным до перезагрузки: перезаписать его нельзя,
@@ -211,6 +347,8 @@ end;
 // оставлять каталог молча — это мусор. Спрашиваем; по умолчанию «Нет».
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  if CurUninstallStep = usPostUninstall then
+    DeleteWindowData;
   if (CurUninstallStep = usPostUninstall) and not UninstallSilent then
     if MsgBox('Удалить также конфиги и ключи VPN?' + #13#10 + #13#10 +
               ExpandConstant('{commonappdata}\{#MyName}') + #13#10 + #13#10 +
