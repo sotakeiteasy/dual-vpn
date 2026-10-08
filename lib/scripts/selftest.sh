@@ -20,7 +20,8 @@ head() { printf "\n%s\n" "$1"; }
 
 head "синтаксис"
 for f in "$BASE/vpn" "$BASE/install.sh" "$BASE/lib/scripts/install-daemon.sh" \
-         "$BASE/lib/scripts/selftest.sh"; do
+         "$BASE/lib/scripts/selftest.sh" "$BASE/lib/scripts/make-dmg.sh" \
+         "$BASE/lib/scripts/release.sh"; do
   bash -n "$f" 2>/dev/null && ok "$(basename "$f")" || bad "$(basename "$f")"
 done
 for f in "$BASE"/lib/scripts/*.py; do

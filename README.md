@@ -20,8 +20,8 @@
 
 ## Установка
 
-Скачай `.dmg` из [релизов](https://github.com/sotakeiteasy/dual-vpn/releases),
-перетащи в «Программы». Приложение не подписано, поэтому первый запуск —
+Скачай `.dmg` из [релизов](https://github.com/sotakeiteasy/dual-vpn/releases)
+(«DualVPN macOS X.Y.Z»; «Latest» там — Windows-версия), перетащи в «Программы». Приложение не подписано, поэтому первый запуск —
 правой кнопкой → «Открыть».
 
 Дальше в окне: «Установить службу…» (спросит пароль), «Добавить конфиг…»,
@@ -102,6 +102,7 @@ lib/scripts/
   tui.py                панель в терминале, общий пробер состояния
   selftest.sh           проверки
   make-dmg.sh           сборка образа для релиза
+  release.sh            выпуск: VERSION, тег mac-v*, пуш
 lib/launchd/            описание службы
 tests/                  тесты: python -m unittest, node --test
 windows/                вариант для Windows, со своим README
@@ -144,6 +145,23 @@ node --test tests/test_view.js                   # логика окна
 самим sing-box, запись причины отказа), а для собранного приложения —
 подпись, запуск, исключения в JS и то, что каждая часть окна отработала.
 `install.sh` прогоняет их сам и при провале ничего не ставит.
+
+## Выпуск
+
+```bash
+bash lib/scripts/release.sh 0.1.4
+```
+
+Скрипт проверяет, что дерево чистое и `main` совпадает с `origin/main`,
+гоняет тесты, пишет номер в `VERSION`, коммитит «Выпуск macOS 0.1.4», ставит
+тег `mac-v0.1.4` и пушит. Дальше GitHub Actions (`.github/workflows/mac.yml`)
+на macOS-раннере качает sing-box, собирает `.app`, прогоняет `selftest.sh`
+и выкладывает релиз «DualVPN macOS 0.1.4» с `DualVPN-0.1.4.dmg` и `.sha256`.
+Тег с номером, отличным от `VERSION`, сборку роняет.
+
+Теги macOS — `mac-v*`, у Windows-версии — `v*` в ветке `windows`; сборки друг
+друга не задевают. Образ без релиза — «Run workflow» у workflow macOS, он
+появится артефактом прогона. Локально тот же образ: `bash lib/scripts/make-dmg.sh`.
 
 ## Удаление
 
