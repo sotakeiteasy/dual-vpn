@@ -108,6 +108,14 @@ BASE, DATA = paths()
 os.environ["DUALVPN_DATA"] = DATA
 
 import rumps                      # noqa: E402
+from AppKit import (NSAttributedString, NSColor, NSControlSizeSmall,  # noqa: E402
+                    NSControlStateValueOff, NSControlStateValueOn, NSFont,
+                    NSFontAttributeName, NSFontWeightMedium,
+                    NSForegroundColorAttributeName, NSImage,
+                    NSImageSymbolConfiguration, NSImageView,
+                    NSLineBreakByTruncatingTail, NSMutableAttributedString,
+                    NSSwitch, NSTextAlignmentRight, NSTextField, NSView)
+from Foundation import NSObject, NSRunLoop, NSRunLoopCommonModes  # noqa: E402
 from PyObjCTools import AppHelper  # noqa: E402
 import control                    # noqa: E402
 import tui                        # noqa: E402
@@ -248,26 +256,22 @@ class App(rumps.App):
 
         self.ctrl = control.Controller(SystemOps(), on_change=self.changed, log=log)
 
-        # Строки состояния. Без callback macOS рисует пункт серым, как
-        # недоступный, — состояние выглядело выключенным при поднятом туннеле.
-        # Пустой обработчик оставляет строку обычной, но нажатие ничего не делает.
-        self.title_item = rumps.MenuItem("…", callback=lambda _s: None)
-        self.menu.add(self.title_item)
-        self.lines = []
-        for _ in range(3):
-            it = rumps.MenuItem("", callback=lambda _s: None)
-            self.lines.append(it)
-            self.menu.add(it)
+        # Шапка — свой вид внутри пункта, как у системного Wi-Fi: тумблер,
+        # состояние, строки туннелей. Обычными пунктами состояние не
+        # показать: с пустым обработчиком «Выключено» над «Включить»
+        # подсвечивалось и выглядело как ещё одна кнопка, а неактивный пункт
+        # macOS гасит серым, какой цвет ни задай.
+        self.status = StatusView(self.on_switch)
+        self.status_item = rumps.MenuItem("")
+        self.status_item._menuitem.setView_(self.status.view)
+        self.menu.add(self.status_item)
         self.menu.add(rumps.separator)
         self.act = {
-            "start":   rumps.MenuItem("Включить", callback=self.on_start),
-            "stop":    rumps.MenuItem("Выключить", callback=self.on_stop),
             "restart": rumps.MenuItem("Перезапустить", callback=self.on_restart),
             "details": rumps.MenuItem("Подробнее…", callback=self.on_window),
         }
         for it in self.act.values():
             self.menu.add(it)
-        self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Открыть окно…", callback=self.on_window))
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("Выход", callback=self.on_quit))
@@ -281,19 +285,24 @@ class App(rumps.App):
             rumps.Timer(lambda _t: self.on_window(None), 1.0).start()
         threading.Thread(target=tui.prober, daemon=True).start()
         self.refresh(None)
-        rumps.Timer(self.refresh, REFRESH).start()
-        rumps.Timer(self.blink, BLINK).start()
+        for fn, every in ((self.refresh, REFRESH), (self.blink, BLINK)):
+            t = rumps.Timer(fn, every)
+            t.start()
+            # rumps ставит таймер только в обычный режим цикла, а пока меню
+            # открыто, цикл крутится в режиме отслеживания — и тумблер с
+            # состоянием замирали бы до закрытия меню.
+            NSRunLoop.currentRunLoop().addTimer_forMode_(t._nstimer, NSRunLoopCommonModes)
 
     # ------------------------------------------------------------ кнопки
     #
-    # Все три возвращаются мгновенно: работа идёт в потоке контроллера,
-    # а меню перерисовывается по его сигналу (changed).
+    # Возвращаются мгновенно: работа идёт в потоке контроллера, а меню
+    # перерисовывается по его сигналу (changed).
 
-    def on_start(self, _):
-        self.ctrl.start()
-
-    def on_stop(self, _):
-        self.ctrl.stop()
+    def on_switch(self, on):
+        if on:
+            self.ctrl.start()
+        else:
+            self.ctrl.stop()
 
     def on_restart(self, _):
         self.ctrl.restart()
@@ -391,15 +400,149 @@ class App(rumps.App):
         elif not (self._icon_name or "").startswith("busy"):
             self.set_icon("busy-a")
 
-        self.title_item.title = m["title"]
-        for i, it in enumerate(self.lines):
-            text = m["lines"][i] if i < len(m["lines"]) else ""
-            it.title = text
-            show(it, bool(text))
-
-        self.act["start"].title = m["start_label"]
+        self.status.set(m)
         for key, it in self.act.items():
             show(it, m["actions"][key])
+
+
+# Цвет точки у строки состояния — по значку.
+DOT_COLOR = {"on": "systemGreenColor", "bad": "systemRedColor",
+             "busy": "systemOrangeColor", "off": "tertiaryLabelColor"}
+# Иконка туннеля (SF Symbols) и цвет кружка под ней.
+ROW_SYMBOL = {"Личный": "globe", "Корп": "building.2"}
+ROW_COLOR = {True: "controlAccentColor", False: "systemRedColor", None: "systemGrayColor"}
+
+
+class FlippedView(NSView):
+    """Вид с началом координат сверху: шапку раскладываем сверху вниз."""
+
+    def isFlipped(self):
+        return True
+
+
+class SwitchTarget(NSObject):
+    """Получатель нажатий тумблера: у AppKit цель — объект Objective-C."""
+
+    def toggled_(self, sender):
+        self.handler(sender.state() == NSControlStateValueOn)
+
+
+class StatusView:
+    """Шапка меню, как у системного Wi-Fi: «DualVPN» и тумблер, под ними
+    состояние с цветной точкой, ниже по строке на туннель с иконкой в
+    кружке. Вид в пункте меню не подсвечивается и не нажимается — на кнопку
+    не похож, а серым «недоступным» не становится."""
+
+    W = 280         # ширина шапки; меню подстраивается под самый широкий пункт
+    INSET = 14      # отступ от края меню — как у текста обычных пунктов
+    ROW_H = 34
+    CIRCLE = 26
+    NAME_W = 80     # колонка названий туннелей; значения — справа от неё
+
+    def __init__(self, on_switch):
+        self.view = FlippedView.alloc().initWithFrame_(((0, 0), (self.W, 60)))
+        base = NSFont.menuFontOfSize_(0).pointSize()
+
+        self.name = self._label(NSFont.boldSystemFontOfSize_(base))
+        self.name.setStringValue_("DualVPN")
+        self.target = SwitchTarget.alloc().init()
+        self.target.handler = on_switch
+        self.switch = NSSwitch.alloc().init()
+        self.switch.setControlSize_(NSControlSizeSmall)
+        self.switch.setTarget_(self.target)
+        self.switch.setAction_("toggled:")
+        self.view.addSubview_(self.switch)
+        self.state = self._label(NSFont.menuFontOfSize_(base - 1))
+        self.note = self._label(NSFont.menuFontOfSize_(base - 2))
+        self.note.setTextColor_(NSColor.secondaryLabelColor())
+
+        self.rows = []
+        for _ in ROW_SYMBOL:
+            circle = NSView.alloc().initWithFrame_(((0, 0), (self.CIRCLE, self.CIRCLE)))
+            circle.setWantsLayer_(True)
+            circle.layer().setCornerRadius_(self.CIRCLE / 2)
+            icon = NSImageView.alloc().initWithFrame_(((0, 0), (self.CIRCLE, self.CIRCLE)))
+            icon.setContentTintColor_(NSColor.whiteColor())
+            circle.addSubview_(icon)
+            self.view.addSubview_(circle)
+            name = self._label(NSFont.menuFontOfSize_(base))
+            value = self._label(NSFont.menuFontOfSize_(base - 1))
+            value.setTextColor_(NSColor.secondaryLabelColor())
+            value.setAlignment_(NSTextAlignmentRight)
+            self.rows.append((circle, icon, name, value))
+        self._shown = None
+
+    def _label(self, font):
+        field = NSTextField.labelWithString_("")
+        field.setFont_(font)
+        field.setLineBreakMode_(NSLineBreakByTruncatingTail)
+        self.view.addSubview_(field)
+        return field
+
+    def set(self, m):
+        # Тумблер — до проверки на изменения: если нажатие ничего не
+        # запустило, модель та же, а тумблер остался бы там, куда его
+        # перещёлкнули. Доступен, только когда есть что переключать: посреди
+        # операции стоит там, куда едем, и ждёт результата.
+        self.switch.setState_(NSControlStateValueOn if m["switch"] else NSControlStateValueOff)
+        self.switch.setEnabled_(m["actions"]["start"] or m["actions"]["stop"])
+
+        key = (m["title"], m["note"], m["icon"], repr(m["rows"]))
+        if key == self._shown:
+            return                      # раз в две секунды — без лишних перерисовок
+        self._shown = key
+        x, w = self.INSET, self.W - 2 * self.INSET
+
+        sw, sh = self.switch.fittingSize()
+        self.switch.setFrame_(((self.W - self.INSET - sw, 8), (sw, sh)))
+        self.name.setFrame_(((x, 8 + (sh - 17) / 2), (w - sw - 8, 17)))
+        y = 8 + sh + 2
+
+        dot = getattr(NSColor, DOT_COLOR[m["icon"]])()
+        title_color = NSColor.systemRedColor() if m["icon"] == "bad" else NSColor.secondaryLabelColor()
+        text = NSMutableAttributedString.alloc().init()
+        text.appendAttributedString_(_styled("●  ", self.state.font(), dot))
+        text.appendAttributedString_(_styled(m["title"], self.state.font(), title_color))
+        self.state.setAttributedStringValue_(text)
+        self.state.setFrame_(((x, y), (w, 16)))
+        y += 16
+
+        self.note.setHidden_(not m["note"])
+        if m["note"]:
+            self.note.setStringValue_(m["note"])
+            self.note.setToolTip_(m["note"])
+            self.note.setFrame_(((x, y + 1), (w, 15)))
+            y += 16
+
+        if m["rows"]:
+            y += 6
+        for i, (circle, icon, name, value) in enumerate(self.rows):
+            row = m["rows"][i] if i < len(m["rows"]) else None
+            for v in (circle, name, value):
+                v.setHidden_(row is None)
+            if row is None:
+                continue
+            circle.setFrameOrigin_((x, y + (self.ROW_H - self.CIRCLE) / 2))
+            circle.layer().setBackgroundColor_(getattr(NSColor, ROW_COLOR[row["ok"]])().CGColor())
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                ROW_SYMBOL.get(row["name"], "network"), row["name"])
+            icon.setImage_(img.imageWithSymbolConfiguration_(
+                NSImageSymbolConfiguration.configurationWithPointSize_weight_(12, NSFontWeightMedium)))
+            left = x + self.CIRCLE + 10
+            name.setStringValue_(row["name"])
+            name.setFrame_(((left, y + (self.ROW_H - 17) / 2), (self.NAME_W, 17)))
+            value.setStringValue_(row["value"])
+            right = left + self.NAME_W
+            value.setFrame_(((right, y + (self.ROW_H - 16) / 2), (self.W - self.INSET - right, 16)))
+            y += self.ROW_H
+
+        self.view.setFrameSize_((self.W, y + 6))
+        self.view.setNeedsDisplay_(True)
+
+
+def _styled(text, font, color):
+    return NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: font, NSForegroundColorAttributeName: color})
 
 
 def show(item, visible):

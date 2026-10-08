@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Что показать в меню-баре: значок, строки состояния и какие кнопки доступны.
+Что показать в меню-баре: значок, тумблер, состояние и какие кнопки доступны.
 
 Отдельно от menubar.py, потому что там rumps и AppKit, а решение «что
 показывать» — чистая функция от состояния, и её надо проверять тестами.
@@ -24,8 +24,7 @@ MAX_LINE = 64
 
 
 def _clip(text, n=MAX_LINE):
-    """В одну строку и не длиннее n. Пробелы внутри не схлопываем: ими
-    выровнены колонки «личный   ✓ …» / «корп     ✓ …»."""
+    """В одну строку и не длиннее n."""
     text = re.sub(r"\s*\n\s*", " ", str(text)).strip()
     return text if len(text) <= n else text[:n - 1] + "…"
 
@@ -37,66 +36,73 @@ def is_up(st):
 def menu_model(st, op):
     """st — показания пробера (tui.ST), op — Controller.snapshot().
 
+    Меню устроено как системные (Wi-Fi, Bluetooth): включение — тумблером в
+    шапке, под ним строка состояния, ниже по строке на туннель. Состояние —
+    текст, а не пункт меню: раньше «Выключено» стояло над «Включить» и
+    выглядело как ещё одна кнопка.
+
     Возвращает:
       icon     off | on | busy | bad
-      title    главная строка
-      lines    строки подробностей (без действий)
+      title    строка состояния под тумблером
+      note     пояснение под ней: шаг операции или причина отказа, '' если нет
+      switch   положение тумблера: True — включено или включается
+      rows     [{"name", "value", "ok"}] — по туннелю; ok: True | False | None
+               (None — ещё не ясно). Только у поднятого.
       actions  {"start", "stop", "restart", "details"} → bool
-      start_label  подпись кнопки включения
     """
     up = is_up(st)
     actions = {"start": False, "stop": False, "restart": False, "details": False}
-    out = {"icon": "off", "title": "Выключено", "lines": [], "actions": actions,
-           "start_label": "Включить"}
+    out = {"icon": "off", "title": "Выключено", "note": "", "switch": False,
+           "rows": [], "actions": actions}
 
     if op.get("busy"):
+        phase = op.get("phase")
         out["icon"] = "busy"
-        out["title"] = BUSY_TITLE.get(op.get("phase"), "Подожди…")
-        if op.get("step"):
-            out["lines"] = [_clip(op["step"])]
+        out["title"] = BUSY_TITLE.get(phase, "Подожди…")
+        out["note"] = _clip(op.get("step") or "")
+        # Тумблер сразу встаёт туда, куда едем, — как у системного Wi-Fi.
+        out["switch"] = phase != "stopping" if phase in BUSY_TITLE else up
         return out                      # в переходе кнопок нет: ждём результата
 
     if not up and op.get("error"):
         out["icon"] = "bad"
         out["title"] = "Не удалось включить"
         first = op["error"].strip().splitlines()[0] if op["error"].strip() else ""
-        out["lines"] = [_clip(first)] if first else []
+        out["note"] = _clip(first)
         actions["start"] = True
         actions["details"] = True
-        out["start_label"] = "Попробовать снова"
         return out
 
     if not up:
         actions["start"] = True
         return out
 
-    # Поднят. Заголовок обязан учитывать все строки ниже, иначе сверху
-    # «всё работает», а в строке личного — «мимо туннеля».
+    # Поднят. Строка состояния обязана учитывать все строки ниже, иначе
+    # сверху «всё работает», а в строке личного — «мимо туннеля».
+    out["switch"] = True
     actions["stop"] = True
     actions["restart"] = True
     corp_ok = bool(st.get("corp_ip"))
     leak6 = st.get("v6_leak")
-    leak = st.get("exit_state") == "leak"
+    state = st.get("exit_state")
     if leak6:
         out["icon"], out["title"] = "bad", "Утечка IPv6"
-    elif leak:
+    elif state == "leak":
         out["icon"], out["title"] = "bad", "Трафик идёт мимо туннеля"
     elif not corp_ok:
-        out["icon"], out["title"] = "on", "Включено · корп не отвечает"
+        out["icon"], out["title"] = "on", "Корп не отвечает"
     else:
-        out["icon"], out["title"] = "on", "Включено · всё работает"
+        out["icon"], out["title"] = "on", "Всё работает"
 
-    ip = st.get("exit_ip") or ""
-    state = st.get("exit_state")
-    if state == "tunnel":
-        personal = f"личный   ✓ {ip}"
-    elif state == "leak":
-        personal = f"личный   ✗ мимо туннеля {ip}".rstrip()
-    else:
-        personal = "личный   проверяю…"
-    corp = f"корп     ✓ {st['corp_ip']}" if corp_ok else "корп     ✗ не отвечает"
+    # Без адресов: в меню они только перегружали строки, а смотрят их
+    # в окне. Для личного важнее, где выход, чем какой у него IP.
     place = " ".join(x for x in (st.get("exit_country"), st.get("exit_city")) if x)
-    out["lines"] = [_clip(personal), _clip(corp)]
-    if place:
-        out["lines"].append(_clip(f"выход    {place}"))
+    if state == "tunnel":
+        personal = {"value": place or "через туннель", "ok": True}
+    elif state == "leak":
+        personal = {"value": "мимо туннеля", "ok": False}
+    else:
+        personal = {"value": "проверяю…", "ok": None}
+    corp = {"value": "на связи" if corp_ok else "не отвечает", "ok": corp_ok}
+    out["rows"] = [{"name": "Личный", **personal}, {"name": "Корп", **corp}]
     return out
