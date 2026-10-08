@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import traceback
 
 import control
 import corpconf
@@ -596,8 +597,14 @@ class Window:
             err = str(e)
         except OSError as e:
             err = f"обновление: {e}"
+        except Exception as e:
+            # Без этого поток умирал молча: окно навсегда оставалось на
+            # «открываю образ», а причины не было ни в логе, ни на экране.
+            self.log(f"обновление: сбой\n{traceback.format_exc().rstrip()}")
+            err = f"сбой обновления: {type(e).__name__}: {e}"[:160]
         finally:
-            if mounted:
+            # И по факту: том мог подключиться, а mount — упасть уже после.
+            if mounted or os.path.ismount(point):
                 update.unmount(point)
             shutil.rmtree(tmp, ignore_errors=True)
 

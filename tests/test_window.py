@@ -125,6 +125,21 @@ class UpdateTests(unittest.TestCase):
         self.run_update("")
         self.assertTrue(self.w.relaunched)
 
+    def test_unexpected_error_is_shown_and_volume_detached(self):
+        # Том подключился, а mount упал не OSError — раньше поток умирал
+        # молча, окно висело на «открываю образ», образ оставался открытым.
+        logged = []
+        self.w.log = logged.append
+        with mock.patch.object(window.update, "download", return_value="/x.dmg"), \
+             mock.patch.object(window.update, "mount", side_effect=ValueError("плохой вывод")), \
+             mock.patch.object(window.os.path, "ismount", return_value=True), \
+             mock.patch.object(window.update, "unmount") as unmount:
+            self.w._update(self.INFO)
+        unmount.assert_called_once()
+        self.assertEqual(self.w.upd["state"], "error")
+        self.assertIn("ValueError: плохой вывод", self.w.upd["error"])
+        self.assertTrue(any("Traceback" in line for line in logged), logged)
+
     def osa(self, rc, stderr=""):
         done = mock.Mock(returncode=rc, stdout="", stderr=stderr)
         with mock.patch.object(window.subprocess, "run", return_value=done) as run:
