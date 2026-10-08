@@ -93,7 +93,9 @@ button {
 button:hover:not(:disabled):not(.primary) { background: var(--hover); }
 button:active:not(:disabled):not(.primary) { background: var(--pressed); }
 button:disabled { opacity: 0.45; cursor: default; }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Только после Tab (body.kbd): при показе окна WebView2 сам ставит фокус на
+   первую кнопку, и рамка висела на «Включить/Выключить» без всякой клавиатуры. */
+body.kbd button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button.busy { color: var(--dim); }
 button.primary { background: var(--accent); border-color: transparent; color: var(--on-accent);
                  font-weight: 600; }
@@ -871,6 +873,9 @@ document.getElementById('tabs').onclick = e => {
   document.getElementById('lines').hidden = !log;
   document.getElementById('how').hidden = log;
 };
+
+addEventListener('keydown', e => { if (e.key === 'Tab') document.body.classList.add('kbd'); });
+addEventListener('mousedown', () => document.body.classList.remove('kbd'));
 
 document.getElementById('side').addEventListener('click', e => {
   const mb = e.target.closest('[data-menu]');
