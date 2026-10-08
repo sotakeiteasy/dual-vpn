@@ -963,8 +963,8 @@ class Window:
         try:
             os.unlink(os.path.join(self.data, "conf", f"{name}.conf"))
             self.log(f"удалён конфиг: {name}")
-            # Иначе демон при старте не найдёт профиль, выйдет с ошибкой,
-            # launchd поднимет его снова — и так по кругу, без объяснений.
+            # Иначе следующий «Включить» запустит демон с профилем, которого
+            # больше нет, и туннель не поднимется.
             prof = os.path.join(self.state, "profile")
             if os.path.exists(prof):
                 with open(prof, encoding="utf-8") as fh:

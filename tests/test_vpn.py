@@ -48,8 +48,8 @@ DAEMON={1 if daemon else 0}
             return fh.read()
 
     def test_daemon_exits_zero_and_records_reason(self):
-        # Ненулевой выход launchd перезапускает (KeepAlive/SuccessfulExit) —
-        # битый конфиг крутился бы по кругу каждые 10 с.
+        # Со старым plist (KeepAlive/SuccessfulExit) ненулевой выход launchd
+        # перезапускает — битый конфиг крутился бы по кругу каждые 10 с.
         r = self.run_vpn("cmd_start", daemon=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         err = self.last_error()

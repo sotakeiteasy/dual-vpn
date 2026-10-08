@@ -148,6 +148,12 @@ import plistlib, sys
 d = plistlib.load(open(sys.argv[1], "rb"))
 sys.exit(0 if d.get("RunAtLoad") is False else 1)
 PYEOF
+# Любой KeepAlive подразумевает RunAtLoad: служба стартовала бы при загрузке.
+"$PY" - "$TMP" <<'PYEOF' && ok "KeepAlive нет (не стартует при загрузке)" || bad "есть KeepAlive — служба поднимется при загрузке"
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+sys.exit(0 if "KeepAlive" not in d else 1)
+PYEOF
 rm -f "$TMP"
 
 # ---------------------------------------------------------------- ротация
