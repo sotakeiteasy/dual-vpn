@@ -1,5 +1,8 @@
 """Пункты конфигов в меню трея: подписи и цвета кружков из статуса службы."""
 
+import sys
+import types
+
 import pytest
 
 from dualvpn import tray
@@ -77,8 +80,14 @@ def test_имена_конфигов(st, names):
     assert tray._conf_names(st) == names
 
 
-def _hooked(calls):
-    from pystray._util import win32
+def _hooked(calls, monkeypatch):
+    # Заглушка вместо pystray: в CI тесты идут на Linux, где его нет.
+    win32 = types.SimpleNamespace(WM_NOTIFY=0x401, WM_LBUTTONUP=0x0202,
+                                  WM_RBUTTONUP=0x0205)
+    util = types.SimpleNamespace(win32=win32)
+    monkeypatch.setitem(sys.modules, "pystray", types.SimpleNamespace(_util=util))
+    monkeypatch.setitem(sys.modules, "pystray._util", util)
+    monkeypatch.setitem(sys.modules, "pystray._util.win32", win32)
 
     class Icon:
         _message_handlers = {win32.WM_NOTIFY: lambda w, l: calls.append(("orig", l))}
@@ -90,18 +99,18 @@ def _hooked(calls):
     return app.icon._message_handlers[win32.WM_NOTIFY], win32
 
 
-def test_двойной_левый_клик_открывает_окно():
+def test_двойной_левый_клик_открывает_окно(monkeypatch):
     calls = []
-    notify, _ = _hooked(calls)
+    notify, _ = _hooked(calls, monkeypatch)
 
     notify(0, tray.WM_LBUTTONDBLCLK)
 
     assert calls == [("window", None)]
 
 
-def test_одиночный_левый_клик_окно_не_открывает():
+def test_одиночный_левый_клик_окно_не_открывает(monkeypatch):
     calls = []
-    notify, win32 = _hooked(calls)
+    notify, win32 = _hooked(calls, monkeypatch)
 
     notify(0, win32.WM_LBUTTONUP)
 
