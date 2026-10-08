@@ -19,15 +19,21 @@ import sys
 import threading
 import time
 
-from . import ipc, paths
+from . import instance, ipc, paths, window
 
 # Включение у службы идёт ~1,2 с: при опросе раз в три секунды жёлтый
 # «включаю» почти не попадал в опрос, если включали из окна.
 POLL_EVERY = 1.0
 # Сколько выход ждёт, пока служба закончит начатый start и примет stop.
 QUIT_WAIT = 40.0
-# Сколько даём окну показаться, прежде чем считать его процесс зависшим.
-WINDOW_START_WAIT = 15.0
+# Сколько живое окно имеет на то, чтобы принять сигнал и стать видимым.
+# Не стало — процесс завис, его снимаем и запускаем новое окно.
+WINDOW_SHOW_WAIT = 5.0
+# Через сколько после старта трей прогревает спрятанное окно: сразу после
+# входа в систему машине и так есть чем заняться.
+WARM_AFTER = 10.0
+# Сколько второй запуск ждёт, пока первый трей начнёт слушать «покажи окно».
+OPEN_SIGNAL_WAIT = 2.0
 
 # Пределы полей NOTIFYICONDATA с завершающим нулём. pystray их не обрезает:
 # строка длиннее — ValueError, и падает тот поток, который менял подпись.
@@ -80,7 +86,9 @@ class Tray:
         self.status = {}
         self._last_menu_sig = None
         self._window_proc = None
-        self._window_started = 0.0
+        # Открытие окна зовут меню, второй запуск ярлыка и прогрев —
+        # каждый из своего потока; без замка два разом запустили бы два окна.
+        self._window_lock = threading.Lock()
         # Команды трея, на которые служба ещё не ответила. Пока они есть,
         # значок жёлтый сразу, а не с первым опросом, заставшим службу занятой.
         self._pending = 0
@@ -434,23 +442,44 @@ class Tray:
         потоке; в одном процессе они друг друга блокируют. Отдельный процесс
         обходится дешевле, чем попытка их подружить.
 
-        Окно одно: если прошлое ещё живо, поднимаем его. Раньше каждый
-        клик запускал новое, а запоминалось только последнее — «Закрыть» снимал
-        его, а первое оставалось висеть.
+        Окно одно: живое (в том числе прогретое и спрятанное) получает сигнал
+        «покажись», новое запускается, только если прежнего нет или оно не
+        показалось за WINDOW_SHOW_WAIT. Раньше каждый клик запускал новое, а
+        запоминалось только последнее — «Закрыть» снимал его, а первое
+        оставалось висеть. Ожидание — в своём потоке: зовут нас и из
+        обработчика меню, а он идёт в потоке значка.
         """
+        threading.Thread(target=self._open_window, daemon=True).start()
+
+    def _open_window(self):
+        with self._window_lock:
+            if self.stop_event.is_set():
+                return
+            proc = self._window_proc
+            if proc is not None and proc.poll() is None:
+                # Фокус есть у трея (по нему щёлкнули), а окно — другой процесс.
+                # Любому, а не proc.pid: у портативной (onefile) окно в дочернем.
+                instance.allow_foreground()
+                if (instance.signal(instance.WINDOW_SHOW, wait=WINDOW_SHOW_WAIT)
+                        and _wait_visible(proc.pid, WINDOW_SHOW_WAIT)):
+                    return
+                # Живой процесс, не показавший окна, завис: без замены панель
+                # больше не открылась бы.
+                proc.terminate()
+            self._launch_window(hidden=False)
+
+    def _warm(self):
+        """Прогрев: спрятанное окно заранее, чтобы первый показ был мгновенным."""
+        with self._window_lock:
+            proc = self._window_proc
+            if self.stop_event.is_set() or (proc is not None and proc.poll() is None):
+                return
+            self._launch_window(hidden=True)
+
+    def _launch_window(self, hidden, retry=True):
+        """Новый процесс окна. Только под _window_lock."""
         import subprocess
         import sys
-
-        proc = self._window_proc
-        if proc is not None and proc.poll() is None:
-            if _raise_window(f"DualVPN {paths.version()}"):
-                return
-            # Окно ещё может не показаться (WebView2 стартует секунду-две) —
-            # оно само встанет на передний план. Но процесс без окна дольше
-            # WINDOW_START_WAIT завис: без замены панель больше не открылась бы.
-            if time.monotonic() - self._window_started < WINDOW_START_WAIT:
-                return
-            proc.terminate()
 
         if getattr(sys, "frozen", False):
             # sys.executable здесь — сам трей (DualVPN-Tray.exe). У портативной
@@ -474,6 +503,7 @@ class Tray:
                 cmd = [sibling, "window"]
         else:
             cmd = [sys.executable, "-m", "dualvpn.cli", "window"]
+        cmd += ["--resident"] + (["--hidden"] if hidden else [])
 
         # Раньше вывод окна уходил в никуда: при падении (например, из-за
         # неверного пути к index.html) причину нельзя было увидеть нигде.
@@ -483,10 +513,25 @@ class Tray:
                       "a", encoding="utf-8", errors="replace")
         except OSError:
             log = subprocess.DEVNULL
-        self._window_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd, stdout=log, stderr=log,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        self._window_started = time.monotonic()
+        self._window_proc = proc
+        threading.Thread(target=self._watch_window, args=(proc, hidden, retry),
+                         daemon=True).start()
+
+    def _watch_window(self, proc, hidden, retry):
+        """Окно, чей WebView2 не поднялся, выходит с window.READY_LOST.
+
+        Показываемое запускаем ещё раз — один раз: сбой бывает разовым, а
+        повторяющийся перезапуском не лечится. Прогретое не трогаем: новое
+        окно запустит первый же показ.
+        """
+        if proc.wait() != window.READY_LOST or hidden or not retry:
+            return
+        with self._window_lock:
+            if self._window_proc is proc and not self.stop_event.is_set():
+                self._launch_window(hidden=False, retry=False)
 
     def on_quit(self):
         """Выключает VPN и закрывает значок — в обеих версиях.
@@ -529,9 +574,12 @@ class Tray:
             # Окно — отдельный процесс; без трея ему некому быть, и оно
             # висело бы в диспетчере задач после «Закрыть». В finally: сбой
             # вызова не должен оставить процесс без значка и без выхода.
-            proc = self._window_proc
-            if proc is not None and proc.poll() is None:
-                proc.terminate()
+            # Под замком: окно, запущенное минуту назад из другого потока,
+            # тоже должно закрыться, а новое после stop_event не запустится.
+            with self._window_lock:
+                proc = self._window_proc
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
             if self.icon is not None:
                 self.icon.stop()
 
@@ -547,7 +595,7 @@ class Tray:
 
     # -------------------------------------------------------------- запуск
 
-    def run(self):
+    def run(self, background=False):
         import pystray
 
         _dark_menus()
@@ -555,7 +603,23 @@ class Tray:
             "dualvpn", _icon_image("off"), f"DualVPN {paths.version()}",
             menu=self._menu())
         self._hook_menu()
+        self._start_window(background)
         self.icon.run(setup=self._setup)
+
+    def _start_window(self, background):
+        """Ярлык — окно сразу; вход в систему (--background) — только значок,
+        а окно прогревается спрятанным. Повторный запуск ярлыка приходит
+        сигналом TRAY_OPEN (см. already_running)."""
+        try:
+            instance.listen(instance.TRAY_OPEN, self.on_window)
+        except OSError:
+            pass                   # окно откроется из меню, не с ярлыка
+        if background:
+            timer = threading.Timer(WARM_AFTER, self._warm)
+            timer.daemon = True
+            timer.start()
+        else:
+            self.on_window()
 
     def _setup(self, icon):
         """Опрос — только после показа значка. pystray ставит видимость не
@@ -745,32 +809,74 @@ def _dark_menus():
         pass
 
 
-def _raise_window(title):
-    """Выводит уже открытое окно на передний план. False — окна не нашлось.
+def _child_pids(pid):
+    """pid и его прямые дети. Окно бывает не в запущенном процессе:
+    портативный onefile-exe — загрузчик, Python идёт его ребёнком; то же
+    у python.exe из venv при запуске из исходников."""
+    import ctypes
+    from ctypes import wintypes
 
-    SW_RESTORE только для свёрнутого: развёрнутое на весь экран он бы
-    уменьшил. Трей и окно оба от администратора, так что UIPI
-    SetForegroundWindow не режет.
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", wintypes.LONG), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260)]
+
+    k = ctypes.WinDLL("kernel32")
+    k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    k.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    pids = {pid}
+    snap = k.CreateToolhelp32Snapshot(0x2, 0)              # TH32CS_SNAPPROCESS
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        return pids
+    try:
+        entry = PROCESSENTRY32W(dwSize=ctypes.sizeof(PROCESSENTRY32W))
+        ok = k.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            if entry.th32ParentProcessID == pid:
+                pids.add(entry.th32ProcessID)
+            ok = k.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        k.CloseHandle(snap)
+    return pids
+
+
+def _wait_visible(pid, timeout):
+    """Ждёт видимое окно верхнего уровня у процесса pid (или его ребёнка).
+    False — не дождались.
+
+    По pid, а не по заголовку: окно с тем же именем могло остаться от процесса,
+    запущенного из командной строки, а спрятанное прогретое окно FindWindow находил
+    бы и невидимым.
     """
-    import pywintypes
-    import win32con
     import win32gui
+    import win32process
 
-    try:
-        hwnd = win32gui.FindWindow(None, title)
-    except pywintypes.error:
-        return False
-    if not hwnd:
-        return False
-    # Окно есть — значит, True, даже если Windows не отдала ему фокус:
-    # иначе трей счёл бы живое окно зависшим и перезапустил бы его.
-    try:
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE
-                            if win32gui.IsIconic(hwnd) else win32con.SW_SHOW)
-        win32gui.SetForegroundWindow(hwnd)
-    except pywintypes.error:
-        pass
-    return True
+    def visible():
+        pids = _child_pids(pid)
+        found = []
+
+        def each(hwnd, _extra):
+            if (win32gui.IsWindowVisible(hwnd)
+                    and win32process.GetWindowThreadProcessId(hwnd)[1] in pids):
+                found.append(hwnd)
+            return True
+
+        win32gui.EnumWindows(each, None)
+        return bool(found)
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if visible():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
 
 
 def _pick_file(title, filters):
@@ -800,8 +906,30 @@ def _pick_file(title, filters):
         return path, fh.read()
 
 
-def run():
-    Tray().run()
+def already_running(background=False):
+    """True — трей этого сеанса уже есть; ему передано «покажи окно».
+
+    Задача при входе (background) окно не открывает: трей уже запустили
+    руками, и незапрошенная панель поверх всего только мешала бы.
+    Мьютекс не создался по другой причине — считаем себя первым: лишний
+    значок лучше, чем ни одного.
+    """
+    try:
+        if instance.claim():
+            return False
+    except OSError:
+        return False
+    if not background:
+        # Фокус сейчас у нас (щёлкнули ярлык), а окно покажет другой процесс.
+        instance.allow_foreground()
+        instance.signal(instance.TRAY_OPEN, wait=OPEN_SIGNAL_WAIT)
+    return True
+
+
+def run(background=False):
+    if already_running(background):
+        return
+    Tray().run(background)
     # Значок закрыт — процесс обязан закончиться. Обычный выход ждёт все
     # недемонические потоки, а их может оставить COM диалога выбора файла или
     # pywin32; тогда DualVPN-Tray.exe остался бы висеть без значка, и снять

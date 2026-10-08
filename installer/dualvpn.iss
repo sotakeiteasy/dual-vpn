@@ -187,6 +187,7 @@ end;
 // ярлык в «Автозагрузке»: трей требует администратора, и оттуда Windows его
 // не запускает. Без ограничения по времени (по умолчанию задачу снимают
 // через 72 часа) и без остановки при переходе на батарею.
+// --background: при входе только значок, панель управления не выскакивает.
 procedure RegisterTrayTask;
 var
   ResultCode: Integer;
@@ -194,7 +195,8 @@ begin
   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     '-NoProfile -ExecutionPolicy Bypass -Command "' +
     '$u = [Security.Principal.WindowsIdentity]::GetCurrent().Name; ' +
-    '$a = New-ScheduledTaskAction -Execute ''' + ExpandConstant('{app}\{#MyExe}') + '''; ' +
+    '$a = New-ScheduledTaskAction -Execute ''' + ExpandConstant('{app}\{#MyExe}') +
+    ''' -Argument ''--background''; ' +
     '$t = New-ScheduledTaskTrigger -AtLogOn -User $u; ' +
     '$p = New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest; ' +
     '$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) ' +

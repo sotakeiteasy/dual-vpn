@@ -18,9 +18,14 @@ import tempfile
 import threading
 import time
 
-from . import ipc, paths
+from . import instance, ipc, paths
 
 POLL_EVERY = 2.0
+# Сколько ждём отчёта страницы о готовности. Не дождались — WebView2 не
+# поднялся, и окно так и висело бы серым: выходим с READY_LOST, трей
+# перезапустит окно.
+READY_WAIT = 20.0
+READY_LOST = 3
 
 # Фильтр для create_file_dialog. pywebview проверяет каждую строку регуляркой
 # вида ^([\w ]+)\(\*\.\w+...\)$ : в описании допустимы только буквы и пробелы,
@@ -98,6 +103,8 @@ class Api:
     def __init__(self, window_holder):
         self.holder = window_holder
         self.ready = threading.Event()
+        # Прогретое окно, спрятанное до первого показа или крестиком.
+        self.hidden = False
 
     # ------------------------------------------------------- приём из JS
 
@@ -116,7 +123,9 @@ class Api:
             self.refresh(full=True)
             # Статус туннелей сразу при открытии: сама служба меряет сеть
             # только на подъёме туннеля, и прежний ответ мог устареть на часы.
-            threading.Thread(target=self._check, daemon=True).start()
+            # Спрятанному окну проверка ни к чему — её сделает показ.
+            if not self.hidden:
+                threading.Thread(target=self._check, daemon=True).start()
         elif name == "check":
             threading.Thread(target=self._check, daemon=True).start()
         elif name == "start":
@@ -491,12 +500,75 @@ def _source_icon():
         return None
 
 
-def open_window():
-    """Открывает окно; когда его закроют, завершает процесс — не возвращается."""
+def _storage_path():
+    """Своя папка данных WebView2, отдельная для прав администратора.
+
+    По умолчанию pywebview кладёт её в общий %APPDATA%\\pywebview. Папку,
+    которую уже занял браузер с другим уровнем прав или другими опциями,
+    WebView2 открыть не может: инициализация кончается IsSuccess=False,
+    pywebview это лишь пишет в лог, и окно остаётся серым и пустым.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "DualVPN",
+                        "WebView2-" + ("admin" if _is_admin() else "user"))
+
+
+def _hide_on_close(window, api):
+    """Крестик прячет окно, а не закрывает процесс: следующий показ мгновенный.
+
+    Только для закрытия пользователем: выход из системы и выключение
+    отменять нельзя, иначе Windows покажет «приложение мешает завершению».
+    Зовётся в потоке окна (before_show), туда же приходит FormClosing.
+    """
+    from System.Windows.Forms import CloseReason
+
+    def closing(_sender, args):
+        if args.CloseReason != CloseReason.UserClosing:
+            return
+        args.Cancel = True
+        api.hidden = True
+        window.native.Hide()
+
+    window.native.FormClosing += closing
+
+
+def _restore(window):
+    """Свёрнутое — развернуть. SW_RESTORE, а не restore() pywebview: тот
+    ставит Normal и уменьшил бы окно, развёрнутое до сворачивания на весь экран."""
+    try:
+        import win32con
+        import win32gui
+        hwnd = window.native.Handle.ToInt32()
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
+def _show(window, api):
+    """Показ прогретого окна по сигналу трея: свежий статус и проверка
+    туннелей — как при первом открытии."""
+    api.hidden = False
+    window.show()
+    _restore(window)
+    # Страница ещё грузится — всё это сделает её ready.
+    if api.ready.is_set():
+        api.refresh(full=True)
+        threading.Thread(target=api._check, daemon=True).start()
+
+
+def open_window(resident=False, hidden=False):
+    """Открывает окно; когда его закроют, завершает процесс — не возвращается.
+
+    resident — окно трея: крестик прячет его, процесс живёт до выхода из трея,
+    а показывает окно снова сигнал instance.WINDOW_SHOW. hidden — запуск
+    спрятанным, прогрев: WebView2 и страница поднимаются заранее.
+    """
     import webview
 
     holder = {}
     api = Api(holder)
+    api.hidden = hidden
     # paths.UI_DIR, а не __file__: в собранном виде __file__ у модуля внутри
     # PyInstaller-архива не указывает на реальный файл на диске, и index.html
     # не находился — окно падало ещё до показа.
@@ -504,24 +576,40 @@ def open_window():
 
     holder["window"] = webview.create_window(
         f"DualVPN {paths.version()}", index,
-        js_api=api, width=1040, height=720, min_size=(880, 560),
+        js_api=api, width=1040, height=720, min_size=(880, 560), hidden=hidden,
         # Тот же фон, что --bg в index.html: иначе до загрузки страницы окно
         # белое и мигает на открытии.
         background_color="#101012")
     holder["window"].events.shown += lambda: _dark_title(holder.get("window"))
+    if resident:
+        holder["window"].events.before_show += lambda window: _hide_on_close(window, api)
+        # Слушаем до webview.start: сигнал, пришедший, пока WebView2 ещё
+        # стартует, дождётся окна в window.show().
+        try:
+            instance.listen(instance.WINDOW_SHOW,
+                            lambda: _show(holder["window"], api))
+        except OSError as exc:
+            # Окно всё равно нужно; не показавшееся по сигналу трей заменит.
+            api._log(f"сигнал показа недоступен: {exc}")
     icon = None if getattr(sys, "frozen", False) else _source_icon()
 
     def poll():
         # Ждём, пока страница отчитается о готовности: до этого window[fn]
         # ещё не определены, и любой вызов ушёл бы в пустоту.
-        api.ready.wait(timeout=15)
+        if not api.ready.wait(timeout=READY_WAIT):
+            api._log(f"страница не ответила за {READY_WAIT:.0f} с — WebView2 "
+                     "не поднялся, окно перезапускается")
+            os._exit(READY_LOST)
         while holder.get("window") is not None:
-            api.refresh()
+            # Спрятанному окну опрос не нужен — свежее состояние даст показ.
+            if not api.hidden:
+                api.refresh()
             time.sleep(POLL_EVERY)
 
     threading.Thread(target=poll, daemon=True).start()
     # gui='edgechromium' — WebView2, он есть в Windows 10/11 из коробки.
-    webview.start(gui="edgechromium", private_mode=False, icon=icon)
+    webview.start(gui="edgechromium", private_mode=False, icon=icon,
+                  storage_path=_storage_path())
     holder["window"] = None
     # Окно закрыто — процесс тоже. WebView2 ходит через pythonnet, и потоки
     # .NET способны удержать dualvpn.exe после закрытия окна: тогда он висел

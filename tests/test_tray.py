@@ -29,42 +29,140 @@ def _no_popen(*_a, **_kw):
     raise AssertionError("второй Popen при живом окне")
 
 
-def test_повторное_открытие_поднимает_окно_а_не_запускает_второе(monkeypatch):
-    raised = []
-    monkeypatch.setattr(tray, "_raise_window",
-                        lambda title: raised.append(title) or True)
-    monkeypatch.setattr(subprocess, "Popen", _no_popen)
-
-    t = tray.Tray()
-    t._window_proc = types.SimpleNamespace(poll=lambda: None)
-    t.on_window()
-    assert raised and raised[0].startswith("DualVPN ")
+def _live(**kw):
+    return types.SimpleNamespace(pid=42, poll=lambda: None, **kw)
 
 
-def test_окно_которое_ещё_стартует_не_дублируется(monkeypatch):
-    monkeypatch.setattr(tray, "_raise_window", lambda _t: False)
-    monkeypatch.setattr(subprocess, "Popen", _no_popen)
-
-    t = tray.Tray()
-    t._window_proc = types.SimpleNamespace(poll=lambda: None)
-    t._window_started = tray.time.monotonic()
-    t.on_window()
-
-
-def test_процесс_без_окна_слишком_долго_заменяется(monkeypatch):
-    """Зависший WebView2 не должен навсегда запереть панель."""
-    monkeypatch.setattr(tray, "_raise_window", lambda _t: False)
+def _launches(monkeypatch, code=0):
+    """Подменённый Popen: команды запусков; процесс сразу выходит с code."""
     launched = []
-    monkeypatch.setattr(subprocess, "Popen",
-                        lambda cmd, **_kw: launched.append(cmd) or "new")
 
-    terminated = []
+    def popen(cmd, **_kw):
+        launched.append(cmd)
+        return types.SimpleNamespace(pid=7, poll=lambda: code, wait=lambda: code)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    return launched
+
+
+def _signals(monkeypatch, listened=True, visible=True):
+    sent = []
+    monkeypatch.setattr(tray.instance, "signal",
+                        lambda name, wait=0: sent.append(name) or listened)
+    monkeypatch.setattr(tray.instance, "allow_foreground", lambda pid=0: None)
+    monkeypatch.setattr(tray, "_wait_visible", lambda pid, timeout: visible)
+    return sent
+
+
+def test_живое_окно_показывается_сигналом_а_не_вторым_процессом(monkeypatch):
+    sent = _signals(monkeypatch)
+    monkeypatch.setattr(subprocess, "Popen", _no_popen)
+
     t = tray.Tray()
-    t._window_proc = types.SimpleNamespace(
-        poll=lambda: None, terminate=lambda: terminated.append(True))
-    t._window_started = tray.time.monotonic() - tray.WINDOW_START_WAIT - 1
-    t.on_window()
-    assert terminated and launched and t._window_proc == "new"
+    t._window_proc = _live()
+    t._open_window()
+    assert sent == [tray.instance.WINDOW_SHOW]
+
+
+def test_живой_процесс_без_окна_заменяется(monkeypatch):
+    """Зависший WebView2 не должен навсегда запереть панель."""
+    _signals(monkeypatch, visible=False)
+    launched = _launches(monkeypatch)
+    terminated = []
+
+    t = tray.Tray()
+    t._window_proc = _live(terminate=lambda: terminated.append(True))
+    t._open_window()
+    assert terminated and len(launched) == 1
+    assert launched[0][-1] == "--resident"
+
+
+def test_без_окна_запускается_показываемое_окно_трея(monkeypatch):
+    launched = _launches(monkeypatch)
+
+    tray.Tray()._open_window()
+    assert launched[0][-2:] == ["window", "--resident"]
+
+
+def test_прогрев_запускает_спрятанное_окно_один_раз(monkeypatch):
+    launched = _launches(monkeypatch)
+
+    t = tray.Tray()
+    t._warm()
+    assert launched[0][-3:] == ["window", "--resident", "--hidden"]
+    t._window_proc = _live()
+    t._warm()
+    assert len(launched) == 1
+
+
+def test_после_выхода_окно_не_запускается(monkeypatch):
+    monkeypatch.setattr(subprocess, "Popen", _no_popen)
+
+    t = tray.Tray()
+    t.stop_event.set()
+    t._open_window()
+    t._warm()
+
+
+def _settle(launched, want):
+    """Ждёт, пока сторожа окон перестанут запускать новые."""
+    deadline = time.monotonic() + 5
+    while len(launched) < want and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.2)                         # лишний запуск успел бы случиться
+    return len(launched)
+
+
+def test_окно_без_webview2_перезапускается_один_раз(monkeypatch):
+    launched = _launches(monkeypatch, code=tray.window.READY_LOST)
+
+    tray.Tray()._open_window()
+    # Первый запуск и единственный повтор; повтор, вышедший так же, — всё.
+    assert _settle(launched, 2) == 2
+
+
+def test_прогретое_окно_без_webview2_не_перезапускается(monkeypatch):
+    launched = _launches(monkeypatch, code=tray.window.READY_LOST)
+
+    tray.Tray()._warm()
+    assert _settle(launched, 1) == 1
+
+
+def test_второй_запуск_ярлыка_открывает_окно_первого(monkeypatch):
+    monkeypatch.setattr(tray.instance, "claim", lambda: False)
+    sent = _signals(monkeypatch)
+
+    assert tray.already_running() is True
+    assert sent == [tray.instance.TRAY_OPEN]
+
+
+def test_второй_запуск_при_входе_окно_не_открывает(monkeypatch):
+    monkeypatch.setattr(tray.instance, "claim", lambda: False)
+    sent = _signals(monkeypatch)
+
+    assert tray.already_running(background=True) is True
+    assert sent == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Toolhelp32 есть только в Windows")
+def test_окно_ищется_и_у_дочернего_процесса():
+    """onefile-exe портативной версии: окно у Python-ребёнка загрузчика."""
+    import os
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"])
+    try:
+        assert tray._child_pids(os.getpid()) >= {os.getpid(), child.pid}
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_первый_запуск_и_сбой_мьютекса_запускают_трей(monkeypatch):
+    monkeypatch.setattr(tray.instance, "claim", lambda: True)
+    assert tray.already_running() is False
+
+    def broken():
+        raise OSError("сбой")
+    monkeypatch.setattr(tray.instance, "claim", broken)
+    assert tray.already_running() is False
 
 
 def test_выход_не_ждёт_службу_в_потоке_значка(monkeypatch):

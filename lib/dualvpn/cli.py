@@ -8,8 +8,10 @@
     dualvpn log [N]             последние строки журнала sing-box
     dualvpn version
 
-    dualvpn tray                значок в трее (обычный способ запуска)
+    dualvpn tray [--background] значок в трее и окно (обычный способ запуска);
+                                --background — только значок, без окна
     dualvpn window              окно с состоянием, конфигами и логом
+                                (--resident --hidden — так его зовёт трей)
     dualvpn admin-op ОП ЗАПРОС ОТВЕТ
                                 служебное: окно зовёт так себя же с правами
                                 администратора на одну команду в conf\\ —
@@ -111,12 +113,13 @@ def main(argv=None):
 
     if cmd == "tray":
         from . import tray
-        tray.run()
+        tray.run(background="--background" in argv[1:])
         return 0
 
     if cmd == "window":
         from . import window
-        window.open_window()
+        window.open_window(resident="--resident" in argv[1:],
+                           hidden="--hidden" in argv[1:])
         return 0
 
     if cmd == "admin-op":
