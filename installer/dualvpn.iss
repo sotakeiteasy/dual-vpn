@@ -115,9 +115,9 @@ Filename: "{sys}\sc.exe"; \
 Filename: "{app}\{#MyCli}"; Parameters: "service start"; \
   Flags: runhidden waituntilterminated; AfterInstall: RestoreAfterUpdate
 
-; runascurrentuser: трей требует администратора, а установщик уже с правами.
+; runascurrentuser: трей работает от администратора, а установщик уже с правами.
 ; По умолчанию postinstall запускает от исходного пользователя без прав, и
-; CreateProcess на exe с requireAdministrator падает с ошибкой 740.
+; трей спросил бы UAC ещё раз (см. tray.run).
 Filename: "{app}\{#MyExe}"; Description: "Запустить {#MyName}"; \
   Flags: nowait postinstall skipifsilent runascurrentuser
 

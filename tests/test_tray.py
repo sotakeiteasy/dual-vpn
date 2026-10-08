@@ -127,7 +127,12 @@ def test_прогретое_окно_без_webview2_не_перезапуска
     assert _settle(launched, 1) == 1
 
 
+def _admin(monkeypatch, admin=True):
+    monkeypatch.setattr(tray.window, "_is_admin", lambda: admin)
+
+
 def test_второй_запуск_ярлыка_открывает_окно_первого(monkeypatch):
+    _admin(monkeypatch)
     monkeypatch.setattr(tray.instance, "claim", lambda: False)
     sent = _signals(monkeypatch)
 
@@ -136,6 +141,7 @@ def test_второй_запуск_ярлыка_открывает_окно_пе
 
 
 def test_второй_запуск_при_входе_окно_не_открывает(monkeypatch):
+    _admin(monkeypatch)
     monkeypatch.setattr(tray.instance, "claim", lambda: False)
     sent = _signals(monkeypatch)
 
@@ -155,7 +161,44 @@ def test_окно_ищется_и_у_дочернего_процесса():
         child.wait()
 
 
+def _no_claim():
+    raise AssertionError("процесс без прав занял мьютекс трея")
+
+
+def _no_tray(*_a, **_kw):
+    raise AssertionError("трей поднят без прав")
+
+
+def test_ярлык_без_прав_при_живом_трее_открывает_окно_без_uac(monkeypatch):
+    _admin(monkeypatch, admin=False)
+    monkeypatch.setattr(tray.instance, "claim", _no_claim)
+    monkeypatch.setattr(tray.instance, "exists", lambda: True)
+    sent = _signals(monkeypatch)
+    elevated = []
+    monkeypatch.setattr(tray, "_relaunch_elevated", lambda: elevated.append(True))
+    monkeypatch.setattr(tray, "Tray", _no_tray)
+
+    tray.run()
+    assert sent == [tray.instance.TRAY_OPEN]
+    assert elevated == []
+
+
+def test_ярлык_без_прав_без_трея_перезапускается_с_правами(monkeypatch):
+    _admin(monkeypatch, admin=False)
+    monkeypatch.setattr(tray.instance, "claim", _no_claim)
+    monkeypatch.setattr(tray.instance, "exists", lambda: False)
+    sent = _signals(monkeypatch)
+    elevated = []
+    monkeypatch.setattr(tray, "_relaunch_elevated", lambda: elevated.append(True))
+    monkeypatch.setattr(tray, "Tray", _no_tray)
+
+    tray.run()
+    assert elevated == [True]
+    assert sent == []
+
+
 def test_первый_запуск_и_сбой_мьютекса_запускают_трей(monkeypatch):
+    _admin(monkeypatch)
     monkeypatch.setattr(tray.instance, "claim", lambda: True)
     assert tray.already_running() is False
 

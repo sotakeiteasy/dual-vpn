@@ -35,6 +35,22 @@ def test_сигнал_доходит_до_слушателя():
     assert got.wait(5)
 
 
+def test_мьютекс_виден_без_захвата():
+    name = _name("exists")
+    assert instance.exists(name) is False
+    assert instance.claim(name) is True
+    assert instance.exists(name) is True
+
+
+def test_сигнал_доходит_до_слушателя_с_дескриптором_для_пользователя():
+    name = _name("user")
+    got = threading.Event()
+    instance.listen(name, got.set, sddl=instance.USER_SIGNAL_SDDL)
+
+    assert instance.signal(name) is True
+    assert got.wait(5)
+
+
 def test_сигнал_без_слушателя_возвращает_false():
     assert instance.signal(_name("nobody"), wait=0.2) is False
 

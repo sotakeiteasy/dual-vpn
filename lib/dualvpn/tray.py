@@ -4,9 +4,10 @@
 меню трея держим коротким, а настройки — в одном месте.
 
 Туннелем владеет служба, трей шлёт ей команды через именованный канал.
-Установленный трей запускается от администратора (манифест, см. dualvpn.spec):
-конфиги с ключами служба принимает только от администратора, и так UAC
-спрашивается один раз при запуске, а не на каждое добавление конфига.
+Установленный трей работает от администратора: конфиги с ключами служба
+принимает только от администратора, и так UAC спрашивается один раз при
+запуске, а не на каждое добавление конфига. Права он поднимает сам (run), а не
+манифестом: ярлык к уже работающему трею открывает окно без UAC.
 
 Значок рисуется кодом, а не берётся из файла: он маленький, состояний у него
 четыре, и держать четыре .ico в сборке ради этого незачем. Заодно он сам
@@ -611,7 +612,9 @@ class Tray:
         а окно прогревается спрятанным. Повторный запуск ярлыка приходит
         сигналом TRAY_OPEN (см. already_running)."""
         try:
-            instance.listen(instance.TRAY_OPEN, self.on_window)
+            # Сигналит ярлык, запущенный без прав, — событие открыто и ему.
+            instance.listen(instance.TRAY_OPEN, self.on_window,
+                            sddl=instance.USER_SIGNAL_SDDL)
         except OSError:
             pass                   # окно откроется из меню, не с ярлыка
         if background:
@@ -913,9 +916,16 @@ def already_running(background=False):
     руками, и незапрошенная панель поверх всего только мешала бы.
     Мьютекс не создался по другой причине — считаем себя первым: лишний
     значок лучше, чем ни одного.
+
+    Процесс без прав мьютекс не занимает, а только проверяет: он сейчас
+    перезапустится с правами (run), и занятое им имя заставило бы трей с
+    правами считать себя вторым.
     """
     try:
-        if instance.claim():
+        if window._is_admin():
+            if instance.claim():
+                return False
+        elif not instance.exists():
             return False
     except OSError:
         return False
@@ -926,8 +936,28 @@ def already_running(background=False):
     return True
 
 
+def _relaunch_elevated():
+    """Тот же запуск с правами администратора (UAC), без ожидания.
+
+    Отказ в UAC — просто выход: трея не было и нет, как если бы ярлык не нажали.
+    """
+    import ctypes
+    import subprocess
+
+    args = sys.argv[1:] if getattr(sys, "frozen", False) else [
+        os.path.abspath(sys.argv[0])] + sys.argv[1:]
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, subprocess.list2cmdline(args), None, 1)
+
+
 def run(background=False):
     if already_running(background):
+        return
+    # Ярлык запускает трей без прав (в манифесте их нет — иначе UAC спрашивал
+    # бы и тогда, когда трей уже есть и нужно только показать окно). Трея нет —
+    # теперь права нужны.
+    if not window._is_admin():
+        _relaunch_elevated()
         return
     Tray().run(background)
     # Значок закрыт — процесс обязан закончиться. Обычный выход ждёт все

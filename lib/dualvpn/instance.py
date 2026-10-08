@@ -23,7 +23,15 @@ WINDOW_SHOW = "Local\\DualVPN-Window-Show"
 
 ERROR_ALREADY_EXISTS = 183
 ERROR_ACCESS_DENIED = 5
+ERROR_FILE_NOT_FOUND = 2
 EVENT_MODIFY_STATE = 0x0002
+SYNCHRONIZE = 0x00100000
+SDDL_REVISION_1 = 1
+# Событие трея: трей работает от администратора, а ярлык запускает DualVPN-Tray.exe
+# от обычного пользователя. Без этого дескриптора событие получает DACL
+# администратора и высокую метку целостности, и обычный процесс его не откроет.
+# Сигналить (EVENT_MODIFY_STATE) — интерактивному пользователю, метка — средняя.
+USER_SIGNAL_SDDL = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100002;;;IU)S:(ML;;NW;;;ME)"
 INFINITE = 0xFFFFFFFF
 ASFW_ANY = 0xFFFFFFFF
 
@@ -38,6 +46,8 @@ def _kernel32():
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     k.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     k.CreateMutexW.restype = wintypes.HANDLE
+    k.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    k.OpenMutexW.restype = wintypes.HANDLE
     k.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL,
                                wintypes.LPCWSTR]
     k.CreateEventW.restype = wintypes.HANDLE
@@ -70,12 +80,53 @@ def claim(name=TRAY_MUTEX):
     return True
 
 
-def listen(name, callback):
-    """Зовёт callback в своём потоке на каждый signal(name). Событие
-    создаётся сразу, до возврата: сигнал сразу после listen не потеряется."""
+def exists(name=TRAY_MUTEX):
+    """Есть ли мьютекс name, без захвата. Для процесса без прав: claim у него
+    занял бы имя, и трей, перезапущенный с правами, счёл бы себя вторым.
+    Отказ в доступе — тоже «есть»: мьютекс трея с правами администратора.
+    """
     k = _kernel32()
+    handle = k.OpenMutexW(SYNCHRONIZE, False, name)
+    err = ctypes.get_last_error()
+    if handle:
+        k.CloseHandle(handle)
+        return True
+    if err == ERROR_ACCESS_DENIED:
+        return True
+    if err == ERROR_FILE_NOT_FOUND:
+        return False
+    raise ctypes.WinError(err)
+
+
+class _SecurityAttributes(ctypes.Structure):
+    _fields_ = [("nLength", ctypes.c_uint32),
+                ("lpSecurityDescriptor", ctypes.c_void_p),
+                ("bInheritHandle", ctypes.c_int)]
+
+
+def _create_event(k, name, sddl):
+    """CreateEventW с дескриптором из sddl; None — права по умолчанию."""
     # Автосброс: одно ожидание — один сигнал, без ручного ResetEvent.
-    handle = k.CreateEventW(None, False, False, name)
+    if sddl is None:
+        return k.CreateEventW(None, False, False, name)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    sd = ctypes.c_void_p()
+    if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            ctypes.c_wchar_p(sddl), SDDL_REVISION_1, ctypes.byref(sd), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sa = _SecurityAttributes(ctypes.sizeof(_SecurityAttributes), sd, False)
+        return k.CreateEventW(ctypes.addressof(sa), False, False, name)
+    finally:
+        ctypes.windll.kernel32.LocalFree(sd)
+
+
+def listen(name, callback, sddl=None):
+    """Зовёт callback в своём потоке на каждый signal(name). Событие
+    создаётся сразу, до возврата: сигнал сразу после listen не потеряется.
+    sddl — права на событие (USER_SIGNAL_SDDL: сигналит и процесс без прав)."""
+    k = _kernel32()
+    handle = _create_event(k, name, sddl)
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
     _held.append(handle)
