@@ -79,14 +79,14 @@ jobs:
             dist/DualVPN-${{ env.VER }}.dmg
             dist/DualVPN-${{ env.VER }}.dmg.sha256
 
-      # make_latest: false — «Latest» на странице релизов остаётся за Windows.
-      # Приложение ищет свои релизы по префиксу тега, а не по releases/latest.
+      # «Latest» в репозитории один на обе ОС и достаётся последнему вышедшему
+      # релизу. Поэтому приложение ищет свои релизы по префиксу тега, а не по
+      # releases/latest: там может оказаться Windows.
       - name: Релиз
         if: startsWith(github.ref, 'refs/tags/mac-v')
         uses: softprops/action-gh-release@v2
         with:
           name: DualVPN macOS ${{ env.VER }}
-          make_latest: "false"
           files: |
             dist/DualVPN-${{ env.VER }}.dmg
             dist/DualVPN-${{ env.VER }}.dmg.sha256
