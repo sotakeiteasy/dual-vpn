@@ -351,7 +351,7 @@ class Window:
         sb = ""
         try:
             out = subprocess.run([self.tool("sing-box"), "version"],
-                                 capture_output=True, text=True, timeout=5)
+                                 capture_output=True, encoding="utf-8", errors="replace", timeout=5)
             first = (out.stdout or "").splitlines()[0] if out.stdout else ""
             sb = first.replace("sing-box version", "").strip()
         except Exception:
@@ -511,7 +511,7 @@ class Window:
                f'with prompt "DualVPN устанавливает фоновую службу. '
                f'Она поднимает туннель, для этого нужны права администратора."')
         r = subprocess.run(["/usr/bin/osascript", "-e", osa],
-                           capture_output=True, text=True)
+                           capture_output=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             err = (r.stderr or "").strip()
             # -128 — человек нажал «Отмена», это не ошибка.
@@ -635,7 +635,7 @@ class Window:
                f'with prompt "DualVPN ставит версию {version}. '
                f'Чтобы заменить приложение в Программах, нужны права администратора."')
         r = subprocess.run(["/usr/bin/osascript", "-e", osa],
-                           capture_output=True, text=True)
+                           capture_output=True, encoding="utf-8", errors="replace")
         for line in (r.stdout or "").strip().splitlines():
             self.log(f"apply-update: {line}")
         if r.returncode != 0:

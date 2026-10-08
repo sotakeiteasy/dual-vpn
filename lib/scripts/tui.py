@@ -73,7 +73,8 @@ STOP = threading.Event()
 def sh(cmd, timeout=10):
     """Запускает команду, возвращает stdout или '' — исключения наружу не летят."""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace",
+                           timeout=timeout)
         return r.stdout.strip()
     except Exception:
         return ""

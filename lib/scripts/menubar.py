@@ -132,7 +132,7 @@ def launchctl(*args):
     """Команда демону. Возвращает текст ошибки или '' при успехе."""
     # Полный путь: у приложения, запущенного из Finder, PATH урезанный.
     r = subprocess.run(["/usr/bin/sudo", "-n", "/bin/launchctl", *args],
-                       capture_output=True, text=True)
+                       capture_output=True, encoding="utf-8", errors="replace")
     log(f"launchctl {' '.join(args)} → {r.returncode} {(r.stderr or '').strip()}")
     if r.returncode == 0:
         return ""
@@ -161,7 +161,7 @@ def stop_tunnel():
     # именно на него (см. vpn_from_daemon).
     vpn = vpn_from_daemon() or os.path.join(BASE, "vpn")
     r = subprocess.run(["/usr/bin/sudo", "-n", vpn, "stop"],
-                       capture_output=True, text=True)
+                       capture_output=True, encoding="utf-8", errors="replace")
     for line in (r.stdout or "").strip().splitlines():
         log(f"vpn stop: {line}")
     if r.returncode == 0:
@@ -182,7 +182,7 @@ def stop_direct():
     """
     vpn = vpn_from_daemon() or os.path.join(BASE, "vpn")
     r = subprocess.run(["/usr/bin/sudo", "-n", vpn, "stop"],
-                       capture_output=True, text=True)
+                       capture_output=True, encoding="utf-8", errors="replace")
     for line in (r.stdout or "").strip().splitlines():
         log(f"vpn stop: {line}")
     if r.returncode == 0:
@@ -202,7 +202,7 @@ def daemon_running():
     """
     try:
         r = subprocess.run(["/bin/launchctl", "print", f"system/{LABEL}"],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=5)
     except Exception:
         return False
     if r.returncode != 0:

@@ -139,7 +139,7 @@ def mount(dmg, point):
     вторую «DualVPN» (см. eject_images в install-daemon.sh).
     """
     r = subprocess.run([HDIUTIL, "attach", "-nobrowse", "-readonly", "-noautoopen",
-                        "-mountpoint", point, dmg], capture_output=True, text=True)
+                        "-mountpoint", point, dmg], capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         raise UpdateError(f"образ не открылся: {(r.stderr or '').strip()[:160]}")
     app = os.path.join(point, APP_NAME)

@@ -180,7 +180,7 @@ def endpoint(conf, tag, default_mtu):
                 try:
                     out = subprocess.run(
                         ["dig", "+short", "+time=4", "+tries=1", f"@{server}", "A", name],
-                        capture_output=True, text=True, timeout=8).stdout
+                        capture_output=True, encoding="utf-8", errors="replace", timeout=8).stdout
                     pub = next((l.strip() for l in out.splitlines()
                                 if re.match(r"^[\d.]+$", l.strip())), "")
                 except Exception:
@@ -291,7 +291,7 @@ def running_pid():
     """PID работающего sing-box из нашей папки, иначе ''."""
     try:
         out = subprocess.run(["pgrep", "-f", os.path.join(BASE, "lib", "bin", "sing-box")],
-                             capture_output=True, text=True, timeout=5).stdout.split()
+                             capture_output=True, encoding="utf-8", errors="replace", timeout=5).stdout.split()
         return out[0] if out else ""
     except Exception:
         return ""

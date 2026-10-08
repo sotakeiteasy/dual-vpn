@@ -50,7 +50,7 @@ def client_name():
     """Имя компьютера — его же подставила бы страница сайта."""
     try:
         r = subprocess.run(["/usr/sbin/scutil", "--get", "ComputerName"],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=5)
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
