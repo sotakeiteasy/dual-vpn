@@ -77,6 +77,37 @@ def test_имена_конфигов(st, names):
     assert tray._conf_names(st) == names
 
 
+def _hooked(calls):
+    from pystray._util import win32
+
+    class Icon:
+        _message_handlers = {win32.WM_NOTIFY: lambda w, l: calls.append(("orig", l))}
+
+    app = tray.Tray.__new__(tray.Tray)
+    app.icon = Icon()
+    app.on_window = lambda: calls.append(("window", None))
+    app._hook_menu()
+    return app.icon._message_handlers[win32.WM_NOTIFY], win32
+
+
+def test_двойной_левый_клик_открывает_окно():
+    calls = []
+    notify, _ = _hooked(calls)
+
+    notify(0, tray.WM_LBUTTONDBLCLK)
+
+    assert calls == [("window", None)]
+
+
+def test_одиночный_левый_клик_окно_не_открывает():
+    calls = []
+    notify, win32 = _hooked(calls)
+
+    notify(0, win32.WM_LBUTTONUP)
+
+    assert calls == [("orig", win32.WM_LBUTTONUP)]
+
+
 def test_длинное_имя_обрезается_а_пустое_зовёт_добавить():
     corp, personal = tray._conf_labels({"corp": ["x" * 100]})
     assert len(corp) == tray.NAME_MAX and corp.endswith("…")

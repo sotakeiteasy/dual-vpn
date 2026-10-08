@@ -62,6 +62,9 @@ NAME_MAX = 28
 WM_APP = 0x8000
 WM_SYNC_MENU = WM_APP + 1
 WM_CHECKED = WM_APP + 2
+# Двойной левый клик по значку. Оболочка шлёт его в WM_NOTIFY сама, а
+# pystray не разбирает: у него только WM_LBUTTONUP и WM_RBUTTONUP.
+WM_LBUTTONDBLCLK = 0x0203
 
 
 def _icon_image(state):
@@ -253,7 +256,7 @@ class Tray:
     # ------------------------------------------------------ кружки в меню
 
     def _hook_menu(self):
-        """Проверка туннелей при каждом открытии меню.
+        """Проверка туннелей при каждом открытии меню; двойной клик — окно.
 
         pystray открывает меню в обработчике WM_NOTIFY на правый клик, и
         TrackPopupMenuEx не возвращается, пока меню открыто. Оборачиваем этот
@@ -267,6 +270,9 @@ class Tray:
         orig = handlers[win32.WM_NOTIFY]
 
         def on_notify(wparam, lparam):
+            if lparam == WM_LBUTTONDBLCLK:
+                self.on_window()
+                return 0
             if lparam != win32.WM_RBUTTONUP:
                 return orig(wparam, lparam)
             self._check_gen += 1
