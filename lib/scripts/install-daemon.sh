@@ -94,6 +94,11 @@ case "$BASE" in
     DATA="$BASE" ;;
 esac
 mkdir -p "$DATA/conf" "$DATA/lib/state"
+# Переезд с другой установки (обычно — из исходников): её конфиги берём с
+# собой. Пока plist ещё старый — новый путь к данным в нём ниже затрёт старый.
+case "$BASE" in
+  *.app/Contents/Resources) bash "$HERE/migrate-data.sh" "$PLIST" "$DATA" ;;
+esac
 chown -R "$USER_NAME" "$DATA" 2>/dev/null || true
 
 sed -e "s|@@BASE@@|$BASE|g" -e "s|@@DATA@@|$DATA|g" "$PLIST_SRC" > "$PLIST"

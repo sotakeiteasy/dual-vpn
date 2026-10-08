@@ -20,7 +20,7 @@ head() { printf "\n%s\n" "$1"; }
 
 head "синтаксис"
 for f in "$BASE/vpn" "$BASE/install.sh" "$BASE/lib/scripts/install-daemon.sh" \
-         "$BASE/lib/scripts/apply-update.sh" \
+         "$BASE/lib/scripts/apply-update.sh" "$BASE/lib/scripts/migrate-data.sh" \
          "$BASE/lib/scripts/selftest.sh" "$BASE/lib/scripts/make-dmg.sh" \
          "$BASE/lib/scripts/release.sh"; do
   bash -n "$f" 2>/dev/null && ok "$(basename "$f")" || bad "$(basename "$f")"
@@ -222,7 +222,7 @@ else
        fi ;;
   esac
   # Всё, чем программа поднимает туннель, должно лежать внутри и запускаться.
-  for F in vpn sing-box install-daemon.sh apply-update.sh build-config.py; do
+  for F in vpn sing-box install-daemon.sh apply-update.sh migrate-data.sh build-config.py; do
     [ -x "$APP/Contents/Resources/$F" ] || [ -f "$APP/Contents/Resources/$F" ] \
       && ok "в бандле: $F" || bad "в бандле нет $F"
   done

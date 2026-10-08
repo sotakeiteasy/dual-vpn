@@ -17,7 +17,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SCRIPTS = [os.path.join(ROOT, "lib", "scripts", f)
            for f in ("build-config.py", "tui.py", "setup-resolver.sh",
                      "check.sh", "diag.sh", "install-daemon.sh",
-                     "apply-update.sh")]
+                     "apply-update.sh", "migrate-data.sh")]
 
 VERSION_FILE = os.path.join(ROOT, "VERSION")
 
