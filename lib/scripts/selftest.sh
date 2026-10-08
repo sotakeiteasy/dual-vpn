@@ -8,7 +8,7 @@
 
 BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 VENV="$BASE/lib/venv"
-PY="$VENV/bin/python"
+PY="${PY:-$VENV/bin/python}"     # PY задаёт make-dmg.sh, в CI — без venv
 [ -x "$PY" ] || PY=python3
 FAIL=0
 

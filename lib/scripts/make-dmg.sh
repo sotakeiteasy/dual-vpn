@@ -26,8 +26,11 @@ unregister() {
 # и DMG разные команды, и легко отдать людям вчерашнее приложение.
 echo "→ пересобираю приложение…"
 rm -rf "$BASE/lib/scripts/build" "$BASE/lib/scripts/dist"
-if [ -x "$BASE/lib/venv/bin/python" ]; then
-  PY="$BASE/lib/venv/bin/python"
+# PY задаёт CI: там окружение ставится в системный python, а не в lib/venv.
+if [ -n "${PY:-}" ]; then
+  export PY
+elif [ -x "$BASE/lib/venv/bin/python" ]; then
+  export PY="$BASE/lib/venv/bin/python"
 else
   echo "нет окружения — запусти сперва install.sh"; exit 1
 fi
@@ -35,8 +38,11 @@ fi
 [ -d "$APP" ] || { echo "сборка не дала приложения — смотри вывод py2app"; exit 1; }
 
 echo "→ проверяю…"
-bash "$BASE/lib/scripts/selftest.sh" >/dev/null || {
-  echo "проверки не прошли — образ не собираю"; exit 1; }
+# Вывод — только при провале: в CI иначе не узнать, какая проверка упала.
+ST=$(mktemp)
+bash "$BASE/lib/scripts/selftest.sh" >"$ST" 2>&1 || {
+  cat "$ST"; rm -f "$ST"; echo "проверки не прошли — образ не собираю"; exit 1; }
+rm -f "$ST"
 
 # Права на исполнение теряются, если приложение переносили не тем способом,
 # а без них ни туннель не поднимется, ни служба не установится.
@@ -66,4 +72,6 @@ rm -rf "$BASE/lib/scripts/build" "$BASE/lib/scripts/dist"
 
 echo "готово: $DMG"
 echo "размер: $(du -h "$DMG" | cut -f1)"
-shasum -a 256 "$DMG"
+# Рядом с образом — его сумма в формате `shasum -c`: по ней обновление в
+# приложении проверяет, что скачало ровно этот образ.
+(cd "$OUT" && shasum -a 256 "$(basename "$DMG")" | tee "$(basename "$DMG").sha256")
