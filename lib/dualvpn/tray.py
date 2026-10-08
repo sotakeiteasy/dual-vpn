@@ -467,6 +467,9 @@ class Tray:
                 # Живой процесс, не показавший окна, завис: без замены панель
                 # больше не открылась бы.
                 proc.terminate()
+            # Новое окно показывается не сразу, а на готовности страницы
+            # (window.Api.reveal) — право на передний план нужно и ему.
+            instance.allow_foreground()
             self._launch_window(hidden=False)
 
     def _warm(self):

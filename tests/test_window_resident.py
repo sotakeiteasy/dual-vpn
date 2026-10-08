@@ -1,5 +1,6 @@
-"""Окно трея: спрятанное не проверяет туннели, флажок автозапуска доходит
-до службы и всегда отпускается на странице, разбор аргументов CLI.
+"""Окно трея: спрятанное не проверяет туннели, холодное показывается на ready,
+флажок автозапуска доходит до службы и всегда отпускается на странице, разбор
+аргументов CLI.
 """
 
 from dualvpn import cli, ipc, window
@@ -47,6 +48,35 @@ def test_показанное_окно_на_ready_проверяет_тунне�
 
     api.send("ready")
     assert "check" in [op for op, _ in calls]
+
+
+class _Window:
+    def __init__(self, shown):
+        self.shown = shown
+
+    def show(self):
+        self.shown.append("show")
+
+
+def test_холодное_окно_показывается_на_ready_уже_отрисованным(monkeypatch):
+    api, calls, shown = _api(monkeypatch)
+    api.holder["window"] = _Window(shown)
+    api.cold = True
+
+    api.send("ready")
+    assert shown.index("render") < shown.index("show")
+    assert "check" in [op for op, _ in calls]
+    api.reveal()                    # запасной таймер после ready — уже ничего
+    assert shown.count("show") == 1
+
+
+def test_прогретое_окно_на_ready_остаётся_спрятанным(monkeypatch):
+    api, _, shown = _api(monkeypatch)
+    api.holder["window"] = _Window(shown)
+    api.hidden = True
+
+    api.send("ready")
+    assert "show" not in shown
 
 
 def test_флажок_автозапуска_уходит_в_службу(monkeypatch):

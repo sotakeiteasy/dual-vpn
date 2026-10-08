@@ -26,6 +26,9 @@ POLL_EVERY = 2.0
 # перезапустит окно.
 READY_WAIT = 20.0
 READY_LOST = 3
+# Сколько холодное окно ждёт готовую страницу, прежде чем показаться как
+# есть: дольше без окна кажется, что ярлык не сработал.
+COLD_SHOW_WAIT = 4.0
 
 # Фильтр для create_file_dialog. pywebview проверяет каждую строку регуляркой
 # вида ^([\w ]+)\(\*\.\w+...\)$ : в описании допустимы только буквы и пробелы,
@@ -105,6 +108,9 @@ class Api:
         self.ready = threading.Event()
         # Прогретое окно, спрятанное до первого показа или крестиком.
         self.hidden = False
+        # Холодное окно: создано спрятанным и покажется на ready, уже
+        # отрисованным, — без него виден весь старт WebView2 с рывками.
+        self.cold = False
 
     # ------------------------------------------------------- приём из JS
 
@@ -121,6 +127,7 @@ class Api:
         if name == "ready":
             self.ready.set()
             self.refresh(full=True)
+            self.reveal()
             # Статус туннелей сразу при открытии: сама служба меряет сеть
             # только на подъёме туннеля, и прежний ответ мог устареть на часы.
             # Спрятанному окну проверка ни к чему — её сделает показ.
@@ -195,6 +202,16 @@ class Api:
             if name == "jserror":
                 self._log(f"js: {arg}")
         return None
+
+    def reveal(self):
+        """Показывает холодное окно — один раз: зовут и ready, и запасной
+        таймер open_window через COLD_SHOW_WAIT."""
+        if not self.cold:
+            return
+        self.cold = False
+        w = self.holder.get("window")
+        if w is not None:
+            w.show()
 
     @staticmethod
     def _guard(reply):
@@ -557,6 +574,7 @@ def _show(window, api):
     """Показ прогретого окна по сигналу трея: свежий статус и проверка
     туннелей — как при первом открытии."""
     api.hidden = False
+    api.cold = False
     window.show()
     _restore(window)
     # Страница ещё грузится — всё это сделает её ready.
@@ -577,6 +595,7 @@ def open_window(resident=False, hidden=False):
     holder = {}
     api = Api(holder)
     api.hidden = hidden
+    api.cold = not hidden
     # paths.UI_DIR, а не __file__: в собранном виде __file__ у модуля внутри
     # PyInstaller-архива не указывает на реальный файл на диске, и index.html
     # не находился — окно падало ещё до показа.
@@ -584,7 +603,8 @@ def open_window(resident=False, hidden=False):
 
     holder["window"] = webview.create_window(
         f"DualVPN {paths.version()}", index,
-        js_api=api, width=1040, height=720, min_size=(880, 560), hidden=hidden,
+        # Спрятанным создаётся и видимое окно: покажет его Api.reveal.
+        js_api=api, width=1040, height=720, min_size=(880, 560), hidden=True,
         # Тот же фон, что --bg в index.html: иначе до загрузки страницы окно
         # белое и мигает на открытии.
         background_color="#101012")
@@ -615,6 +635,12 @@ def open_window(resident=False, hidden=False):
             time.sleep(POLL_EVERY)
 
     threading.Thread(target=poll, daemon=True).start()
+    if api.cold:
+        # Запасной показ: страница не ответила или refresh на ready ждёт службу
+        # (ipc.call без таймаута). Невидимое окно было бы нечем закрыть.
+        timer = threading.Timer(COLD_SHOW_WAIT, api.reveal)
+        timer.daemon = True
+        timer.start()
     # gui='edgechromium' — WebView2, он есть в Windows 10/11 из коробки.
     webview.start(gui="edgechromium", private_mode=False, icon=icon,
                   storage_path=_storage_path())
