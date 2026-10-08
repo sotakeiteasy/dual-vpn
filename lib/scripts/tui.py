@@ -280,9 +280,13 @@ def probe_corp():
         with LOCK:
             misses = 0 if ip else ST.get("corp_misses", 0) + 1
             keep = ST.get("corp_ip", "") if not ip and misses < CORP_MISSES else ip
-        set_st(corp_dns=corp_dns, corp_ip=keep, corp_misses=misses)
+        # Пустой corp_ip значил и «молчит», и «ещё не спрашивали»: сразу после
+        # включения окно красило корп красным до первого ответа. Как у
+        # exit_state — три исхода: unknown, пока промахов меньше порога.
+        state = "ok" if keep else "silent" if misses >= CORP_MISSES else "unknown"
+        set_st(corp_dns=corp_dns, corp_ip=keep, corp_misses=misses, corp_state=state)
     else:
-        set_st(corp_dns="", corp_ip="")
+        set_st(corp_dns="", corp_ip="", corp_state="silent")
 
     # Задержка — пингом до корп-DNS: он внутри рабочей сети, маршрут к нему
     # идёт через рабочий туннель. Сам WireGuard-сервер корпа ICMP режет.
@@ -398,7 +402,7 @@ def prober():
             # замера, строка показывала «— через туннель» от прошлого сеанса.
             set_st(exit_ip="", exit_country="", corp_ip="",
                    corp_http="", v6_leak="", exit_is_peer=False,
-                   exit_state="unknown", corp_misses=0,
+                   exit_state="unknown", corp_state="unknown", corp_misses=0,
                    exit_ms=None, corp_ms=None, exit_ms_misses=0, corp_ms_misses=0)
         write_status()
         STOP.wait(FAST_EVERY)

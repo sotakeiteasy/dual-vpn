@@ -83,12 +83,16 @@ def menu_model(st, op):
     actions["stop"] = True
     actions["restart"] = True
     corp_ok = bool(st.get("corp_ip"))
+    # До первого ответа корп ещё не проверен, а не молчит (см. view.js).
+    corp_pending = not corp_ok and st.get("corp_state") == "unknown"
     leak6 = st.get("v6_leak")
     state = st.get("exit_state")
     if leak6:
         out["icon"], out["title"] = "bad", "Утечка IPv6"
     elif state == "leak":
         out["icon"], out["title"] = "bad", "Трафик идёт мимо туннеля"
+    elif corp_pending:
+        out["icon"], out["title"] = "on", "Проверяю туннели…"
     elif not corp_ok:
         out["icon"], out["title"] = "on", "Корп не отвечает"
     else:
@@ -103,6 +107,9 @@ def menu_model(st, op):
         personal = {"value": "мимо туннеля", "ok": False}
     else:
         personal = {"value": "проверяю…", "ok": None}
-    corp = {"value": "на связи" if corp_ok else "не отвечает", "ok": corp_ok}
+    if corp_pending:
+        corp = {"value": "проверяю…", "ok": None}
+    else:
+        corp = {"value": "на связи" if corp_ok else "не отвечает", "ok": corp_ok}
     out["rows"] = [{"name": "Личный", **personal}, {"name": "Корп", **corp}]
     return out

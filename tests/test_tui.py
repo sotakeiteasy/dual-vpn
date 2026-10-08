@@ -149,6 +149,13 @@ class ProbeSlowTests(unittest.TestCase):
         self.assertEqual(self.probe(good, "")["corp_ip"], "")
         self.assertEqual(self.probe(good, "10.0.0.6")["corp_ip"], "10.0.0.6")
 
+    def test_corp_unknown_until_answer_or_two_misses(self):
+        good = json.dumps({"ip": "1.2.3.4"})
+        self.assertEqual(self.probe(good, "")["corp_state"], "unknown",
+                         "первый промах после включения — уже красный «молчит»")
+        self.assertEqual(self.probe(good, "")["corp_state"], "silent")
+        self.assertEqual(self.probe(good, "10.0.0.5")["corp_state"], "ok")
+
 
 class ProbeNowTests(unittest.TestCase):
     def setUp(self):

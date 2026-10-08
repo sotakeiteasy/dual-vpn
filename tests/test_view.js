@@ -132,6 +132,15 @@ test('корп молчит — предупреждение, а не «всё �
   assert.equal(v.rows[1].label, 'молчит');
 });
 
+test('корп ещё не проверен — «проверяю», а не красное «молчит»', () => {
+  const v = viewModel({...UP, corp_ip: '', corp_state: 'unknown'});
+  assert.equal(v.cls, 'off');
+  assert.equal(v.title, 'Проверяю туннели…');
+  assert.equal(v.rows[1].dot, 'off');
+  assert.equal(v.rows[1].label, 'проверяю…');
+  assert.equal(viewModel({...UP, corp_ip: '', corp_state: 'silent'}).title, 'Корп не отвечает');
+});
+
 test('утечки перекрывают остальное', () => {
   assert.equal(viewModel({...UP, v6_leak: '2a00::1'}).title, 'Утечка IPv6');
   const v = viewModel({...UP, exit_state: 'leak', exit_ip: '5.6.7.8'});
