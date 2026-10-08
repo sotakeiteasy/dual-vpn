@@ -68,6 +68,23 @@ def test_статус_по_сторонам_личный_проверен_кор
     assert not st["checking_corp"] and not st["checking_personal"]
 
 
+def test_раздельное_туннелирование_включено_когда_настройки_загружены(monkeypatch):
+    core = _core(monkeypatch, up=False)
+    for name, value in (("autostart_enabled", False), ("_singbox_version", ""),
+                        ("_profiles", []), ("_corp", []), ("_last_results", {})):
+        monkeypatch.setattr(core, name, lambda value=value: value)
+
+    monkeypatch.setattr(service.paths, "site_env", lambda: {"CORP_DOMAINS": "corp.example.com"})
+    assert core._status()["split"] is True
+
+    monkeypatch.setattr(service.paths, "site_env", lambda: {"CORP_DOMAINS": "  ", "SB_LOG_LEVEL": ""})
+    assert core._status()["split"] is False
+
+    # Нет файла — site_env отдаёт пустой словарь.
+    monkeypatch.setattr(service.paths, "site_env", dict)
+    assert core._status()["split"] is False
+
+
 def test_после_включения_снимок_уже_с_туннелем(monkeypatch):
     core = _core(monkeypatch, up=False)
 

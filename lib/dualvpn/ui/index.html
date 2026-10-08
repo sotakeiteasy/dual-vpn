@@ -265,7 +265,7 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
   <h2>рабочий <span class="info" data-info="corp">i</span></h2>
   <div class="card" id="confs-corp"></div>
   <button data-add="corp" id="btn-corp">Добавить рабочий конфиг…</button>
-  <button id="btn-site">Настроить рабочую сеть…</button>
+  <button id="btn-site">Раздельное туннелирование выключено</button>
 
   <h2>личный <span class="info" data-info="personal">i</span></h2>
   <div class="card" id="confs-personal"></div>
@@ -491,6 +491,10 @@ function render(s) {
   const auto = document.getElementById('autostart');
   if (!AUTOSTART_PENDING) auto.checked = !!s.autostart;
   auto.disabled = AUTOSTART_PENDING;
+  // Как в AmneziaWG: кнопка говорит, включено ли раздельное туннелирование
+  // (загружены ли настройки рабочей сети), а не только ведёт в настройки.
+  document.getElementById('btn-site').textContent =
+    'Раздельное туннелирование ' + (s.split ? 'включено' : 'выключено');
   document.getElementById('confs-wrap').classList.toggle('locked', up);
   document.getElementById('lockhint').hidden = !up;
   tick('status');
@@ -742,7 +746,7 @@ const SITE_FIELDS = [
 ];
 
 function showSite(cur) {
-  document.getElementById('sheet-name').textContent = 'Рабочая сеть';
+  document.getElementById('sheet-name').textContent = 'Раздельное туннелирование';
   const b = document.getElementById('sheet-body');
   b.classList.remove('mono');
   b.innerHTML = SITE_FIELDS.map(([k, label, ph, hint]) => `

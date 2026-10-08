@@ -174,9 +174,17 @@ class Api:
         elif name == "save_site":
             self._guard(self._admin_call("set-site", text=_format_env(arg or {})))
             self.js("closeSheet")
-            self.js("restarting")
-            ipc.call("stop")
-            self._guard(ipc.call("start", profile=""))
+            # Перезапуск — только чтобы применить настройки к живому туннелю.
+            # Выключенный раньше включался сам, а без конфига падал с ошибкой.
+            try:
+                up = ipc.call("status").get("status", {}).get("up")
+            except ipc.NotRunning:
+                up = False
+            if up:
+                self.js("restarting")
+                ipc.call("stop")
+                self._guard(ipc.call("start", profile=""))
+            self.refresh()
         elif name == "logs":
             self._push_logs()
         elif name == "install_daemon":

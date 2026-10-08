@@ -239,6 +239,10 @@ class Core:
                                       < st.get("check_seq", 0))
         st["last_error"] = self.last_error
         st["autostart"] = self.autostart_enabled()
+        # Раздельное туннелирование включено, когда настройки рабочей сети
+        # загружены: в site.env есть хоть одно значение. Нет файла или он
+        # пустой — кнопка в окне говорит «выключено».
+        st["split"] = any(v.strip() for v in paths.site_env().values())
         st["version"] = paths.version()
         st["singbox"] = self._singbox_version()
         st["profiles"] = self._profiles()

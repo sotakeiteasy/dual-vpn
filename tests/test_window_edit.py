@@ -72,3 +72,37 @@ def test_без_канала_окно_сообщает_стоит_ли_служ�
     api.refresh()
 
     assert shown == [("render", {"up": False, "no_service": True, "daemon": False})]
+
+
+def _save_site(monkeypatch, up):
+    """Сохранить настройки рабочей сети; вернуть команды, ушедшие в службу."""
+    ops, shown = [], []
+
+    def call(op, **_kw):
+        ops.append(op)
+        if op == "start":
+            return {"ok": False, "error": "нет конфига"}
+        return {"ok": True, "status": {"up": up}}
+
+    monkeypatch.setattr(ipc, "call", call)
+    api = window.Api({})
+    monkeypatch.setattr(api, "_admin_call", lambda op, **_kw: {"ok": True})
+    monkeypatch.setattr(api, "js", lambda fn, arg=None: shown.append((fn, arg)))
+    api.send("save_site", {"CORP_DOMAINS": "corp.example.com"})
+    return ops, [fn for fn, _ in shown]
+
+
+def test_настройки_при_выключенном_vpn_не_включают_его(monkeypatch):
+    ops, shown = _save_site(monkeypatch, up=False)
+
+    # Без конфигов «Включить» падало бы с «нет конфига» — его и не зовём.
+    assert "start" not in ops and "stop" not in ops
+    assert "failed" not in shown and "restarting" not in shown
+    assert "closeSheet" in shown
+
+
+def test_настройки_при_включённом_vpn_перезапускают_туннель(monkeypatch):
+    ops, shown = _save_site(monkeypatch, up=True)
+
+    assert ops.index("stop") < ops.index("start")
+    assert "restarting" in shown
