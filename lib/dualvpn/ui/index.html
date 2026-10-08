@@ -66,6 +66,7 @@ body {
 .tun + .tun { border-top: 1px solid var(--line); }
 .tun-name { width: 66px; color: var(--dim); flex: none; }
 .tun-val  { font-variant-numeric: tabular-nums; }
+.tun-val.dim { color: var(--dim); }
 .chip { font-size: 12px; padding: 1px 8px; border-radius: 20px; margin-left: auto; flex: none; }
 .chip.ok  { color: var(--ok);   background: color-mix(in srgb, var(--ok) 14%, transparent); }
 .chip.bad { color: var(--bad);  background: color-mix(in srgb, var(--bad) 14%, transparent); }
@@ -350,6 +351,7 @@ const esc = t => String(t).replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 let LAST = {};
+let CONFS = null;      // последний renderConfs: render по нему знает, каких конфигов нет
 let PENDING = null;    // команда отправлена, состояние ещё не догнало
 let AUTOSTART_PENDING = false;
 let CHECKING = false;  // идёт проверка туннелей по кнопке или при открытии
@@ -391,12 +393,21 @@ function render(s) {
   // предложение её поставить — иначе человек нажимает «Включить» и ничего
   // не происходит.
   const noDaemon = s.daemon === false;
+  // Без любого из конфигов служба туннель не соберёт (buildconfig.py:pick_corp,
+  // pick_personal). Говорим заранее, а не «Не запускается» после нажатия.
+  const noConf = k => !!CONFS && !(CONFS[k] || []).length;
+  const missing = !up && (noConf('corp') || noConf('personal'));
 
   let cls = 'off', title = 'Выключено', sub = 'туннели не подняты';
   if (noDaemon) { cls='warn'; title='Нужна установка';
                   sub='фоновая служба ещё не поставлена'; }
   // Служба сама снимает и поднимает туннель: на это время up ложный, и без
   // этой ветки заголовок мигал бы «Выключено» или прошлой ошибкой.
+  else if (missing) { cls='warn';
+                  title = noConf('corp') && noConf('personal') ? 'Добавь конфиги'
+                        : noConf('corp') ? 'Нужен рабочий конфиг' : 'Нужен личный конфиг';
+                  sub = noConf('corp') && noConf('personal') ? 'без них VPN не включится'
+                      : 'без него VPN не включится'; }
   else if (s.busy === 'переподключаю') { cls='warn'; title='Переподключаю';
                   sub='сменилась сеть — поднимаю туннель заново'; }
   // Сторож перезапускает процесс одного туннеля: up при этом истинный, tun цел.
@@ -433,19 +444,23 @@ function render(s) {
   // Каждый конфиг по себе: молчащий корп не держит «проверяю» у личного.
   const checking = k => up && ((CHECKING && CHECK_LEFT.has(k)) || s['checking_' + k]);
   // Без VPN мерить нечем — показываем, как этот же файл конфига отработал в
-  // прошлый раз: сломанный заменяют до включения, а не после.
+  // прошлый раз: сломанный заменяют до включения, а не после. Плашка при этом
+  // серая: зелёная «выключен · работал» читалась как «работает». Красной
+  // остаётся только «не работал».
   const last = s.last || {};
-  const offChip = k => last[k] === 'up' ? 'ok' : last[k] === 'error' ? 'bad' : 'off';
-  const offLabel = k => last[k] === 'up' ? 'выключен · работал'
-                      : last[k] === 'error' ? 'выключен · не работал' : 'выключен';
+  const offChip = k => noConf(k) ? 'warn' : last[k] === 'error' ? 'bad' : 'off';
+  const offLabel = k => noConf(k) ? 'нет конфига' : 'выключен';
+  const offVal = k => noConf(k) ? '—'
+    : last[k] === 'up' ? '<span class="tun-val dim">раньше работал</span>'
+    : last[k] === 'error' ? '<span class="tun-val dim">раньше не работал</span>' : '—';
   document.getElementById('tunnels').innerHTML =
-    row('личный', up ? (s.exit_ip || '—') : '—',
+    row('личный', up ? (s.exit_ip || '—') : offVal('personal'),
         !up ? offChip('personal') : direct ? 'bad' : checking('personal') ? 'warn' : s.exit_state === 'leak' ? 'bad'
             : s.exit_state === 'tunnel' ? 'ok' : 'off',
         !up ? offLabel('personal') : direct ? 'не работает · выход напрямую'
             : checking('personal') ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
             : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
-    row('корп', up ? (s.corp_ip || (s.corp_http ? 'HTTP ' + s.corp_http : '—')) : '—',
+    row('корп', up ? (s.corp_ip || (s.corp_http ? 'HTTP ' + s.corp_http : '—')) : offVal('corp'),
         !up ? offChip('corp') : checking('corp') ? 'warn' : (corp ? 'ok' : 'bad'),
         !up ? offLabel('corp') : checking('corp') ? 'проверяю…' : (corp ? 'отвечает' : 'молчит')) +
     row('выход', up ? [s.exit_country, s.exit_city].filter(Boolean).join(' ') || '—' : '—',
@@ -478,6 +493,7 @@ function render(s) {
     t.classList.toggle('primary', !up);
     r.textContent = 'Перезапустить';
     r.disabled = !up;
+    if (missing) t.disabled = true;
   }
   // Служба занята своей операцией (команда из трея, переподключение) —
   // команда из окна вернула бы только «уже идёт».
@@ -506,6 +522,9 @@ function renderConfs(d) {
   const sig = JSON.stringify(d);
   if (sig === prev.confs) { tick('confs'); return; }
   prev.confs = sig;
+  CONFS = d;
+  // Появился или пропал конфиг — заголовок и «Включить» зависят от этого.
+  if ('up' in LAST) render(LAST);
   // Список перерисовывается — меню повисло бы с именем файла, которого может
   // уже не быть, и «Удалить» ушло бы в никуда.
   closeMenu();
