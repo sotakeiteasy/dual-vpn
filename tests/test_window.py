@@ -36,6 +36,58 @@ class SaveSiteTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.w.site_path()))
         self.assertIn("failed(", self.js[0])
 
+    def test_email_is_checked_and_kept(self):
+        self.w.save_site({"CORP_EMAIL": "ivanov@gmail.com"})
+        self.assertFalse(os.path.exists(self.w.site_path()))
+        self.w.save_site({"CORP_EMAIL": " Ivanov@media-effect.ru "})
+        self.assertEqual(self.w.site()["CORP_EMAIL"], "ivanov@media-effect.ru")
+
+
+@unittest.skipIf(window is None, "нет AppKit")
+class PutConfigTests(unittest.TestCase):
+    """Один путь подмены и для файла, и для конфига с сайта."""
+
+    def setUp(self):
+        self.w = window.Window.__new__(window.Window)
+        self.w.data = tempfile.mkdtemp()
+        self.w.state = tempfile.mkdtemp()
+        self.w.log = lambda *a: None
+        self.js = []
+        self.w.eval = self.js.append
+        self.w.status = lambda: {"up": False}
+        self.w.push = lambda: None
+        self.conf = os.path.join(self.w.data, "conf")
+        os.makedirs(self.conf)
+        with open(os.path.join(self.conf, "wg-old.conf"), "w") as fh:
+            fh.write("old")
+
+    def write(self, text):
+        def w(tmp):
+            with open(tmp, "w") as fh:
+                fh.write(text)
+        return w
+
+    def test_replaces_previous_corp(self):
+        self.assertTrue(self.w.put_config("corp", "wg0-ivanov.conf", self.write("new")))
+        self.assertEqual(sorted(os.listdir(self.conf)), ["wg0-ivanov.conf"])
+        path = os.path.join(self.conf, "wg0-ivanov.conf")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_failed_write_keeps_old_and_leaves_no_tmp(self):
+        def broken(tmp):
+            with open(tmp, "w") as fh:
+                fh.write("half")
+            raise OSError("нет места")
+        self.assertFalse(self.w.put_config("corp", "wg0-ivanov.conf", broken))
+        self.assertEqual(os.listdir(self.conf), ["wg-old.conf"])
+        self.assertIn("failed(", self.js[0])
+
+    def test_restarts_running_tunnel(self):
+        self.w.status = lambda: {"up": True}
+        self.w.ctrl = mock.Mock()
+        self.w.put_config("corp", "wg0-ivanov.conf", self.write("new"))
+        self.w.ctrl.restart.assert_called_once()
+
 
 @unittest.skipIf(window is None, "нет AppKit")
 class UpdateTests(unittest.TestCase):

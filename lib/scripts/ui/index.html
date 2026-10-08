@@ -234,6 +234,7 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
                    white-space: pre-wrap; }
 #sheet-body p { margin: 0 0 10px; }
 #sheet-body p:last-child { margin-bottom: 0; }
+#sheet-body a { color: var(--accent); text-decoration: none; }
 #sheet-body { padding: 14px 16px; overflow: auto;
               font: 12.5px/1.65 -apple-system, sans-serif;
               -webkit-user-select: text; user-select: text; }
@@ -334,6 +335,11 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
   <div id="confs-wrap">
   <h2>рабочий <span class="info" data-info="corp">i</span>
     <span class="hacts">
+      <button class="icon" id="btn-fetch" title="Обновить с сайта" aria-label="Обновить с сайта">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2v8.5M4.5 7 8 10.5 11.5 7M2.5 13.5h11"/></svg>
+      </button>
       <button class="icon" data-add="corp" title="Заменить из файла" aria-label="Заменить из файла">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
              stroke-width="1.6" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
@@ -383,6 +389,7 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
       <button id="sheet-del">Удалить</button>
       <button id="sheet-load" hidden>Взять из файла…</button>
       <button id="sheet-save" hidden>Сохранить</button>
+      <button id="sheet-apply" hidden>Применить</button>
       <button id="sheet-close" class="primary">Закрыть</button>
     </div>
   </div>
@@ -747,7 +754,63 @@ const SITE_FIELDS = [
   {key: 'SB_CORP_EXCLUDE', label: 'Не пускать через рабочий туннель', optional: true,
    what: 'Адреса, которые открываются только напрямую. Формат 1.2.3.4/32.',
    example: '198.51.100.7/32'},
+  {key: 'CORP_EMAIL', label: 'Рабочая почта', optional: true,
+   what: 'На неё сайт конфигов пришлёт код, когда обновляешь рабочий конфиг стрелкой в заголовке.',
+   example: 'ivanov@media-effect.ru'},
 ];
+
+// Подвал листа: у каждого вида свой набор кнопок, остальные прячем.
+function sheetButtons(...ids) {
+  ['sheet-del', 'sheet-load', 'sheet-save', 'sheet-apply']
+    .forEach(id => { $(id).hidden = !ids.includes(id); });
+}
+
+function focusField(key) {
+  const el = $('f-' + key);
+  if (el) el.focus();
+}
+
+// Идёт запрос кода — значок крутится, как «Проверить связь».
+function corpBusy(on) {
+  const b = $('btn-fetch');
+  b.classList.toggle('probing', on);
+  b.disabled = on;
+}
+
+// Код пришёл на почту — спрашиваем его тут же, в листе поверх окна.
+function showCode(d) {
+  $('sheet-name').textContent = 'Код из письма';
+  const b = $('sheet-body');
+  b.classList.remove('mono');
+  b.innerHTML = `
+    <p>Код отправлен на ${esc(d.email)}, действует ${esc(d.minutes)} мин.
+       <a href="#" id="open-mail">Открыть почту</a></p>
+    <label class="field">
+      <span class="flabel">Код</span>
+      <input id="f-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"
+             spellcheck="false">
+    </label>
+    <div id="code-err" class="warnline" hidden></div>`;
+  sheetButtons('sheet-apply');
+  $('sheet-apply').disabled = false;
+  $('sheet').classList.add('on');
+  focusField('code');
+}
+
+// Ошибка остаётся в листе: код могли просто опечатать, форму не закрываем.
+function codeError(msg) {
+  $('code-err').textContent = msg;
+  $('code-err').hidden = false;
+  $('sheet-apply').disabled = false;
+}
+
+function sendCode() {
+  const code = $('f-code').value.trim();
+  if (!/^\d{6}$/.test(code)) { codeError('код — 6 цифр из письма'); return; }
+  $('code-err').hidden = true;
+  $('sheet-apply').disabled = true;
+  send('corp_code', code);
+}
 
 function showSite(cur) {
   document.getElementById('sheet-name').textContent = 'Рабочая сеть';
@@ -761,9 +824,7 @@ function showSite(cur) {
              spellcheck="false" autocapitalize="off" autocomplete="off">
       <span class="fex">например: ${esc(f.example)}</span>
     </label>`).join('');
-  document.getElementById('sheet-del').hidden = true;
-  document.getElementById('sheet-save').hidden = false;
-  document.getElementById('sheet-load').hidden = false;
+  sheetButtons('sheet-save', 'sheet-load');
   document.getElementById('sheet').classList.add('on');
 }
 
@@ -781,22 +842,18 @@ function closeSheet() {
 }
 
 function showInfo(title, paras) {
-  document.getElementById('sheet-save').hidden = true;
-  document.getElementById('sheet-load').hidden = true;
+  sheetButtons();
   document.getElementById('sheet-name').textContent = title;
   const b = document.getElementById('sheet-body');
   b.classList.remove('mono');
   // Абзацами, а не одним куском с переносами: иначе строки ломались там, где
   // я их набрал, и в конце абзаца оставалось по два слова.
   b.innerHTML = paras.map(t => `<p>${esc(t)}</p>`).join('');
-  document.getElementById('sheet-del').hidden = true;
   document.getElementById('sheet').classList.add('on');
 }
 
 function showConf(name, text) {
-  document.getElementById('sheet-save').hidden = true;
-  document.getElementById('sheet-load').hidden = true;
-  document.getElementById('sheet-del').hidden = false;
+  sheetButtons('sheet-del');
   document.getElementById('sheet-body').classList.add('mono');
   document.getElementById('sheet-name').textContent = name + '.conf';
   // Файл показывается целиком, включая ключи: он лежит на этой же машине,
@@ -811,6 +868,17 @@ function showConf(name, text) {
 document.getElementById('btn-toggle').onclick = () => send(LAST.up ? 'stop' : 'start');
 document.getElementById('btn-install').onclick = () => send('install_daemon');
 document.getElementById('btn-site').onclick = () => send('site');
+document.getElementById('btn-fetch').onclick = () => send('corp_fetch');
+document.getElementById('sheet-apply').onclick = sendCode;
+// Enter в поле кода — то же, что «Применить»; ссылка на почту — в браузер.
+document.getElementById('sheet-body').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.id === 'f-code') sendCode();
+});
+document.getElementById('sheet-body').addEventListener('click', e => {
+  if (e.target.id !== 'open-mail') return;
+  e.preventDefault();
+  send('open_mail');
+});
 // Подвал перерисовывается целиком, поэтому слушаем на нём, а не на ссылке.
 document.getElementById('version').onclick = e => {
   if (!e.target.closest('#upd-go')) return;

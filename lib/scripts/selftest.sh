@@ -34,8 +34,9 @@ done
 
 head "кодировки (в .app локаль ASCII — без encoding падает на русском)"
 # И чтение тоже: build-config.py читал .conf без encoding, и кириллица
-# в комментарии уронила бы сборку под ASCII-локалью.
-BADENC=$(grep -nE '\bopen\(' "$BASE"/lib/scripts/*.py \
+# в комментарии уронила бы сборку под ASCII-локалью. os.open — дескриптор,
+# не текст, кодировки у него нет.
+BADENC=$(grep -nE '(^|[^.])\bopen\(' "$BASE"/lib/scripts/*.py \
          | grep -v 'encoding=' | grep -v '"rb"' | grep -v 'def open_log')
 if [ -n "$BADENC" ]; then
   echo "$BADENC"

@@ -20,6 +20,7 @@ import threading
 import time
 
 import control
+import corpconf
 import tui
 import update
 
@@ -443,6 +444,12 @@ class Window:
             self.use_config(arg)
         elif name == "add_config":
             self.add_config(arg or "personal")
+        elif name == "corp_fetch":
+            self.corp_fetch()
+        elif name == "corp_code":
+            self.corp_code(arg)
+        elif name == "open_mail":
+            subprocess.run(["/usr/bin/open", corpconf.MAIL])
         elif name == "edit_config":
             self.edit_config(arg)
         elif name == "del_config":
@@ -457,7 +464,9 @@ class Window:
     INFO = {
         "corp": ("Рабочий туннель", [
             "Файл WireGuard от админа. Должен быть ровно один.",
-            "Новый выдали — ＋ в заголовке раздела. Старый удалится, "
+            "Конфиг с сайта живёт 15 часов. Свежий — значок со стрелкой в "
+            "заголовке раздела: код придёт на рабочую почту из настроек.",
+            "Выдали файлом — ＋ в заголовке. Старый удалится, "
             "файл скопируется к себе, исходник больше не нужен.",
             "Имена: corp.conf, wg.conf, wg-*.conf, wg0-*.conf. "
             "Другое имя программа поправит сама.",
@@ -638,7 +647,8 @@ class Window:
                          start_new_session=True)
         AppHelper.callAfter(NSApp.terminate_, None)
 
-    SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE")
+    SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE",
+                 "CORP_EMAIL")
 
     def site_path(self):
         return os.path.join(self.data, "conf", "site.env")
@@ -708,6 +718,12 @@ class Window:
         for k, v in vals.items():
             if '"' in v:
                 self.eval(f"failed({_js('кавычки в поле ' + k + ' недопустимы')})")
+                return
+        if vals["CORP_EMAIL"]:
+            try:
+                vals["CORP_EMAIL"] = corpconf.check_email(vals["CORP_EMAIL"])
+            except corpconf.CorpConfError as e:
+                self.eval(f"failed({_js(str(e))})")
                 return
         text = ("# Настройки рабочей сети. Файл читают vpn и скрипты диагностики.\n"
                 "# Создан из окна программы.\n")
@@ -801,12 +817,8 @@ class Window:
         elif kind == "personal" and looks_corp:
             base = "awg-" + base
 
-        conf_dir = os.path.join(self.data, "conf")
-        dst = os.path.join(conf_dir, base)
-        cur = self.configs()["corp"]
-        replacing = [c["name"] + ".conf" for c in cur if c["name"] + ".conf" != base] \
-            if kind == "corp" else []
-
+        dst = os.path.join(self.data, "conf", base)
+        replacing = self.replaced_by(kind, base)
         if replacing:
             if not self.confirm("Заменить рабочий конфиг?",
                                 f"{', '.join(replacing)} будет удалён, "
@@ -816,13 +828,30 @@ class Window:
             if not self.confirm(f"Перезаписать {base}?",
                                 "Файл с таким именем уже есть.", ok="Перезаписать"):
                 return
+        self.put_config(kind, base, lambda tmp: shutil.copy2(src, tmp))
 
+    def replaced_by(self, kind, base):
+        """Прежние рабочие, которые уйдут, когда ляжет base. У личных — никто."""
+        if kind != "corp":
+            return []
+        return [c["name"] + ".conf" for c in self.configs()["corp"]
+                if c["name"] + ".conf" != base]
+
+    def put_config(self, kind, base, write):
+        """Кладёт конфиг в conf/ под именем base; write(tmp) пишет содержимое.
+
+        Один путь и для файла, и для конфига с сайта. Спрашивать человека —
+        дело вызывающего: здесь только запись. True — положили.
+        """
+        conf_dir = os.path.join(self.data, "conf")
+        dst = os.path.join(conf_dir, base)
+        replacing = self.replaced_by(kind, base)
         # Сначала копия во временный файл рядом, и только потом подмена. Иначе
         # неудачное копирование (нет места, источник пропал) оставляло бы
         # каталог вообще без рабочего конфига — сборка перестала бы проходить.
         tmp = dst + ".new"
         try:
-            shutil.copy2(src, tmp)
+            write(tmp)
             os.chmod(tmp, 0o600)            # внутри приватный ключ
             for old_name in replacing:      # их может быть несколько, если уже намусорено
                 os.unlink(os.path.join(conf_dir, old_name))
@@ -834,7 +863,7 @@ class Window:
             except OSError:
                 pass
             self.eval(f"failed({_js(str(e))})")
-            return
+            return False
 
         # Перезапуск нужен не только рабочему: если перезаписан файл активного
         # личного профиля, туннель тоже работает по старому содержимому.
@@ -843,6 +872,75 @@ class Window:
         if touches_active and self.status().get("up"):
             self.ctrl.restart()
         self.push()
+        return True
+
+    # ------------------------------------------------- рабочий конфиг с сайта
+    #
+    # Сеть — в фоновом потоке: curl ждёт до 20 секунд, и окно всё это время
+    # стояло бы колом. В окно и в диалоги — только из главного потока.
+
+    _corp_busy = False
+
+    def corp_fetch(self):
+        """⟳ у рабочего: просим код. Почты нет — открываем настройки на ней."""
+        email = self.site()["CORP_EMAIL"]
+        if not email:
+            self.eval(f"call('showSite', {_js(self.site())}); call('focusField', 'CORP_EMAIL')")
+            return
+        if self._corp_busy:
+            return
+        self._corp_busy = True
+        self.eval("call('corpBusy', true)")
+        threading.Thread(target=self._corp_request, args=(email,), daemon=True).start()
+
+    def _corp_request(self, email):
+        try:
+            minutes = corpconf.request(email, corpconf.client_name())
+            self.log(f"рабочий конфиг: код отправлен на {email}")
+            done = f"call('showCode', {_js({'email': email, 'minutes': minutes})})"
+        except corpconf.CorpConfError as e:
+            self.log(f"рабочий конфиг: запрос кода не прошёл — {e}")
+            done = f"failed({_js(str(e))})"
+        AppHelper.callAfter(self._corp_done, done)
+
+    def _corp_done(self, script):
+        self._corp_busy = False
+        self.eval("call('corpBusy', false)")
+        self.eval(script)
+
+    def corp_code(self, code):
+        email = self.site()["CORP_EMAIL"]
+        if self._corp_busy or not email:
+            return
+        self._corp_busy = True
+        threading.Thread(target=self._corp_verify, args=(email, code), daemon=True).start()
+
+    def _corp_verify(self, email, code):
+        try:
+            text = corpconf.verify(email, code)
+        except corpconf.CorpConfError as e:
+            self.log(f"рабочий конфиг: код не принят — {e}")
+            AppHelper.callAfter(self._corp_done, f"call('codeError', {_js(str(e))})")
+            return
+        # Текст конфига дальше этой функции не уходит: внутри приватный ключ.
+        AppHelper.callAfter(self._corp_apply, email, text)
+
+    def _corp_apply(self, email, text):
+        self._corp_busy = False
+        self.eval("closeSheet()")
+        base = corpconf.file_name(email)
+        old = self.replaced_by("corp", base)
+        info = (f"{', '.join(old)} будет удалён, вместо него — {base}." if old
+                else f"{base} заменится свежим конфигом с сайта.")
+        if not self.confirm("Заменить рабочий конфиг?", info, ok="Заменить"):
+            return
+
+        def write(tmp):
+            # Сразу 600: между созданием и chmod ключ был бы открыт всем.
+            with open(tmp, "w", encoding="utf-8",
+                      opener=lambda p, f: os.open(p, f, 0o600)) as fh:
+                fh.write(text)
+        self.put_config("corp", base, write)
 
     def edit_config(self, name):
         """Открывает файл в системном редакторе.
