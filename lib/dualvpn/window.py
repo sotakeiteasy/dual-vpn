@@ -576,13 +576,19 @@ def _restore(window):
 
 def _show(window, api):
     """Показ прогретого окна по сигналу трея: свежий статус и проверка
-    туннелей — как при первом открытии."""
+    туннелей — как при первом открытии.
+
+    Уже открытое (в том числе свёрнутое) только выходит вперёд: его статус
+    держит опрос, а перерисовка с проверкой на повторный двойной клик по
+    значку выглядела как открытие заново — кружки снова рыжие.
+    """
+    on_screen = not api.hidden and not api.cold
     api.hidden = False
     api.cold = False
     window.show()
     _restore(window)
     # Страница ещё грузится — всё это сделает её ready.
-    if api.ready.is_set():
+    if not on_screen and api.ready.is_set():
         api.refresh(full=True)
         threading.Thread(target=api._check, daemon=True).start()
 

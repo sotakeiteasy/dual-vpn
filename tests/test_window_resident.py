@@ -79,6 +79,23 @@ def test_прогретое_окно_на_ready_остаётся_спрятан�
     assert "show" not in shown
 
 
+def test_открытое_окно_по_сигналу_только_выходит_вперёд(monkeypatch):
+    api, calls, shown = _api(monkeypatch)
+    api.ready.set()
+
+    window._show(_Window(shown), api)
+    assert shown == ["show"] and calls == []
+
+
+def test_спрятанное_окно_по_сигналу_обновляется(monkeypatch):
+    api, calls, shown = _api(monkeypatch)
+    api.ready.set()
+    api.hidden = True
+
+    window._show(_Window(shown), api)
+    assert "render" in shown and "check" in [op for op, _ in calls]
+
+
 def test_включение_сразу_перерисовывает_статус(monkeypatch):
     """Не ждёт следующего опроса: иначе «работает» запаздывает на POLL_EVERY."""
     api, calls, shown = _api(monkeypatch)
