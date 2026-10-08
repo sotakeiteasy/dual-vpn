@@ -284,6 +284,7 @@ class App(rumps.App):
         if os.environ.get("VPNLX_TEST_WINDOW"):
             rumps.Timer(lambda _t: self.on_window(None), 1.0).start()
         threading.Thread(target=tui.prober, daemon=True).start()
+        self.window.start_update_checks()
         self.refresh(None)
         for fn, every in ((self.refresh, REFRESH), (self.blink, BLINK)):
             t = rumps.Timer(fn, every)

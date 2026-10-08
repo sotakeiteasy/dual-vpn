@@ -120,6 +120,10 @@ button.primary:hover:not(:disabled) { background: #0b62e4; }
    к себе требовать не должна. */
 #version { color: var(--dim); font-size: 11px; padding: 2px 3px 4px;
            margin-top: auto; }
+/* Новая версия — единственное в подвале, что просит внимания. */
+#upd { color: var(--text); margin-top: 2px; }
+#upd.bad { color: var(--bad); }
+#upd a { color: var(--accent); text-decoration: none; }
 h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
      letter-spacing: 0.5px; color: var(--dim); margin: 4px 0 -2px 3px;
      display: flex; align-items: center; gap: 5px; }
@@ -700,8 +704,12 @@ function failed(msg) {
 }
 
 function renderVersion(v) {
-  document.getElementById('version').textContent =
-    `DualVPN ${v.app}` + (v.singbox ? ` · sing-box ${v.singbox}` : '');
+  const m = versionModel(v);
+  const u = m.update;
+  document.getElementById('version').innerHTML = esc(m.text) + (u
+    ? `<div id="upd" class="${u.bad ? 'bad' : ''}">${esc(u.text)}` +
+      (u.action ? ` — <a href="#" id="upd-go">${esc(u.action)}</a>` : '') + '</div>'
+    : '');
 }
 
 // Домены рабочей сети раньше были зашиты в код. Теперь их задают здесь,
@@ -785,6 +793,12 @@ function showConf(name, text) {
 document.getElementById('btn-toggle').onclick = () => send(LAST.up ? 'stop' : 'start');
 document.getElementById('btn-install').onclick = () => send('install_daemon');
 document.getElementById('btn-site').onclick = () => send('site');
+// Подвал перерисовывается целиком, поэтому слушаем на нём, а не на ссылке.
+document.getElementById('version').onclick = e => {
+  if (!e.target.closest('#upd-go')) return;
+  e.preventDefault();
+  send('update');
+};
 document.getElementById('sheet-load').onclick = () => send('load_site');
 document.getElementById('sheet-save').onclick = () => {
   const v = {};

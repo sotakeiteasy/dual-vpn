@@ -15,10 +15,13 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 
 import control
 import tui
+import update
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSMakePoint,
@@ -26,12 +29,16 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSMakePoint,
                     NSTitledWindowMask, NSClosableWindowMask, NSAlert,
                     NSResizableWindowMask, NSMiniaturizableWindowMask, NSWindow)
 from Foundation import NSObject, NSURL, NSTimer
+from PyObjCTools import AppHelper
 from WebKit import WKUserContentController, WKWebView, WKWebViewConfiguration
 
 LABEL = "local.singbox-lx"
 PLIST = f"/Library/LaunchDaemons/{LABEL}.plist"
 TAIL = 400          # сколько строк лога держим в окне
 POLL = 2.0
+UPDATE_EVERY = 6 * 3600     # как часто спрашивать GitHub о новой версии
+INSTALLED_APP = "/Applications/DualVPN.app"
+NO_UPDATE = {"state": "", "version": "", "step": "", "error": ""}
 
 
 def _list(v):
@@ -96,9 +103,15 @@ class Bridge(NSObject):
 
 
 class Window:
-    _ver_sent = False           # версия шлётся один раз: она не меняется
+    _ver_sent = None            # последний отправленный подвал: шлём, только если он сменился
+    _ver = None                 # версии программы и sing-box: они не меняются, читаем раз
     data = None                 # каталог данных; задаётся в __init__
     ctrl = None                 # control.Controller; задаётся в __init__
+    # Обновление: state — "" | available | working | error. Словарь каждый раз
+    # заменяется целиком: его пишет фоновый поток, а читает главный.
+    upd = NO_UPDATE
+    _upd_info = None            # что ставить: ответ update.pick
+    upd_timer = None            # плановая проверка; задаётся в start_update_checks
 
     def __init__(self, base, state, log, ctrl, data=None):
         self.base = base            # код: vpn, скрипты, sing-box
@@ -187,10 +200,11 @@ class Window:
         self.eval(f"call('renderConfs', {_js(self.configs())})")
         self.eval(f"call('renderLogs', {_js(self.tail())})")
         self.eval(f"call('renderHowto', {_js(self.howto())})")
-        if not getattr(self, "_ver_sent", False):
-            self._ver_sent = True        # версия не меняется — шлём один раз
-            v = self.version()
-            self.log(f"окно: версия {v['app']} / sing-box {v['singbox'] or '—'}")
+        v = self.version()
+        if v != self._ver_sent:
+            if self._ver_sent is None:
+                self.log(f"окно: версия {v['app']} / sing-box {v['singbox'] or '—'}")
+            self._ver_sent = v
             self.eval(f"call('renderVersion', {_js(v)})")
 
     def status(self):
@@ -309,7 +323,13 @@ class Window:
         return flat
 
     def version(self):
-        """Версия программы и бинарника — одной строкой для подвала окна.
+        """Подвал окна: версия программы и бинарника, состояние обновления."""
+        if self._ver is None:
+            self._ver = self.versions()
+        return dict(self._ver, update=dict(self.upd))
+
+    def versions(self):
+        """Версия программы и бинарника.
 
         Версия лежит в файле VERSION в корне: её же читает сборка .app,
         чтобы номер в окне и в свойствах приложения не разъезжались.
@@ -386,6 +406,8 @@ class Window:
             self.save_site(arg or {})
         elif name == "install_daemon":
             self.install_daemon()
+        elif name == "update":
+            self.start_update()
         elif name == "ready":
             self.log("окно: страница загрузилась")
         elif name == "jserror":
@@ -465,7 +487,9 @@ class Window:
         if '"' in script or '"' in user:
             self.eval(f"failed({_js('недопустимый путь установки')})")
             return
-        cmd = f'SUDO_USER={user} /bin/bash "{script}"'
+        # Внутри строки AppleScript кавычки экранируются: без \" osascript
+        # падал с синтаксической ошибкой, и служба из DMG не ставилась.
+        cmd = f'SUDO_USER={user} /bin/bash \\"{script}\\"'
         osa = (f'do shell script "{cmd}" with administrator privileges '
                f'with prompt "DualVPN устанавливает фоновую службу. '
                f'Она поднимает туннель, для этого нужны права администратора."')
@@ -481,6 +505,129 @@ class Window:
             return
         self.log("служба установлена")
         self.push()
+
+    # ---------------------------------------------------------- обновление
+
+    def updatable(self):
+        """Обновлять есть что, только если работаем из установленного .app.
+
+        Копия из репозитория (menubar.py под venv) версию берёт из VERSION
+        рабочей копии, и сравнивать её с релизом бессмысленно.
+        """
+        return self.base == os.path.join(INSTALLED_APP, "Contents", "Resources")
+
+    def start_update_checks(self):
+        """Проверка при старте и раз в UPDATE_EVERY. Зовётся из главного потока."""
+        if os.environ.get("VPNLX_TEST_WINDOW") or not self.updatable():
+            return
+        self.check_update()
+        self.upd_timer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+            UPDATE_EVERY, True, lambda _t: self.check_update())
+
+    def check_update(self):
+        if self.upd["state"] == "working":
+            return
+        threading.Thread(target=self._check_update, daemon=True).start()
+
+    def _check_update(self):
+        cur = self.version()["app"]
+        try:
+            info = update.check(cur)
+        except update.UpdateError as e:
+            # Фоновая проверка молчит: нет сети — не повод что-то показывать.
+            self.log(f"обновление: проверка не удалась — {e}")
+            return
+        if self.upd["state"] == "working":
+            return
+        self._upd_info = info
+        if info:
+            self.log(f"обновление: есть {info['version']} (стоит {cur})")
+            self.upd = dict(NO_UPDATE, state="available", version=info["version"])
+        else:
+            self.upd = NO_UPDATE
+
+    def start_update(self):
+        info = self._upd_info
+        if info is None or self.upd["state"] not in ("available", "error"):
+            return
+        self.upd = dict(NO_UPDATE, state="working", version=info["version"],
+                        step="скачиваю")
+        self.push()
+        threading.Thread(target=self._update, args=(info,), daemon=True).start()
+
+    def _update_step(self, step):
+        self.upd = dict(self.upd, step=step)
+
+    def _update(self, info):
+        """Скачать, сверить, открыть образ и поставить. В фоновом потоке.
+
+        Подвал перерисовывает таймер окна: из этого потока окно не трогаем.
+        """
+        tmp = tempfile.mkdtemp(prefix="dualvpn-update-")
+        point = os.path.join(tmp, "mnt")
+        mounted = False
+        try:
+            dmg = update.download(info, tmp)
+            self._update_step("открываю образ")
+            os.mkdir(point)
+            app = update.mount(dmg, point)
+            mounted = True
+            self._update_step("жду пароль")
+            err = self._apply(app, info["version"])
+        except update.UpdateError as e:
+            err = str(e)
+        except OSError as e:
+            err = f"обновление: {e}"
+        finally:
+            if mounted:
+                update.unmount(point)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        if err is None:                 # «Отмена» в запросе пароля
+            self.upd = dict(NO_UPDATE, state="available", version=info["version"])
+        elif err:
+            self.log(f"обновление: {err}")
+            self.upd = dict(NO_UPDATE, state="error", version=info["version"],
+                            error=err)
+        else:
+            self.log(f"обновление: поставлено {info['version']}, перезапускаюсь")
+            self.relaunch()
+
+    def _apply(self, app, version):
+        """apply-update.sh под root. '' — успех, None — отмена, иначе ошибка.
+
+        Скрипт — из установленного приложения, не из скачанного: под root
+        идёт только код, которому уже доверились при установке.
+        """
+        script = self.tool("apply-update.sh")
+        if not os.path.exists(script):
+            return "не нашёл установщик обновления"
+        user = os.environ.get("USER") or ""
+        if '"' in script or '"' in app or '"' in user:
+            return "недопустимый путь обновления"
+        cmd = f'SUDO_USER={user} /bin/bash \\"{script}\\" \\"{app}\\"'
+        osa = (f'do shell script "{cmd}" with administrator privileges '
+               f'with prompt "DualVPN ставит версию {version}. '
+               f'Чтобы заменить приложение в Программах, нужны права администратора."')
+        r = subprocess.run(["/usr/bin/osascript", "-e", osa],
+                           capture_output=True, text=True)
+        for line in (r.stdout or "").strip().splitlines():
+            self.log(f"apply-update: {line}")
+        if r.returncode != 0:
+            err = (r.stderr or "").strip()
+            # -128 — человек нажал «Отмена», это не ошибка.
+            return None if "-128" in err else (err[:160] or "не удалось поставить")
+        return ""
+
+    def relaunch(self):
+        """Закрыться и открыть уже новую версию.
+
+        open ждёт пару секунд: пока жив этот процесс, он лишь активировал бы
+        его же. Туннель не трогаем — им владеет служба, а не приложение.
+        """
+        subprocess.Popen(["/bin/sh", "-c", f'sleep 2; /usr/bin/open "{INSTALLED_APP}"'],
+                         start_new_session=True)
+        AppHelper.callAfter(NSApp.terminate_, None)
 
     SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE")
 

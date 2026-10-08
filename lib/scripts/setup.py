@@ -16,7 +16,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 # и внутри zip-архива py2app они были бы недоступны.
 SCRIPTS = [os.path.join(ROOT, "lib", "scripts", f)
            for f in ("build-config.py", "tui.py", "setup-resolver.sh",
-                     "check.sh", "diag.sh", "install-daemon.sh")]
+                     "check.sh", "diag.sh", "install-daemon.sh",
+                     "apply-update.sh")]
 
 VERSION_FILE = os.path.join(ROOT, "VERSION")
 
@@ -40,7 +41,7 @@ OPTIONS = {
         "NSHumanReadableCopyright": "",
     },
     # tui даёт логику проб, остальное — то, чем она пользуется.
-    "includes": ["rumps", "tui", "window", "control", "menumodel", "curses",
+    "includes": ["rumps", "tui", "window", "control", "menumodel", "update", "curses",
                  "json", "re", "subprocess", "plistlib", "shutil",
                  "PyObjCTools.AppHelper"],
     # WebKit и AppKit нужны окну; py2app сам их не находит через objc.

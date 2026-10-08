@@ -7,7 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const {viewModel} = require(path.join(__dirname, '..', 'lib', 'scripts', 'ui', 'view.js'));
+const {viewModel, versionModel} = require(path.join(__dirname, '..', 'lib', 'scripts', 'ui', 'view.js'));
 
 const IDLE = {phase: 'idle', step: '', busy: false};
 const UP = {up: true, daemon: true, op: IDLE, exit_ip: '188.241.219.116',
@@ -155,4 +155,33 @@ test('ошибки лога в подзаголовок не попадают', 
   assert.equal(viewModel({...UP, err_count: 3}).sub, 'оба туннеля подняты');
   assert.equal(viewModel({...UP, corp_ip: '', err_count: 3}).sub,
                'личный туннель работает, интернет есть');
+});
+
+const VER = {app: '0.1.5', singbox: '1.14.1-lx.12'};
+const upd = (state, extra) => ({...VER, update: {state, version: '0.1.6', step: '', error: '', ...extra}});
+
+test('подвал: без новой версии — только номера', () => {
+  const m = versionModel({...VER, update: {state: ''}});
+  assert.equal(m.text, 'DualVPN 0.1.5 · sing-box 1.14.1-lx.12');
+  assert.equal(m.update, null);
+  assert.equal(versionModel(undefined).text, 'DualVPN ?');
+});
+
+test('подвал: есть новая — кнопка «Обновить»', () => {
+  const u = versionModel(upd('available')).update;
+  assert.equal(u.text, 'есть 0.1.6');
+  assert.equal(u.action, 'Обновить');
+});
+
+test('подвал: обновление идёт — шаг без кнопки', () => {
+  const u = versionModel(upd('working', {step: 'скачиваю'})).update;
+  assert.equal(u.text, 'обновляю до 0.1.6: скачиваю…');
+  assert.equal(u.action, null);
+});
+
+test('подвал: не встала — первая строка ошибки и «Повторить»', () => {
+  const u = versionModel(upd('error', {error: 'сумма не совпала\nподробности'})).update;
+  assert.equal(u.text, '0.1.6 не встала: сумма не совпала');
+  assert.equal(u.action, 'Повторить');
+  assert.equal(u.bad, true);
 });
