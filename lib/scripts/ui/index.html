@@ -225,7 +225,12 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
                border: 1px solid var(--line); background: var(--bg); color: var(--text);
                -webkit-user-select: text; user-select: text; }
 .field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.fhint { display: block; color: var(--dim); font-size: 11px; margin-top: 3px; }
+/* Пояснение — обычным шрифтом: оно говорит, что вписать, и читать его
+   обязательно. Пример — мелко и моноширинно, как сама строка ввода. */
+.fopt  { font-weight: 400; color: var(--dim); }
+.fwhat { display: block; font-size: 12px; color: var(--text); margin-bottom: 6px; }
+.fex   { display: block; color: var(--dim); margin-top: 4px;
+         font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 /* Ошибка старта: причина словами и хвост лога прямо тут — искать её по
    логу справа, среди сотен строк sing-box, никто не станет. */
@@ -673,32 +678,35 @@ function renderVersion(v) {
 }
 
 // Домены рабочей сети раньше были зашиты в код. Теперь их задают здесь,
-// иначе после выноса в файл задать их стало бы нечем.
+// иначе после выноса в файл задать их стало бы нечем. Пояснения — что вписать,
+// а не что программа с этим делает: прошлые описывали внутреннюю логику.
+// Порядок — по важности: без первых двух рабочая сеть не работает вовсе.
 const SITE_FIELDS = [
-  ["CORP_DOMAINS", "Домены рабочей сети",
-   "example.local corp.example.com",
-   "их резолвит корпоративный DNS, остальное — публичный. Через пробел"],
-  ["CORP_PROBE", "Хост для проверки связи",
-   "git.example.local",
-   "по нему окно понимает, отвечает ли рабочая сеть. Должен быть доступен только изнутри"],
-  ["CORP_HOSTS", "Что проверяет диагностика",
-   "git.example.local wiki.example.local",
-   "необязательно, через пробел"],
-  ["SB_CORP_EXCLUDE", "Не гнать в рабочий туннель",
-   "198.51.100.7/32",
-   "нужно редко: когда хост из AllowedIPs через туннель не отвечает, а напрямую открывается"],
+  {key: 'CORP_DOMAINS', label: 'Домены рабочей сети',
+   what: 'Адреса внутри рабочей сети: их имена знает только рабочий DNS. Несколько — через пробел.',
+   example: 'corp.example.com example.local'},
+  {key: 'CORP_PROBE', label: 'Хост для проверки',
+   what: 'Любой внутренний адрес, который всегда работает. По нему окно решает, отвечает ли корп.',
+   example: 'git.corp.example.com'},
+  {key: 'CORP_HOSTS', label: 'Хосты для диагностики', optional: true,
+   what: 'Что дополнительно проверить, когда что-то не открывается.',
+   example: 'git.corp.example.com wiki.corp.example.com'},
+  {key: 'SB_CORP_EXCLUDE', label: 'Не пускать через рабочий туннель', optional: true,
+   what: 'Адреса, которые открываются только напрямую. Формат 1.2.3.4/32.',
+   example: '198.51.100.7/32'},
 ];
 
 function showSite(cur) {
   document.getElementById('sheet-name').textContent = 'Рабочая сеть';
   const b = document.getElementById('sheet-body');
   b.classList.remove('mono');
-  b.innerHTML = SITE_FIELDS.map(([k, label, ph, hint]) => `
+  b.innerHTML = SITE_FIELDS.map(f => `
     <label class="field">
-      <span class="flabel">${label}</span>
-      <input id="f-${k}" value="${esc(cur[k] || '')}" placeholder="${esc(ph)}"
-             spellcheck="false" autocapitalize="off">
-      <span class="fhint">${hint}</span>
+      <span class="flabel">${f.label}${f.optional ? ' <span class="fopt">· необязательно</span>' : ''}</span>
+      <span class="fwhat">${f.what}</span>
+      <input id="f-${f.key}" value="${esc(cur[f.key] || '')}"
+             spellcheck="false" autocapitalize="off" autocomplete="off">
+      <span class="fex">например: ${esc(f.example)}</span>
     </label>`).join('');
   document.getElementById('sheet-del').hidden = true;
   document.getElementById('sheet-save').hidden = false;
@@ -709,9 +717,9 @@ function showSite(cur) {
 // Поля заполняются из выбранного файла: набивать их руками, когда готовый
 // site.env уже есть, — лишняя работа.
 function fillSite(v) {
-  SITE_FIELDS.forEach(([k]) => {
-    const el = document.getElementById('f-' + k);
-    if (el) el.value = v[k] || '';
+  SITE_FIELDS.forEach(({key}) => {
+    const el = document.getElementById('f-' + key);
+    if (el) el.value = v[key] || '';
   });
 }
 
@@ -753,7 +761,7 @@ document.getElementById('btn-site').onclick = () => send('site');
 document.getElementById('sheet-load').onclick = () => send('load_site');
 document.getElementById('sheet-save').onclick = () => {
   const v = {};
-  SITE_FIELDS.forEach(([k]) => { v[k] = document.getElementById('f-' + k).value; });
+  SITE_FIELDS.forEach(({key}) => { v[key] = document.getElementById('f-' + key).value; });
   send('save_site', v);
 };
 document.getElementById('btn-restart').onclick = () => send('restart');

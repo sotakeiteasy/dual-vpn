@@ -22,7 +22,7 @@ import tui
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSMakePoint,
-                    NSOpenPanel,
+                    NSMenu, NSMenuItem, NSOpenPanel,
                     NSTitledWindowMask, NSClosableWindowMask, NSAlert,
                     NSResizableWindowMask, NSMiniaturizableWindowMask, NSWindow)
 from Foundation import NSObject, NSURL, NSTimer
@@ -44,6 +44,38 @@ def _list(v):
 def _js(value):
     """JSON внутрь evaluateJavaScript. json.dumps сам экранирует кавычки."""
     return json.dumps(value, ensure_ascii=False)
+
+
+EDIT_ITEMS = (("Undo", "undo:", "z"), ("Redo", "redo:", "Z"), None,
+              ("Cut", "cut:", "x"), ("Copy", "copy:", "c"),
+              ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a"))
+
+
+def install_edit_menu():
+    """Меню Edit, через которое macOS доставляет Cmd+V, Cmd+C и прочие.
+
+    Сочетания эти — не клавиши страницы, а пункты главного меню. У приложения
+    из меню-бара главного меню не было, и WKWebView их просто не получал:
+    в поле диалога нельзя было вставить, из лога — скопировать. В режиме
+    accessory меню не видно, но сочетания через него проходят.
+    """
+    main = NSApp.mainMenu()
+    if main is not None and main.itemWithTitle_("Edit") is not None:
+        return
+    if main is None:
+        main = NSMenu.alloc().init()
+        # Первый пункт система считает меню приложения — Edit туда не кладём.
+        main.addItem_(NSMenuItem.alloc().init())
+    edit = NSMenu.alloc().initWithTitle_("Edit")
+    for it in EDIT_ITEMS:
+        if it is None:
+            edit.addItem_(NSMenuItem.separatorItem())
+        else:
+            edit.addItemWithTitle_action_keyEquivalent_(*it)
+    item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Edit", None, "")
+    item.setSubmenu_(edit)
+    main.addItem_(item)
+    NSApp.setMainMenu_(main)
 
 
 class Bridge(NSObject):
@@ -89,6 +121,7 @@ class Window:
             NSApp.activateIgnoringOtherApps_(True)
             return
 
+        install_edit_menu()
         cfg = WKWebViewConfiguration.alloc().init()
         ucc = WKUserContentController.alloc().init()
         self.bridge = Bridge.alloc().initWithOwner_(self)
@@ -511,10 +544,13 @@ class Window:
         self.eval(f"call('fillSite', {_js(out)})")
 
     def save_site(self, values):
-        vals = {k: str(values.get(k, "") or "").strip() for k in self.SITE_KEYS}
+        # Пробелы и переносы — в один пробел: список, вставленный столбиком,
+        # тоже должен лечь строкой, а bash делит значение как раз по пробелам.
+        vals = {k: " ".join(str(values.get(k, "") or "").split())
+                for k in self.SITE_KEYS}
         # Кавычки в значении разорвали бы строку файла, который читает bash.
         for k, v in vals.items():
-            if '"' in v or "\n" in v:
+            if '"' in v:
                 self.eval(f"failed({_js('кавычки в поле ' + k + ' недопустимы')})")
                 return
         text = ("# Настройки рабочей сети. Файл читают vpn и скрипты диагностики.\n"
