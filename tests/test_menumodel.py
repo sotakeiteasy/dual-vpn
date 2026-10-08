@@ -11,7 +11,7 @@ from menumodel import menu_model  # noqa: E402
 IDLE = {"phase": "idle", "step": "", "busy": False, "error": "", "error_log": []}
 UP = {"tun": "utun7", "r_low": True, "exit_ip": "188.241.219.116",
       "exit_state": "tunnel", "corp_ip": "172.15.0.5",
-      "exit_country": "DE", "exit_city": "Frankfurt am Main"}
+      "exit_country": "DE"}
 
 
 def op(**kw):
@@ -39,7 +39,7 @@ class MenuModelTests(unittest.TestCase):
         self.assertTrue(m["switch"])
         self.assertEqual(m["title"], "Всё работает")
         self.assertEqual(m["rows"], [
-            {"name": "Личный", "value": "DE Frankfurt am Main", "ok": True},
+            {"name": "Личный", "value": "DE", "ok": True},
             {"name": "Корп", "value": "на связи", "ok": True}])
         # Адреса в меню не выводятся: они только перегружали строки.
         self.assertNotIn("188.241", repr(m))

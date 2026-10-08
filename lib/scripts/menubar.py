@@ -110,7 +110,7 @@ os.environ["DUALVPN_DATA"] = DATA
 import rumps                      # noqa: E402
 from AppKit import (NSAttributedString, NSColor, NSControlSizeSmall,  # noqa: E402
                     NSControlStateValueOff, NSControlStateValueOn, NSFont,
-                    NSFontAttributeName, NSFontWeightMedium,
+                    NSFontAttributeName, NSFontWeightRegular,
                     NSForegroundColorAttributeName, NSImage,
                     NSImageSymbolConfiguration, NSImageView,
                     NSLineBreakByTruncatingTail, NSMutableAttributedString,
@@ -408,9 +408,11 @@ class App(rumps.App):
 # Цвет точки у строки состояния — по значку.
 DOT_COLOR = {"on": "systemGreenColor", "bad": "systemRedColor",
              "busy": "systemOrangeColor", "off": "tertiaryLabelColor"}
-# Иконка туннеля (SF Symbols) и цвет кружка под ней.
+# Иконка туннеля (SF Symbols) и её цвет. Без кружка и не акцентным цветом:
+# голубые кружки как у Wi-Fi спорили со строкой состояния и тянули взгляд на
+# себя. Красной иконка становится, только когда туннель не работает.
 ROW_SYMBOL = {"Личный": "globe", "Корп": "building.2"}
-ROW_COLOR = {True: "controlAccentColor", False: "systemRedColor", None: "systemGrayColor"}
+ROW_COLOR = {True: "secondaryLabelColor", False: "systemRedColor", None: "tertiaryLabelColor"}
 
 
 class FlippedView(NSView):
@@ -429,14 +431,15 @@ class SwitchTarget(NSObject):
 
 class StatusView:
     """Шапка меню, как у системного Wi-Fi: «DualVPN» и тумблер, под ними
-    состояние с цветной точкой, ниже по строке на туннель с иконкой в
-    кружке. Вид в пункте меню не подсвечивается и не нажимается — на кнопку
-    не похож, а серым «недоступным» не становится."""
+    состояние с цветной точкой, ниже по строке на туннель с иконкой. Вид в
+    пункте меню не подсвечивается и не нажимается — на кнопку не похож, а
+    серым «недоступным» не становится."""
 
     W = 280         # ширина шапки; меню подстраивается под самый широкий пункт
     INSET = 14      # отступ от края меню — как у текста обычных пунктов
-    ROW_H = 34
-    CIRCLE = 26
+    ROW_H = 26
+    ICON = 16       # место под иконку; сам символ — ICON_PT
+    ICON_PT = 13
     NAME_W = 80     # колонка названий туннелей; значения — справа от неё
 
     def __init__(self, on_switch):
@@ -458,18 +461,13 @@ class StatusView:
 
         self.rows = []
         for _ in ROW_SYMBOL:
-            circle = NSView.alloc().initWithFrame_(((0, 0), (self.CIRCLE, self.CIRCLE)))
-            circle.setWantsLayer_(True)
-            circle.layer().setCornerRadius_(self.CIRCLE / 2)
-            icon = NSImageView.alloc().initWithFrame_(((0, 0), (self.CIRCLE, self.CIRCLE)))
-            icon.setContentTintColor_(NSColor.whiteColor())
-            circle.addSubview_(icon)
-            self.view.addSubview_(circle)
+            icon = NSImageView.alloc().initWithFrame_(((0, 0), (self.ICON, self.ICON)))
+            self.view.addSubview_(icon)
             name = self._label(NSFont.menuFontOfSize_(base))
             value = self._label(NSFont.menuFontOfSize_(base - 1))
             value.setTextColor_(NSColor.secondaryLabelColor())
             value.setAlignment_(NSTextAlignmentRight)
-            self.rows.append((circle, icon, name, value))
+            self.rows.append((icon, name, value))
         self._shown = None
 
     def _label(self, font):
@@ -516,19 +514,20 @@ class StatusView:
 
         if m["rows"]:
             y += 6
-        for i, (circle, icon, name, value) in enumerate(self.rows):
+        for i, (icon, name, value) in enumerate(self.rows):
             row = m["rows"][i] if i < len(m["rows"]) else None
-            for v in (circle, name, value):
+            for v in (icon, name, value):
                 v.setHidden_(row is None)
             if row is None:
                 continue
-            circle.setFrameOrigin_((x, y + (self.ROW_H - self.CIRCLE) / 2))
-            circle.layer().setBackgroundColor_(getattr(NSColor, ROW_COLOR[row["ok"]])().CGColor())
+            icon.setFrameOrigin_((x, y + (self.ROW_H - self.ICON) / 2))
+            icon.setContentTintColor_(getattr(NSColor, ROW_COLOR[row["ok"]])())
             img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
                 ROW_SYMBOL.get(row["name"], "network"), row["name"])
             icon.setImage_(img.imageWithSymbolConfiguration_(
-                NSImageSymbolConfiguration.configurationWithPointSize_weight_(12, NSFontWeightMedium)))
-            left = x + self.CIRCLE + 10
+                NSImageSymbolConfiguration.configurationWithPointSize_weight_(
+                    self.ICON_PT, NSFontWeightRegular)))
+            left = x + self.ICON + 8
             name.setStringValue_(row["name"])
             name.setFrame_(((left, y + (self.ROW_H - 17) / 2), (self.NAME_W, 17)))
             value.setStringValue_(row["value"])

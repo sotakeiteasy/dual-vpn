@@ -48,22 +48,37 @@ class ProbeSlowTests(unittest.TestCase):
                        "dns": {"servers": [{"tag": "dns-corp", "server": "172.15.0.110"}]}}, fh)
         with tui.LOCK:
             tui.ST.clear()
+        self.ipinfo_calls = 0
 
     def tearDown(self):
         for p in self.patches:
             p.stop()
 
-    def probe(self, ipinfo, dig, https="200 0.018", delay=0.0):
-        # Как curl с -w: хвост "\n%{time_connect}" есть и при неудаче (0.000000).
+    def probe(self, exit, dig, https="200", delay=0.0, pings=None):
+        # exit: что видит снаружи trace Cloudflare (JSON с ip и country);
+        # "" — не ответил. pings: {адрес: средний круг в мс}; кого нет — молчит.
+        pings = {tui.PING_PERSONAL: 48.6, "172.15.0.110": 8.4} if pings is None else pings
+        known = json.loads(exit) if exit else {}
+
         def sh(cmd, timeout=10):
-            if "https://ipinfo.io/json" in cmd:
+            if tui.TRACE_URL in cmd:
                 time.sleep(delay)
-                return ipinfo + ("\n0.042" if ipinfo else "\n0.000000")
+                return f"h=1.1.1.1\nip={known['ip']}\nloc={known.get('country', '')}" if known else ""
+            if any("ipinfo.io" in c for c in cmd):
+                self.ipinfo_calls += 1
+                return ""
             if cmd[0] == "dig":
                 time.sleep(delay)
                 return dig
             if "https://git.corp" in cmd:
                 return https
+            if cmd[0] == "ping":
+                host = cmd[-1]
+                if host not in pings:
+                    return f"--- {host} ping statistics ---\n3 packets transmitted, 0 packets received, 100.0% packet loss"
+                avg = pings[host]
+                return (f"--- {host} ping statistics ---\n3 packets transmitted, 3 packets received, 0.0% packet loss\n"
+                        f"round-trip min/avg/max/stddev = {avg - 1:.3f}/{avg:.3f}/{avg + 1:.3f}/0.600 ms")
             return ""
         with mock.patch.object(tui, "sh", sh):
             tui.probe_slow()
@@ -78,25 +93,48 @@ class ProbeSlowTests(unittest.TestCase):
                         "корп-проба ждала личную — пробы снова идут по очереди")
         self.assertEqual((st["exit_ip"], st["corp_ip"]), ("1.2.3.4", "10.0.0.5"))
 
-    def test_latency_from_time_connect(self):
+    def test_latency_is_ping_through_tunnels(self):
         st = self.probe(json.dumps({"ip": "1.2.3.4"}), "10.0.0.5")
-        self.assertEqual((st["exit_ms"], st["corp_ms"]), (42, 18))
-        st = self.probe("", "", https="000 0.000000")
-        self.assertEqual((st["exit_ms"], st["corp_ms"]), (None, None))
+        self.assertEqual((st["exit_ms"], st["corp_ms"]), (49, 8))
+        st = self.probe("", "", https="000")
         self.assertEqual(st["corp_http"], "")
 
-    def test_connect_ms(self):
-        self.assertEqual(tui.connect_ms("0.0425"), 42)
-        for bad in ("0.000000", "", None, "{}"):
-            self.assertIsNone(tui.connect_ms(bad), bad)
+    def test_latency_survives_one_failed_ping(self):
+        good = json.dumps({"ip": "1.2.3.4"})
+        self.probe(good, "10.0.0.5")
+        st = self.probe(good, "10.0.0.5", pings={})
+        self.assertEqual((st["exit_ms"], st["corp_ms"]), (49, 8),
+                         "один потерянный пинг стёр цифру — она мигает")
+        st = self.probe(good, "10.0.0.5", pings={})
+        self.assertEqual((st["exit_ms"], st["corp_ms"]), (None, None))
+        st = self.probe(good, "10.0.0.5")
+        self.assertEqual((st["exit_ms"], st["corp_ms"]), (49, 8))
+
+    def test_ping_ms(self):
+        self.assertIsNone(tui.ping_ms(""))
+        with mock.patch.object(tui, "sh", return_value="round-trip min/avg/max/stddev = 7.7/8.433/9.2/0.6 ms"):
+            self.assertEqual(tui.ping_ms("172.15.0.110"), 8)
+        with mock.patch.object(tui, "sh", return_value="3 packets transmitted, 0 packets received"):
+            self.assertIsNone(tui.ping_ms("172.15.0.110"))
 
     def test_exit_ip_survives_one_failed_probe(self):
-        good = json.dumps({"ip": "1.2.3.4", "country": "DE", "city": "Frankfurt"})
+        good = json.dumps({"ip": "1.2.3.4", "country": "DE"})
         st = self.probe(good, "10.0.0.5")
         self.assertEqual((st["exit_ip"], st["exit_state"]), ("1.2.3.4", "tunnel"))
-        st = self.probe("", "10.0.0.5")                 # ipinfo не ответил
+        st = self.probe("", "10.0.0.5")                 # trace не ответил
         self.assertEqual((st["exit_ip"], st["exit_state"]), ("1.2.3.4", "tunnel"),
-                         "разовый сбой ipinfo стёр адрес — строка «прыгает»")
+                         "разовый сбой стёр адрес — строка «прыгает»")
+
+    def test_exit_from_trace_without_ipinfo(self):
+        # Сервис с лимитом каждые 20 секунд — гарантированный 429 к вечеру.
+        for _ in range(3):
+            st = self.probe(json.dumps({"ip": "1.2.3.4", "country": "NL"}), "10.0.0.5")
+        self.assertEqual((st["exit_ip"], st["exit_country"]), ("1.2.3.4", "NL"))
+        self.assertEqual(self.ipinfo_calls, 0)
+
+    def test_exit_info_rejects_garbage(self):
+        with mock.patch.object(tui, "sh", return_value='{"status": 429}'):
+            self.assertEqual(tui.exit_info(), ("", ""))
 
     def test_first_failure_is_unknown(self):
         st = self.probe("", "")
@@ -143,6 +181,17 @@ class ProbeNowTests(unittest.TestCase):
         self.assertFalse(tui.ST["probing"])
         self.assertEqual(self.runs, 1)
         self.assertTrue(tui.probe_now())
+
+    def test_only_manual_check_is_marked(self):
+        self.assertTrue(tui.probe_now())
+        self.assertFalse(tui.ST["probing_manual"], "плановая помечена ручной")
+        # Нажали посреди плановой: новой не будет, но её итог — ответ на нажатие.
+        self.assertFalse(tui.probe_now(manual=True))
+        self.assertTrue(tui.ST["probing_manual"])
+        self.release.set()
+        self.wait_idle()
+        self.assertFalse(tui.ST["probing_manual"], "кнопка крутилась бы до следующей проверки")
+        self.assertEqual(self.runs, 1)
 
     def test_no_check_while_tunnel_down(self):
         with tui.LOCK:

@@ -12,7 +12,7 @@ const {viewModel} = require(path.join(__dirname, '..', 'lib', 'scripts', 'ui', '
 const IDLE = {phase: 'idle', step: '', busy: false};
 const UP = {up: true, daemon: true, op: IDLE, exit_ip: '188.241.219.116',
             exit_state: 'tunnel', corp_ip: '172.15.0.5',
-            exit_country: 'DE', exit_city: 'Frankfurt am Main'};
+            exit_country: 'DE'};
 const OFF = {up: false, daemon: true, op: IDLE};
 
 test('выключено: «Включить», без строк туннелей, конфиги открыты', () => {
@@ -42,8 +42,8 @@ test('включено: «Выключить», перезапуск досту�
 });
 
 test('место выхода — в строке личного, после адреса', () => {
-  assert.equal(viewModel(UP).rows[0].value, '188.241.219.116 · DE Frankfurt am Main');
-  const bare = viewModel({...UP, exit_country: '', exit_city: ''});
+  assert.equal(viewModel(UP).rows[0].value, '188.241.219.116 · DE');
+  const bare = viewModel({...UP, exit_country: ''});
   assert.equal(bare.rows[0].value, '188.241.219.116');
   assert.equal(viewModel({...UP, exit_ip: '', exit_state: 'unknown'}).rows[0].value, '—');
 });
@@ -58,17 +58,30 @@ test('задержка — только после замера', () => {
   const v = viewModel({...UP, exit_ms: 42, corp_ms: 18});
   assert.deepEqual(v.rows.map(r => r.ms), ['42 мс', '18 мс']);
   assert.deepEqual(viewModel(UP).rows.map(r => r.ms), ['', '']);
+  // Адрес не узнали (ipinfo в лимите) — задержка от этого не зависит.
+  assert.equal(viewModel({...UP, exit_ip: '', exit_ms: 48}).rows[0].ms, '48 мс');
   assert.deepEqual(viewModel({...UP, exit_ms: null, corp_ms: null}).rows.map(r => r.ms), ['', '']);
   // Корп молчит — старая цифра соврала бы, что он отвечает.
   assert.equal(viewModel({...UP, corp_ip: '', corp_ms: 18}).rows[1].ms, '');
 });
 
-test('«Проверить» выключена без туннеля и пока идёт проверка', () => {
+test('«Проверить» выключена без туннеля и пока идёт ручная проверка', () => {
   assert.equal(viewModel(OFF).check.disabled, true);
-  const p = viewModel({...UP, probing: true});
+  const p = viewModel({...UP, probing: true, probing_manual: true, exit_ms: 42, corp_ms: 18});
   assert.equal(p.check.disabled, true);
   assert.equal(p.check.probing, true);
+  // Старые цифры на время замера убраны — вместо них индикатор.
+  assert.deepEqual(p.rows.map(r => r.ms), ['', '']);
+  assert.deepEqual(p.rows.map(r => r.measuring), [true, true]);
   assert.equal(viewModel({...UP, op: {phase: 'restarting', busy: true, step: ''}}).check.disabled, true);
+});
+
+test('плановая проверка кнопку не крутит и цифры не прячет', () => {
+  const p = viewModel({...UP, probing: true, exit_ms: 42, corp_ms: 18});
+  assert.equal(p.check.probing, false);
+  assert.equal(p.check.disabled, false);
+  assert.deepEqual(p.rows.map(r => r.ms), ['42 мс', '18 мс']);
+  assert.deepEqual(p.rows.map(r => r.measuring), [false, false]);
 });
 
 test('операция идёт: окно ожидания, все кнопки заблокированы', () => {
@@ -138,9 +151,8 @@ test('пустое состояние не роняет отрисовку', () 
   assert.equal(viewModel({}).busy, null);
 });
 
-test('ошибки лога — в подзаголовке, только когда всё зелёное', () => {
-  assert.equal(viewModel({...UP, err_count: 0}).sub, 'оба туннеля подняты');
-  assert.equal(viewModel({...UP, err_count: 3}).sub, 'оба туннеля подняты · ошибок в логе: 3');
+test('ошибки лога в подзаголовок не попадают', () => {
+  assert.equal(viewModel({...UP, err_count: 3}).sub, 'оба туннеля подняты');
   assert.equal(viewModel({...UP, corp_ip: '', err_count: 3}).sub,
                'личный туннель работает, интернет есть');
 });

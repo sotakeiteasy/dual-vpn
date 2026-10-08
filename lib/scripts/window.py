@@ -401,7 +401,7 @@ class Window:
         elif name == "check":
             # Пробер живёт в этом же процессе (menubar.py), так что зовём его
             # напрямую. Идущую проверку он не дублирует.
-            tui.probe_now()
+            tui.probe_now(manual=True)
         elif name == "dismiss_error":
             self.ctrl.dismiss()
         elif name == "logs":

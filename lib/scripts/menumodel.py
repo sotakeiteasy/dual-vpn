@@ -96,7 +96,7 @@ def menu_model(st, op):
 
     # Без адресов: в меню они только перегружали строки, а смотрят их
     # в окне. Для личного важнее, где выход, чем какой у него IP.
-    place = " ".join(x for x in (st.get("exit_country"), st.get("exit_city")) if x)
+    place = st.get("exit_country") or ""
     if state == "tunnel":
         personal = {"value": place or "через туннель", "ok": True}
     elif state == "leak":

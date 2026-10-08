@@ -58,8 +58,9 @@ body {
 #state-title { font-size: 15px; font-weight: 600; letter-spacing: -0.1px; }
 #state-sub   { color: var(--dim); margin-top: 2px; }
 
-/* Туннели: «имя ● адрес … задержка». Слово состояния — в подсказке точки:
-   плашка со словом занимала полстроки и выталкивала адрес. */
+/* Туннели: «● имя адрес … задержка». Слово состояния — в подсказке точки:
+   плашка со словом занимала полстроки и выталкивала адрес. Точка — первой,
+   у края: между именем и адресом она терялась посреди строки. */
 .tun { display: flex; align-items: center; gap: 8px; padding: 9px 14px; }
 .tun + .tun { border-top: 1px solid var(--line); }
 .tun-name { width: 50px; color: var(--dim); flex: none; }
@@ -69,7 +70,16 @@ body {
 .tun-val  { font-variant-numeric: tabular-nums; min-width: 0;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tun-ms   { margin-left: auto; flex: none; color: var(--dim); font-size: 12px;
-            font-variant-numeric: tabular-nums; }
+            font-variant-numeric: tabular-nums; transition: color 0.6s; }
+/* Свежий ручной замер: цифры часто те же, и без вспышки не видно, что он был. */
+.tun-ms.fresh { color: var(--ok); transition: none; }
+/* Идёт замер: три точки по очереди, как у набора сообщения. */
+.tun-ms.measuring { display: flex; gap: 3px; align-items: center; height: 14px; }
+.tun-ms.measuring i { width: 4px; height: 4px; border-radius: 50%; background: var(--dim);
+                      animation: blink 1s infinite ease-in-out both; }
+.tun-ms.measuring i:nth-child(2) { animation-delay: 0.15s; }
+.tun-ms.measuring i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
 
 #actions { display: flex; gap: 7px; }
 /* Иконки без подписи: смысл — в title и aria-label. Высота тянется по
@@ -386,7 +396,11 @@ const esc = t => String(t).replace(/[&<>"']/g, c =>
 let LAST = {};
 let LOGLINES = [];     // последние строки лога — для окна ожидания
 let CHECK_SENT = 0;    // когда нажали «Проверить»
-const CHECK_GRACE = 4500;   // за это время probing из status.json точно дойдёт
+let CHECK_SEEN = false;     // после нажатия probing_manual уже доходил до окна
+const CHECK_GRACE = 4500;   // за это время итог проверки точно дойдёт до окна
+let CHECKING_WAS = false;   // проверка шла в прошлом кадре
+let FRESH_AT = 0;           // когда она закончилась
+const FRESH_FOR = 1500;     // сколько держать подсветку новых цифр
 
 // Каждая ветка отрисовки отчитывается один раз: если в ней исключение,
 // сообщение не придёт, и selftest это увидит. Иначе «страница загрузилась»
@@ -408,11 +422,27 @@ function render(s) {
   // сброса цвет оставался, и обычный текст показывался тревожным.
   if (!NOTICE) { subEl.textContent = v.sub || '\u00a0'; subEl.style.color = ''; }
 
+  // Идёт ли ручная проверка — одно значение и для кнопки, и для строк. Раньше
+  // кнопка крутилась по времени нажатия, а точки ждали probing_manual из
+  // status.json; проверка короче опроса, флаг до окна часто не доходил, и
+  // кнопка крутилась при старых цифрах. Теперь после нажатия считаем, что
+  // проверка идёт, пока не увидим её конец или не выйдет CHECK_GRACE.
+  if (v.check.probing) CHECK_SEEN = true;
+  const pending = Date.now() - CHECK_SENT < CHECK_GRACE && !CHECK_SEEN && !v.check.disabled;
+  const checking = v.check.probing || pending;
+  // Проверка закончилась — подсвечиваем новые цифры на FRESH_FOR.
+  if (CHECKING_WAS && !checking) {
+    FRESH_AT = Date.now();
+    setTimeout(() => render(LAST), FRESH_FOR);
+  }
+  CHECKING_WAS = checking;
+  const fresh = Date.now() - FRESH_AT < FRESH_FOR ? ' fresh' : '';
   const tunnels = v.rows.map(r =>
-    `<div class="tun"><span class="tun-name">${esc(r.name)}</span>
-       <span class="tdot ${r.dot}" title="${esc(r.label)}" aria-label="${esc(r.label)}"></span>
+    `<div class="tun"><span class="tdot ${r.dot}" title="${esc(r.label)}" aria-label="${esc(r.label)}"></span>
+       <span class="tun-name">${esc(r.name)}</span>
        <span class="tun-val" title="${esc(r.value)}">${esc(r.value)}</span>
-       ${r.ms ? `<span class="tun-ms">${esc(r.ms)}</span>` : ''}</div>`).join('');
+       ${checking ? '<span class="tun-ms measuring" aria-label="меряю"><i></i><i></i><i></i></span>'
+         : r.ms ? `<span class="tun-ms${fresh}">${esc(r.ms)}</span>` : ''}</div>`).join('');
   if (tunnels !== prev.tunnels) { prev.tunnels = tunnels; $('tunnels').innerHTML = tunnels; }
   $('tunnels').hidden = !v.rows.length;
 
@@ -424,12 +454,9 @@ function render(s) {
   t.classList.toggle('primary', v.toggle.primary);
   t.disabled = v.toggle.disabled;
   r.disabled = v.restart.disabled;
-  // Статус доходит до окна через пару секунд (файл + опрос), поэтому сразу
-  // после нажатия крутимся сами — иначе кажется, что кнопка не сработала.
   const c = $('btn-check');
-  const justSent = Date.now() - CHECK_SENT < CHECK_GRACE;
-  c.classList.toggle('probing', v.check.probing || (justSent && !v.check.disabled));
-  c.disabled = v.check.disabled || justSent;
+  c.classList.toggle('probing', checking);
+  c.disabled = v.check.disabled || checking;
 
   $('btn-install').hidden = !v.install;
   $('actions').hidden = v.install;
@@ -767,6 +794,7 @@ document.getElementById('sheet-save').onclick = () => {
 document.getElementById('btn-restart').onclick = () => send('restart');
 document.getElementById('btn-check').onclick = () => {
   CHECK_SENT = Date.now();
+  CHECK_SEEN = false;
   send('check');
   render(LAST);
   setTimeout(() => render(LAST), CHECK_GRACE);

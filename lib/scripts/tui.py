@@ -57,6 +57,12 @@ CORP_PROBE = os.environ.get("CORP_PROBE") or SITE.get("CORP_PROBE", "")
 FAST_EVERY = 2.0    # локальные проверки: интерфейсы, маршруты, процесс
 SLOW_EVERY = 20.0   # сетевые: внешний IP, корп-DNS, корп-HTTPS
 CORP_MISSES = 2     # сколько промахов DNS подряд, чтобы счесть корп молчащим
+MS_MISSES = 2       # сколько неудачных замеров подряд, чтобы убрать задержку
+# Адрес выхода и страна: Cloudflare отвечает строками ip=… и loc=…, без лимита.
+TRACE_URL = "https://1.1.1.1/cdn-cgi/trace"
+# Задержку личного меряем пингом до этого адреса: он идёт через личный туннель,
+# а anycast отвечает с узла рядом с сервером — выходит круг через туннель.
+PING_PERSONAL = "1.1.1.1"
 
 LOG = collections.deque(maxlen=4000)
 ST = {}             # состояние для панели, пишется пробером, читается отрисовкой
@@ -152,30 +158,65 @@ def peer_addrs():
     return out
 
 
-def connect_ms(val):
-    """%{time_connect} из curl в целые миллисекунды; None — соединения не было.
+def ping_ms(host):
+    """Средний круг ICMP до host в целых мс; None — не ответил.
 
-    TCP-рукопожатие через туннель — это один круг до сервера и обратно, то есть
-    та же задержка, что показал бы пинг. Отдельный ICMP не нужен: через туннель
-    его часто режут, а curl и так уже ходит.
+    Не %{time_connect} из curl: TCP через tun принимает сам sing-box, и
+    рукопожатие занимало 2–4 мс при сервере в 50 мс — цифра в окне была
+    задержкой до своего же стека. ICMP sing-box не подменяет, а везёт через
+    WireGuard, так что пинг — настоящий круг через туннель.
     """
-    try:
-        sec = float(val)
-    except (TypeError, ValueError):
+    if not host:
         return None
-    return round(sec * 1000) if sec > 0 else None
+    out = sh(["ping", "-c", "3", "-i", "0.2", "-t", "3", "-q", host], 5)
+    m = re.search(r"= [\d.]+/([\d.]+)/", out)
+    return round(float(m.group(1))) if m else None
+
+
+def keep_ms(key, val):
+    """Записывает задержку; разовый неудачный замер её не стирает.
+
+    Иначе цифра пропадала до следующей проверки, и строка мигала так же,
+    как раньше адрес при сбое ipinfo.
+    """
+    with LOCK:
+        misses = 0 if val is not None else ST.get(key + "_misses", 0) + 1
+        if val is not None or misses >= MS_MISSES:
+            ST[key] = val
+        ST[key + "_misses"] = misses
+
+
+def exit_info():
+    """Адрес выхода и страна: (ip, country); ip '' — не узнали.
+
+    Свой публичный адрес изнутри не узнать — его видит только сервер снаружи,
+    поэтому curl на trace Cloudflare: он отвечает строками ip=… и loc=…, без
+    лимита. Раньше здесь был ipinfo ради города, но без ключа он даёт около
+    тысячи запросов в сутки, а пробер ходит каждые 20 секунд: к середине дня
+    шёл 429, и строка «личный» стояла с прочерком.
+    """
+    trace = dict(l.split("=", 1) for l in
+                 sh(["curl", "-4", "-s", "--max-time", "8", TRACE_URL], 10).splitlines()
+                 if "=" in l)
+    ip = trace.get("ip", "")
+    if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+        return "", ""
+    return ip, trace.get("loc", "")
 
 
 def probe_personal():
-    # Личный туннель: куда мы выходим наружу. Последняя строка — %{time_connect}.
-    out = sh(["curl", "-4", "-s", "--max-time", "12", "-w", "\n%{time_connect}",
-              "https://ipinfo.io/json"], 15)
-    raw, _, tail = out.rpartition("\n")
-    set_st(exit_ms=connect_ms(tail))
+    # Личный туннель: задержка и куда выходим наружу.
+    keep_ms("exit_ms", ping_ms(PING_PERSONAL))
+    probe_exit()
+    # IPv6: любой ответ здесь означает, что трафик идёт мимо туннеля
+    v6 = sh(["curl", "-6", "-s", "--max-time", "6", "https://ifconfig.me"], 8)
+    set_st(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
+
+
+def probe_exit():
     peers = peer_addrs()
     try:
-        info = json.loads(raw)
-        ip = info.get("ip", "")
+        ip, country = exit_info()
         if not ip:
             raise ValueError("пустой ответ")
         # Сервер обычно одноногий, поэтому выходной адрес совпадает с адресом
@@ -201,24 +242,19 @@ def probe_personal():
             state = "tunnel"              # адрес другой — значит не наш провайдер
         else:
             state = "unknown"             # реальный адрес не знаем, сравнивать не с чем
-        set_st(exit_ip=ip, exit_country=info.get("country", ""),
-               exit_city=info.get("city", ""), exit_org=info.get("org", "")[:26],
+        set_st(exit_ip=ip, exit_country=country,
                exit_real=real, exit_state=state,
                exit_is_peer=(state == "tunnel"))
     except Exception:
-        # Один неответ ipinfo — не повод забывать, что было. Раньше каждый
+        # Один неответ — не повод забывать, что было. Раньше каждый
         # сбой стирал адрес, и строка «личный» раз в 20 секунд прыгала между
         # «188.… через туннель» и «— проверяю…». Сбрасываем только при
         # падении туннеля (см. prober) и пока ни одного ответа ещё не было.
         with LOCK:
             known = bool(ST.get("exit_ip"))
         if not known:
-            set_st(exit_ip="", exit_country="", exit_city="", exit_org="",
+            set_st(exit_ip="", exit_country="",
                    exit_is_peer=False, exit_state="unknown")
-
-    # IPv6: любой ответ здесь означает, что трафик идёт мимо туннеля
-    v6 = sh(["curl", "-6", "-s", "--max-time", "6", "https://ifconfig.me"], 8)
-    set_st(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
 
 
 def probe_corp():
@@ -247,17 +283,18 @@ def probe_corp():
     else:
         set_st(corp_dns="", corp_ip="")
 
-    out = sh(["curl", "-s", "--max-time", "12", "-o", "/dev/null",
-              "-w", "%{http_code} %{time_connect}", f"https://{CORP_PROBE}"], 15)
-    code, _, tail = out.partition(" ")
-    set_st(corp_http=code if code and code != "000" else "",
-           corp_ms=connect_ms(tail))
+    # Задержка — пингом до корп-DNS: он внутри рабочей сети, маршрут к нему
+    # идёт через рабочий туннель. Сам WireGuard-сервер корпа ICMP режет.
+    keep_ms("corp_ms", ping_ms(corp_dns))
+    code = sh(["curl", "-s", "--max-time", "12", "-o", "/dev/null",
+               "-w", "%{http_code}", f"https://{CORP_PROBE}"], 15)
+    set_st(corp_http=code if code and code != "000" else "")
 
 
 def probe_slow():
     """Личный и корп меряются одновременно.
 
-    По очереди корп ждал, пока ipinfo и IPv6 отработают свои таймауты, и в
+    По очереди корп ждал, пока адрес выхода и IPv6 отработают свои таймауты, и в
     худшем случае цикл шёл около 34 секунд. Ключи ST у проб разные,
     так что друг другу они не мешают.
     """
@@ -276,23 +313,36 @@ def _probe_locked():
     try:
         probe_slow()
     finally:
-        set_st(probing=False)
-        PROBE.release()
+        # Сброс и отпускание — под одним LOCK: иначе нажатие между ними
+        # поставило бы probing_manual уже закончившейся проверке, и кнопка
+        # крутилась бы до следующей плановой.
+        with LOCK:
+            ST.update(probing=False, probing_manual=False)
+            PROBE.release()
 
 
-def probe_now():
+def probe_now(manual=False):
     """Запускает сетевую проверку в фоне, если она ещё не идёт.
 
     Её зовут и пробер по расписанию, и кнопка «Проверить» в окне. Без замка
     второй запуск поверх первого мерил бы то же самое дважды, а ответы
     перемешивались бы в ST. При опущенном туннеле не меряем: получили бы свой
     реальный адрес и показали его как утечку. Возвращает True, если запустил.
+
+    probing_manual — признак для окна: крутиться должна только проверка,
+    которую человек попросил сам. По флагу probing кнопка крутилась и от
+    плановой, раз в полминуты, без всякого нажатия. Нажали, пока идёт
+    плановая, — её результат и есть ответ, новую не начинаем.
     """
     with LOCK:
         up = bool(ST.get("tun")) and bool(ST.get("r_low"))
-    if not up or not PROBE.acquire(blocking=False):
-        return False
-    set_st(probing=True)
+        if not up:
+            return False
+        if not PROBE.acquire(blocking=False):
+            if manual:
+                ST["probing_manual"] = True
+            return False
+        ST.update(probing=True, probing_manual=manual)
     threading.Thread(target=_probe_locked, daemon=True).start()
     return True
 
@@ -345,10 +395,10 @@ def prober():
         elif not up:
             # exit_state тоже: иначе после следующего подъёма, до первого
             # замера, строка показывала «— через туннель» от прошлого сеанса.
-            set_st(exit_ip="", exit_country="", exit_city="", corp_ip="",
+            set_st(exit_ip="", exit_country="", corp_ip="",
                    corp_http="", v6_leak="", exit_is_peer=False,
                    exit_state="unknown", corp_misses=0,
-                   exit_ms=None, corp_ms=None)
+                   exit_ms=None, corp_ms=None, exit_ms_misses=0, corp_ms_misses=0)
         write_status()
         STOP.wait(FAST_EVERY)
 
@@ -517,10 +567,8 @@ def draw_status(win, started):
     put(win, R_PERSONAL, 1, "личный", curses.A_BOLD)
     if ip:
         mark = "✓" if s.get("exit_is_peer") else "!"
-        put(win, R_PERSONAL, 10, f"{mark} {country} {s.get('exit_city','')}  {ip}",
+        put(win, R_PERSONAL, 10, f"{mark} {country}  {ip}",
             curses.color_pair(OK if s.get("exit_is_peer") else BAD))
-        if c2:
-            put(win, R_PERSONAL, c2, s.get("exit_org", ""), curses.color_pair(DIM))
     else:
         put(win, R_PERSONAL, 10, "выход наружу не проверен", curses.color_pair(DIM))
     hs = s.get("hs_personal")
