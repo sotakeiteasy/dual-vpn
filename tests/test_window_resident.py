@@ -3,6 +3,9 @@
 аргументов CLI.
 """
 
+import sys
+import types
+
 from dualvpn import cli, ipc, window
 
 
@@ -94,6 +97,45 @@ def test_спрятанное_окно_по_сигналу_обновляетс�
 
     window._show(_Window(shown), api)
     assert "render" in shown and "check" in [op for op, _ in calls]
+
+
+class _Form:
+    Location = (52, 52)
+
+    def Invoke(self, action):
+        action()
+
+
+def _parked(monkeypatch, shown):
+    # Заглушка .NET: в CI тесты идут на Linux, где pythonnet нет.
+    monkeypatch.setitem(sys.modules, "System",
+                        types.SimpleNamespace(Action=lambda f: f))
+    win = _Window(shown)
+    win.native = _Form()
+    return win
+
+
+def test_холодное_окно_встаёт_на_место_до_показа(monkeypatch):
+    api, _, shown = _api(monkeypatch)
+    win = _parked(monkeypatch, shown)
+    api.holder["window"] = win
+    api.cold, api.home = True, (440, 180)
+    win.show = lambda: shown.append(("show", win.native.Location))
+
+    api.reveal()
+    assert shown == [("show", (440, 180))]
+
+
+def test_место_возвращается_только_при_первом_показе(monkeypatch):
+    api, _, shown = _api(monkeypatch)
+    win = _parked(monkeypatch, shown)
+    api.home = (440, 180)
+
+    window._show(win, api)
+    win.native.Location = (900, 300)          # пользователь передвинул окно
+    api.hidden = True                         # и закрыл крестиком
+    window._show(win, api)
+    assert win.native.Location == (900, 300)
 
 
 def test_включение_сразу_перерисовывает_статус(monkeypatch):

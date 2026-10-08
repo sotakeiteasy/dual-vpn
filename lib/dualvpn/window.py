@@ -111,6 +111,8 @@ class Api:
         # Холодное окно: создано спрятанным и покажется на ready, уже
         # отрисованным, — без него виден весь старт WebView2 с рывками.
         self.cold = False
+        # Где окну встать при первом показе; до него оно за краем экрана.
+        self.home = None
 
     # ------------------------------------------------------- приём из JS
 
@@ -215,6 +217,7 @@ class Api:
         self.cold = False
         w = self.holder.get("window")
         if w is not None:
+            _unpark(w, self)
             w.show()
 
     @staticmethod
@@ -489,18 +492,6 @@ def _format_env(values):
 
 # ---------------------------------------------------------------- запуск
 
-def _dwm_on(window, attr):
-    """Включает булев атрибут DWM у формы окна; без формы — ничего."""
-    try:
-        import ctypes
-        hwnd = window.native.Handle.ToInt32()
-        on = ctypes.c_int(1)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, attr, ctypes.byref(on), ctypes.sizeof(on))
-    except Exception:
-        pass
-
-
 def _dark_title(window):
     """Тёмный заголовок окна независимо от темы Windows.
 
@@ -509,19 +500,50 @@ def _dark_title(window):
     DWMWA_USE_IMMERSIVE_DARK_MODE = 20, с Windows 10 20H1. При смене темы
     Windows pywebview вернёт светлый — до следующего открытия окна.
     """
-    _dwm_on(window, 20)
+    try:
+        import ctypes
+        hwnd = window.native.Handle.ToInt32()
+        on = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 20, ctypes.byref(on), ctypes.sizeof(on))
+    except Exception:
+        pass
 
 
-def _no_transitions(window):
-    """Без анимаций открытия и закрытия окна.
+def _park(window, api):
+    """Форма — за край экрана до первого настоящего показа.
 
-    Спрятанное окно pywebview создаёт так: Opacity=0, Show, Hide. Прозрачность
-    не спасает: Windows всё равно проигрывает затухание с масштабом по ещё
-    не отрисованной, белой форме — после UAC в углу мелькал белый
-    прямоугольник. DWMWA_TRANSITIONS_FORCEDISABLED = 3. Зовётся в before_show:
-    оно идёт в потоке окна до этого Show.
+    Спрятанное окно pywebview создаёт так: Opacity=0, Show, Hide. Невидимым
+    оно не выходит: после UAC сначала мелькало белое пред-окно, потом само
+    окно. За краем экрана этот показ никто не видит. Зовётся в before_show:
+    оно идёт в потоке окна до этого Show. Место в центре рабочего стола
+    запоминаем — его вернёт _unpark.
     """
-    _dwm_on(window, 3)
+    try:
+        from System.Drawing import Point
+        from System.Windows.Forms import FormStartPosition, Screen
+        form = window.native
+        area = Screen.PrimaryScreen.WorkingArea
+        api.home = Point(area.X + max(0, area.Width - form.Width) // 2,
+                         area.Y + max(0, area.Height - form.Height) // 2)
+        form.StartPosition = FormStartPosition.Manual
+        form.Location = Point(-32000, -32000)
+    except Exception:
+        api.home = None
+
+
+def _unpark(window, api):
+    """Перед первым показом — на место из _park. Дальше окно стоит там,
+    куда его передвинули."""
+    home, api.home = api.home, None
+    if home is None:
+        return
+    try:
+        from System import Action
+        form = window.native
+        form.Invoke(Action(lambda: setattr(form, "Location", home)))
+    except Exception:
+        pass
 
 
 def _source_icon():
@@ -602,6 +624,7 @@ def _show(window, api):
     on_screen = not api.hidden and not api.cold
     api.hidden = False
     api.cold = False
+    _unpark(window, api)
     window.show()
     _restore(window)
     # Страница ещё грузится — всё это сделает её ready.
@@ -636,7 +659,7 @@ def open_window(resident=False, hidden=False):
         # белое и мигает на открытии.
         background_color="#101012")
     holder["window"].events.shown += lambda: _dark_title(holder.get("window"))
-    holder["window"].events.before_show += lambda window: _no_transitions(window)
+    holder["window"].events.before_show += lambda window: _park(window, api)
     if resident:
         holder["window"].events.before_show += lambda window: _hide_on_close(window, api)
         # Слушаем до webview.start: сигнал, пришедший, пока WebView2 ещё
