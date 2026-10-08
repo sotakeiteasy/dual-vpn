@@ -203,8 +203,12 @@ else
   esac
   # Данные должны совпасть с тем, что прибито в службе: пока окно решало это
   # само, оно показывало пустой лог и «рабочий молчит» при живом туннеле.
-  WANT=$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:DUALVPN_DATA" \
-    /Library/LaunchDaemons/local.singbox-lx.plist 2>/dev/null || true)
+  # Без службы (чистая машина, CI) PlistBuddy пишет «File Doesn't Exist» в
+  # stdout и выходит нулём — это сошло бы за путь. Поэтому сперва проверка файла.
+  WANT=""
+  DAEMON_PLIST=/Library/LaunchDaemons/local.singbox-lx.plist
+  [ -f "$DAEMON_PLIST" ] && WANT=$(/usr/libexec/PlistBuddy \
+    -c "Print :EnvironmentVariables:DUALVPN_DATA" "$DAEMON_PLIST" 2>/dev/null || true)
   case "$DATA" in
     "") bad "путь к данным не определился" ;;
     *"/DualVPN.app/Contents/"*) bad "данные внутри программы: обновление их сотрёт" ;;
