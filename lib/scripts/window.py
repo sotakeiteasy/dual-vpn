@@ -18,6 +18,7 @@ import subprocess
 import time
 
 import control
+import tui
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSMakePoint,
@@ -364,6 +365,10 @@ class Window:
             self.ctrl.stop()
         elif name == "restart":
             self.ctrl.restart()
+        elif name == "check":
+            # Пробер живёт в этом же процессе (menubar.py), так что зовём его
+            # напрямую. Идущую проверку он не дублирует.
+            tui.probe_now()
         elif name == "dismiss_error":
             self.ctrl.dismiss()
         elif name == "logs":

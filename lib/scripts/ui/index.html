@@ -58,17 +58,29 @@ body {
 #state-title { font-size: 15px; font-weight: 600; letter-spacing: -0.1px; }
 #state-sub   { color: var(--dim); margin-top: 2px; }
 
-/* Туннели: две строки, каждая со своим состоянием — корп отдельно от личного. */
-.tun { display: flex; align-items: baseline; gap: 8px; padding: 9px 14px; }
+/* Туннели: «имя ● адрес … задержка». Слово состояния — в подсказке точки:
+   плашка со словом занимала полстроки и выталкивала адрес. */
+.tun { display: flex; align-items: center; gap: 8px; padding: 9px 14px; }
 .tun + .tun { border-top: 1px solid var(--line); }
-.tun-name { width: 58px; color: var(--dim); flex: none; }
-.tun-val  { font-variant-numeric: tabular-nums; }
-.chip { font-size: 11px; padding: 1px 7px; border-radius: 20px; margin-left: auto; flex: none; }
-.chip.ok  { color: var(--ok);   background: #1a9c4b1f; }
-.chip.bad { color: var(--bad);  background: #d13b301f; }
-.chip.off { color: var(--off);  background: #8e8e9320; }
+.tun-name { width: 50px; color: var(--dim); flex: none; }
+.tdot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--off); }
+.tdot.ok  { background: var(--ok); }
+.tdot.bad { background: var(--bad); }
+.tun-val  { font-variant-numeric: tabular-nums; min-width: 0;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tun-ms   { margin-left: auto; flex: none; color: var(--dim); font-size: 12px;
+            font-variant-numeric: tabular-nums; }
 
 #actions { display: flex; gap: 7px; }
+/* Иконки без подписи: смысл — в title и aria-label. Высота тянется по
+   соседней кнопке, чтобы ряд был ровным. */
+button.icon { flex: none; width: 34px; padding: 0;
+              display: inline-flex; align-items: center; justify-content: center; }
+button.icon.probing { opacity: 1; }
+button.icon.probing svg { display: none; }
+button.icon.probing::after { content: ''; width: 13px; height: 13px; border-radius: 50%;
+                             border: 2px solid #80808040; border-top-color: currentColor;
+                             animation: spin 0.8s linear infinite; }
 /* flex:1 у button задумано для строк кнопок; прямой потомок колонки от него
    растягивался на всю свободную высоту. Отрицательный отступ подтягивает
    кнопку к своему списку: общий gap колонки в 12px здесь слишком велик и
@@ -282,7 +294,16 @@ h2 { font-size: 11px; font-weight: 600; text-transform: uppercase;
 
   <div id="actions">
     <button id="btn-toggle" class="primary">Включить</button>
-    <button id="btn-restart">Перезапустить</button>
+    <button id="btn-restart" class="icon" title="Перезапустить" aria-label="Перезапустить">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.2v3.2h-3.2"/></svg>
+    </button>
+    <button id="btn-check" class="icon" title="Проверить связь" aria-label="Проверить связь">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1.5 8.5h3l1.8-4.5 3.2 8 1.8-3.5h3.2"/></svg>
+    </button>
   </div>
 
   <div id="lockhint" hidden>выключи VPN, чтобы менять конфиги</div>
@@ -359,6 +380,8 @@ const esc = t => String(t).replace(/[&<>"']/g, c =>
 
 let LAST = {};
 let LOGLINES = [];     // последние строки лога — для окна ожидания
+let CHECK_SENT = 0;    // когда нажали «Проверить»
+const CHECK_GRACE = 4500;   // за это время probing из status.json точно дойдёт
 
 // Каждая ветка отрисовки отчитывается один раз: если в ней исключение,
 // сообщение не придёт, и selftest это увидит. Иначе «страница загрузилась»
@@ -382,8 +405,9 @@ function render(s) {
 
   const tunnels = v.rows.map(r =>
     `<div class="tun"><span class="tun-name">${esc(r.name)}</span>
-       <span class="tun-val">${esc(r.value)}</span>
-       ${r.label ? `<span class="chip ${r.chip}">${esc(r.label)}</span>` : ''}</div>`).join('');
+       <span class="tdot ${r.dot}" title="${esc(r.label)}" aria-label="${esc(r.label)}"></span>
+       <span class="tun-val" title="${esc(r.value)}">${esc(r.value)}</span>
+       ${r.ms ? `<span class="tun-ms">${esc(r.ms)}</span>` : ''}</div>`).join('');
   if (tunnels !== prev.tunnels) { prev.tunnels = tunnels; $('tunnels').innerHTML = tunnels; }
   $('tunnels').hidden = !v.rows.length;
 
@@ -395,6 +419,12 @@ function render(s) {
   t.classList.toggle('primary', v.toggle.primary);
   t.disabled = v.toggle.disabled;
   r.disabled = v.restart.disabled;
+  // Статус доходит до окна через пару секунд (файл + опрос), поэтому сразу
+  // после нажатия крутимся сами — иначе кажется, что кнопка не сработала.
+  const c = $('btn-check');
+  const justSent = Date.now() - CHECK_SENT < CHECK_GRACE;
+  c.classList.toggle('probing', v.check.probing || (justSent && !v.check.disabled));
+  c.disabled = v.check.disabled || justSent;
 
   $('btn-install').hidden = !v.install;
   $('actions').hidden = v.install;
@@ -727,6 +757,12 @@ document.getElementById('sheet-save').onclick = () => {
   send('save_site', v);
 };
 document.getElementById('btn-restart').onclick = () => send('restart');
+document.getElementById('btn-check').onclick = () => {
+  CHECK_SENT = Date.now();
+  send('check');
+  render(LAST);
+  setTimeout(() => render(LAST), CHECK_GRACE);
+};
 document.getElementById('err-dismiss').onclick = () => send('dismiss_error');
 document.getElementById('err-open-log').onclick = () => {
   showTab('log');

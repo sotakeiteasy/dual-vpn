@@ -35,8 +35,40 @@ test('включено: «Выключить», перезапуск досту�
   assert.equal(v.toggle.primary, false);
   assert.equal(v.restart.disabled, false);
   assert.equal(v.locked, true);
-  assert.deepEqual(v.rows.map(r => r.name), ['личный', 'корп', 'выход']);
+  assert.deepEqual(v.rows.map(r => r.name), ['личный', 'корп']);
   assert.equal(v.rows[0].label, 'через туннель');
+  assert.deepEqual(v.rows.map(r => r.dot), ['ok', 'ok']);
+  assert.equal(v.check.disabled, false);
+});
+
+test('место выхода — в строке личного, после адреса', () => {
+  assert.equal(viewModel(UP).rows[0].value, '188.241.219.116 · DE Frankfurt am Main');
+  const bare = viewModel({...UP, exit_country: '', exit_city: ''});
+  assert.equal(bare.rows[0].value, '188.241.219.116');
+  assert.equal(viewModel({...UP, exit_ip: '', exit_state: 'unknown'}).rows[0].value, '—');
+});
+
+test('точка: проверяю — серая, мимо туннеля и молчит — красная', () => {
+  assert.equal(viewModel({...UP, exit_ip: '', exit_state: 'unknown'}).rows[0].dot, 'off');
+  assert.equal(viewModel({...UP, exit_state: 'leak'}).rows[0].dot, 'bad');
+  assert.equal(viewModel({...UP, corp_ip: ''}).rows[1].dot, 'bad');
+});
+
+test('задержка — только после замера', () => {
+  const v = viewModel({...UP, exit_ms: 42, corp_ms: 18});
+  assert.deepEqual(v.rows.map(r => r.ms), ['42 мс', '18 мс']);
+  assert.deepEqual(viewModel(UP).rows.map(r => r.ms), ['', '']);
+  assert.deepEqual(viewModel({...UP, exit_ms: null, corp_ms: null}).rows.map(r => r.ms), ['', '']);
+  // Корп молчит — старая цифра соврала бы, что он отвечает.
+  assert.equal(viewModel({...UP, corp_ip: '', corp_ms: 18}).rows[1].ms, '');
+});
+
+test('«Проверить» выключена без туннеля и пока идёт проверка', () => {
+  assert.equal(viewModel(OFF).check.disabled, true);
+  const p = viewModel({...UP, probing: true});
+  assert.equal(p.check.disabled, true);
+  assert.equal(p.check.probing, true);
+  assert.equal(viewModel({...UP, op: {phase: 'restarting', busy: true, step: ''}}).check.disabled, true);
 });
 
 test('операция идёт: окно ожидания, все кнопки заблокированы', () => {
@@ -106,8 +138,9 @@ test('пустое состояние не роняет отрисовку', () 
   assert.equal(viewModel({}).busy, null);
 });
 
-test('строка «выход» без ошибок — без пустой плашки', () => {
-  const v = viewModel({...UP, err_count: 0});
-  assert.equal(v.rows[2].label, '');
-  assert.equal(viewModel({...UP, err_count: 3}).rows[2].label, '3 ошибок в логе');
+test('ошибки лога — в подзаголовке, только когда всё зелёное', () => {
+  assert.equal(viewModel({...UP, err_count: 0}).sub, 'оба туннеля подняты');
+  assert.equal(viewModel({...UP, err_count: 3}).sub, 'оба туннеля подняты · ошибок в логе: 3');
+  assert.equal(viewModel({...UP, corp_ip: '', err_count: 3}).sub,
+               'личный туннель работает, интернет есть');
 });
