@@ -489,6 +489,18 @@ def _format_env(values):
 
 # ---------------------------------------------------------------- запуск
 
+def _dwm_on(window, attr):
+    """Включает булев атрибут DWM у формы окна; без формы — ничего."""
+    try:
+        import ctypes
+        hwnd = window.native.Handle.ToInt32()
+        on = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, attr, ctypes.byref(on), ctypes.sizeof(on))
+    except Exception:
+        pass
+
+
 def _dark_title(window):
     """Тёмный заголовок окна независимо от темы Windows.
 
@@ -497,14 +509,19 @@ def _dark_title(window):
     DWMWA_USE_IMMERSIVE_DARK_MODE = 20, с Windows 10 20H1. При смене темы
     Windows pywebview вернёт светлый — до следующего открытия окна.
     """
-    try:
-        import ctypes
-        hwnd = window.native.Handle.ToInt32()
-        on = ctypes.c_int(1)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, 20, ctypes.byref(on), ctypes.sizeof(on))
-    except Exception:
-        pass
+    _dwm_on(window, 20)
+
+
+def _no_transitions(window):
+    """Без анимаций открытия и закрытия окна.
+
+    Спрятанное окно pywebview создаёт так: Opacity=0, Show, Hide. Прозрачность
+    не спасает: Windows всё равно проигрывает затухание с масштабом по ещё
+    не отрисованной, белой форме — после UAC в углу мелькал белый
+    прямоугольник. DWMWA_TRANSITIONS_FORCEDISABLED = 3. Зовётся в before_show:
+    оно идёт в потоке окна до этого Show.
+    """
+    _dwm_on(window, 3)
 
 
 def _source_icon():
@@ -619,6 +636,7 @@ def open_window(resident=False, hidden=False):
         # белое и мигает на открытии.
         background_color="#101012")
     holder["window"].events.shown += lambda: _dark_title(holder.get("window"))
+    holder["window"].events.before_show += lambda window: _no_transitions(window)
     if resident:
         holder["window"].events.before_show += lambda window: _hide_on_close(window, api)
         # Слушаем до webview.start: сигнал, пришедший, пока WebView2 ещё

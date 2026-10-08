@@ -1,4 +1,4 @@
-"""Окно: заголовок тёмный независимо от темы Windows.
+"""Окно: заголовок тёмный независимо от темы Windows, анимаций DWM нет.
 
 dwmapi здесь не настоящий: ctypes.windll подменяем, чтобы тест шёл и на
 Linux в CI, где windll нет вовсе.
@@ -34,6 +34,15 @@ def test_включает_тёмный_заголовок_у_окна(monkeypatc
     window._dark_title(_form(0x1234))
 
     assert calls == [(0x1234, 20, 1, ctypes.sizeof(ctypes.c_int))]
+
+
+def test_выключает_анимации_окна(monkeypatch):
+    """Иначе спрятанное окно мелькает белым при создании (Opacity=0, Show, Hide)."""
+    calls = _fake_dwm(monkeypatch)
+
+    window._no_transitions(_form(0x1234))
+
+    assert calls == [(0x1234, 3, 1, ctypes.sizeof(ctypes.c_int))]
 
 
 def test_окно_без_формы_не_роняет_вызов(monkeypatch):
