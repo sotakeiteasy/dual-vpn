@@ -152,9 +152,26 @@ def peer_addrs():
     return out
 
 
-def probe_slow():
-    # Личный туннель: куда мы выходим наружу
-    raw = sh(["curl", "-4", "-s", "--max-time", "12", "https://ipinfo.io/json"], 15)
+def connect_ms(val):
+    """%{time_connect} из curl в целые миллисекунды; None — соединения не было.
+
+    TCP-рукопожатие через туннель — это один круг до сервера и обратно, то есть
+    та же задержка, что показал бы пинг. Отдельный ICMP не нужен: через туннель
+    его часто режут, а curl и так уже ходит.
+    """
+    try:
+        sec = float(val)
+    except (TypeError, ValueError):
+        return None
+    return round(sec * 1000) if sec > 0 else None
+
+
+def probe_personal():
+    # Личный туннель: куда мы выходим наружу. Последняя строка — %{time_connect}.
+    out = sh(["curl", "-4", "-s", "--max-time", "12", "-w", "\n%{time_connect}",
+              "https://ipinfo.io/json"], 15)
+    raw, _, tail = out.rpartition("\n")
+    set_st(exit_ms=connect_ms(tail))
     peers = peer_addrs()
     try:
         info = json.loads(raw)
@@ -203,6 +220,8 @@ def probe_slow():
     v6 = sh(["curl", "-6", "-s", "--max-time", "6", "https://ifconfig.me"], 8)
     set_st(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
 
+
+def probe_corp():
     # Корп-DNS берём из собранного конфига, а не хардкодим
     corp_dns = ""
     try:
@@ -228,9 +247,54 @@ def probe_slow():
     else:
         set_st(corp_dns="", corp_ip="")
 
-    code = sh(["curl", "-s", "--max-time", "12", "-o", "/dev/null",
-               "-w", "%{http_code}", f"https://{CORP_PROBE}"], 15)
-    set_st(corp_http=code if code and code != "000" else "")
+    out = sh(["curl", "-s", "--max-time", "12", "-o", "/dev/null",
+              "-w", "%{http_code} %{time_connect}", f"https://{CORP_PROBE}"], 15)
+    code, _, tail = out.partition(" ")
+    set_st(corp_http=code if code and code != "000" else "",
+           corp_ms=connect_ms(tail))
+
+
+def probe_slow():
+    """Личный и корп меряются одновременно.
+
+    По очереди корп ждал, пока ipinfo и IPv6 отработают свои таймауты, и в
+    худшем случае цикл шёл около 34 секунд. Ключи ST у проб разные,
+    так что друг другу они не мешают.
+    """
+    threads = [threading.Thread(target=f, daemon=True)
+               for f in (probe_personal, probe_corp)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+PROBE = threading.Lock()    # держится, пока идёт probe_slow: плановая или ручная
+
+
+def _probe_locked():
+    try:
+        probe_slow()
+    finally:
+        set_st(probing=False)
+        PROBE.release()
+
+
+def probe_now():
+    """Запускает сетевую проверку в фоне, если она ещё не идёт.
+
+    Её зовут и пробер по расписанию, и кнопка «Проверить» в окне. Без замка
+    второй запуск поверх первого мерил бы то же самое дважды, а ответы
+    перемешивались бы в ST. При опущенном туннеле не меряем: получили бы свой
+    реальный адрес и показали его как утечку. Возвращает True, если запустил.
+    """
+    with LOCK:
+        up = bool(ST.get("tun")) and bool(ST.get("r_low"))
+    if not up or not PROBE.acquire(blocking=False):
+        return False
+    set_st(probing=True)
+    threading.Thread(target=_probe_locked, daemon=True).start()
+    return True
 
 
 def write_status():
@@ -275,14 +339,16 @@ def prober():
             # Отдельным потоком: probe_slow ходит в сеть с таймаутами до 12с,
             # и в цикле он останавливал обновление статуса на полминуты. Снаружи
             # это выглядело как «туннель отвалился и вернулся» — кнопка в окне
-            # прыгала между «Включить» и «Выключить».
-            threading.Thread(target=probe_slow, daemon=True).start()
+            # прыгала между «Включить» и «Выключить». Ручная проверка из окна
+            # ещё идёт — новую не начинаем, probe_now это сам и решит.
+            probe_now()
         elif not up:
             # exit_state тоже: иначе после следующего подъёма, до первого
             # замера, строка показывала «— через туннель» от прошлого сеанса.
             set_st(exit_ip="", exit_country="", exit_city="", corp_ip="",
                    corp_http="", v6_leak="", exit_is_peer=False,
-                   exit_state="unknown", corp_misses=0)
+                   exit_state="unknown", corp_misses=0,
+                   exit_ms=None, corp_ms=None)
         write_status()
         STOP.wait(FAST_EVERY)
 

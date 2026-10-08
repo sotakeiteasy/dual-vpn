@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -51,17 +53,42 @@ class ProbeSlowTests(unittest.TestCase):
         for p in self.patches:
             p.stop()
 
-    def probe(self, ipinfo, dig):
+    def probe(self, ipinfo, dig, https="200 0.018", delay=0.0):
+        # Как curl с -w: хвост "\n%{time_connect}" есть и при неудаче (0.000000).
         def sh(cmd, timeout=10):
             if "https://ipinfo.io/json" in cmd:
-                return ipinfo
+                time.sleep(delay)
+                return ipinfo + ("\n0.042" if ipinfo else "\n0.000000")
             if cmd[0] == "dig":
+                time.sleep(delay)
                 return dig
+            if "https://git.corp" in cmd:
+                return https
             return ""
         with mock.patch.object(tui, "sh", sh):
             tui.probe_slow()
         with tui.LOCK:
             return dict(tui.ST)
+
+    def test_corp_does_not_wait_for_personal(self):
+        good = json.dumps({"ip": "1.2.3.4"})
+        t0 = time.monotonic()
+        st = self.probe(good, "10.0.0.5", delay=0.5)
+        self.assertLess(time.monotonic() - t0, 0.9,
+                        "корп-проба ждала личную — пробы снова идут по очереди")
+        self.assertEqual((st["exit_ip"], st["corp_ip"]), ("1.2.3.4", "10.0.0.5"))
+
+    def test_latency_from_time_connect(self):
+        st = self.probe(json.dumps({"ip": "1.2.3.4"}), "10.0.0.5")
+        self.assertEqual((st["exit_ms"], st["corp_ms"]), (42, 18))
+        st = self.probe("", "", https="000 0.000000")
+        self.assertEqual((st["exit_ms"], st["corp_ms"]), (None, None))
+        self.assertEqual(st["corp_http"], "")
+
+    def test_connect_ms(self):
+        self.assertEqual(tui.connect_ms("0.0425"), 42)
+        for bad in ("0.000000", "", None, "{}"):
+            self.assertIsNone(tui.connect_ms(bad), bad)
 
     def test_exit_ip_survives_one_failed_probe(self):
         good = json.dumps({"ip": "1.2.3.4", "country": "DE", "city": "Frankfurt"})
@@ -83,6 +110,45 @@ class ProbeSlowTests(unittest.TestCase):
                          "один потерянный ответ DNS — уже «корп не отвечает»")
         self.assertEqual(self.probe(good, "")["corp_ip"], "")
         self.assertEqual(self.probe(good, "10.0.0.6")["corp_ip"], "10.0.0.6")
+
+
+class ProbeNowTests(unittest.TestCase):
+    def setUp(self):
+        with tui.LOCK:
+            tui.ST.clear()
+            tui.ST.update(tun="utun7", r_low=True)
+        self.release = threading.Event()
+        self.runs = 0
+
+        def slow():
+            self.runs += 1
+            self.release.wait(5)
+        p = mock.patch.object(tui, "probe_slow", slow)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.wait_idle)     # cleanup идут с конца: сперва set
+        self.addCleanup(self.release.set)
+
+    def wait_idle(self):
+        # Замок отпускается в потоке проверки — ждём его, а не спим наугад.
+        self.assertTrue(tui.PROBE.acquire(timeout=5))
+        tui.PROBE.release()
+
+    def test_second_check_waits_for_first(self):
+        self.assertTrue(tui.probe_now())
+        self.assertTrue(tui.ST["probing"])
+        self.assertFalse(tui.probe_now(), "вторая проверка пошла поверх первой")
+        self.release.set()
+        self.wait_idle()
+        self.assertFalse(tui.ST["probing"])
+        self.assertEqual(self.runs, 1)
+        self.assertTrue(tui.probe_now())
+
+    def test_no_check_while_tunnel_down(self):
+        with tui.LOCK:
+            tui.ST["r_low"] = False
+        self.assertFalse(tui.probe_now())
+        self.assertEqual(self.runs, 0)
 
 
 if __name__ == "__main__":
