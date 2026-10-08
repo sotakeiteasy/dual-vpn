@@ -32,7 +32,8 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSMakePoint,
                     NSResizableWindowMask, NSMiniaturizableWindowMask, NSWindow)
 from Foundation import NSObject, NSURL, NSTimer
 from PyObjCTools import AppHelper
-from WebKit import WKUserContentController, WKWebView, WKWebViewConfiguration
+from WebKit import (WKUserContentController, WKUserScript, WKWebView,
+                    WKWebViewConfiguration)
 
 LABEL = "local.singbox-lx"
 PLIST = f"/Library/LaunchDaemons/{LABEL}.plist"
@@ -42,6 +43,8 @@ UPDATE_EVERY = 6 * 3600     # как часто спрашивать GitHub о �
 UPDATE_ON_SHOW = 600        # при открытии окна — если с прошлой проверки прошло столько
 INSTALLED_APP = "/Applications/DualVPN.app"
 NO_UPDATE = {"state": "", "version": "", "step": "", "error": ""}
+THEMES = ("system", "light", "dark")    # те же, что THEMES в ui/view.js
+AT_DOCUMENT_START = 0                   # WKUserScriptInjectionTimeAtDocumentStart
 
 
 def _list(v):
@@ -148,6 +151,12 @@ class Window:
         ucc = WKUserContentController.alloc().init()
         self.bridge = Bridge.alloc().initWithOwner_(self)
         ucc.addScriptMessageHandler_name_(self.bridge, "py")
+        # Тема — до разбора страницы: выставленная из её скрипта, она
+        # успевала бы показать первый кадр в системных цветах.
+        ucc.addUserScript_(WKUserScript.alloc()
+                           .initWithSource_injectionTime_forMainFrameOnly_(
+                               f"document.documentElement.dataset.theme = {_js(self.theme())};",
+                               AT_DOCUMENT_START, True))
         cfg.setUserContentController_(ucc)
 
         rect = NSMakeRect(0, 0, 940, 560)
@@ -404,6 +413,26 @@ class Window:
     def tail(self):
         return control.read_tail(os.path.join(self.state, "ui.log"), TAIL)
 
+    # Выбор темы — файлом, как профиль: localStorage у страницы из file://
+    # WebKit хранить не обязан.
+    def theme(self):
+        try:
+            with open(os.path.join(self.state, "theme"), encoding="utf-8") as fh:
+                t = fh.read().strip()
+        except OSError:
+            return "system"
+        return t if t in THEMES else "system"
+
+    def set_theme(self, t):
+        if t not in THEMES:
+            self.log(f"окно: неизвестная тема {t!r}")
+            return
+        try:
+            with open(os.path.join(self.state, "theme"), "w", encoding="utf-8") as fh:
+                fh.write(t)
+        except OSError as e:
+            self.log(f"не смог сохранить тему: {e}")
+
     # -------------------------------------------------------------- приём
 
     def handle(self, name, arg):
@@ -455,6 +484,8 @@ class Window:
             self.edit_config(arg)
         elif name == "del_config":
             self.del_config(arg)
+        elif name == "theme":
+            self.set_theme(arg)
         else:
             self.log(f"неизвестное сообщение из окна: {name}")
 

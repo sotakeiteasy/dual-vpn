@@ -178,5 +178,28 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(self.w.updatable())
 
 
+@unittest.skipIf(window is None, "нет AppKit")
+class ThemeTests(unittest.TestCase):
+    def setUp(self):
+        self.w = window.Window.__new__(window.Window)
+        self.w.state = tempfile.mkdtemp()
+        self.w.log = lambda *a: None
+
+    def test_system_until_chosen(self):
+        self.assertEqual(self.w.theme(), "system")
+
+    def test_choice_is_kept(self):
+        self.w.handle("theme", "dark")
+        self.assertEqual(self.w.theme(), "dark")
+
+    def test_unknown_is_refused(self):
+        self.w.set_theme("light")
+        self.w.set_theme("sepia")
+        self.assertEqual(self.w.theme(), "light")
+        with open(os.path.join(self.w.state, "theme"), "w") as fh:
+            fh.write("sepia")
+        self.assertEqual(self.w.theme(), "system")
+
+
 if __name__ == "__main__":
     unittest.main()

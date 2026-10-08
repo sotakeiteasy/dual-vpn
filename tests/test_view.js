@@ -7,7 +7,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const {viewModel, versionModel} = require(path.join(__dirname, '..', 'lib', 'scripts', 'ui', 'view.js'));
+const {viewModel, versionModel, THEMES, nextTheme} = require(path.join(__dirname, '..', 'lib', 'scripts', 'ui', 'view.js'));
 
 const IDLE = {phase: 'idle', step: '', busy: false};
 const UP = {up: true, daemon: true, op: IDLE, exit_ip: '188.241.219.116',
@@ -203,4 +203,13 @@ test('подвал: не встала — первая строка ошибки
   assert.equal(u.text, '0.1.6 не встала: сумма не совпала');
   assert.equal(u.action, 'Повторить');
   assert.equal(u.bad, true);
+});
+
+test('тема: по кругу системная → светлая → тёмная → системная', () => {
+  assert.deepEqual(THEMES.map(nextTheme), ['light', 'dark', 'system']);
+});
+
+test('тема: незнакомое значение считается системной', () => {
+  assert.equal(nextTheme('sepia'), 'light');
+  assert.equal(nextTheme(undefined), 'light');
 });

@@ -16,13 +16,26 @@
   --accent:    #0a6cff;
   --logbg:     #ffffff;
 }
+/* Тема: data-theme на <html> — выбор из кнопки в строке вкладок (system |
+   light | dark). Тёмные цвета дважды: при тёмной системе, если не выбрана
+   светлая, и при явно выбранной тёмной — media-запрос в список селекторов
+   не сложить. color-scheme меняется вместе: от него зависят полосы
+   прокрутки и галочки. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"]  { color-scheme: dark; }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg:    #1c1c1e;  --panel: #252527;  --line: #ffffff1a;
     --text:  #f2f2f7;  --dim:   #98989f;  --logbg: #1a1a1c;
     --ok: #32d367; --warn: #ffb03a; --bad: #ff5f52; --off: #7c7c82;
     --accent: #4c9bff;
   }
+}
+:root[data-theme="dark"] {
+  --bg:    #1c1c1e;  --panel: #252527;  --line: #ffffff1a;
+  --text:  #f2f2f7;  --dim:   #98989f;  --logbg: #1a1a1c;
+  --ok: #32d367; --warn: #ffb03a; --bad: #ff5f52; --off: #7c7c82;
+  --accent: #4c9bff;
 }
 * { box-sizing: border-box; }
 /* Без !important атрибут hidden проигрывает display:flex у самого элемента —
@@ -198,6 +211,16 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
        border: none; background: none; color: var(--dim); border-radius: 6px; }
 .tab:hover { background: #8080801a; color: var(--text); }
 .tab.on { background: #80808026; color: var(--text); }
+/* Тема — значком в углу строки вкладок: показан текущий режим, нажатие
+   переключает на следующий. */
+#btn-theme { flex: none; margin-left: auto; width: 26px; height: 24px; padding: 0;
+             border: none; background: none; color: var(--dim); border-radius: 6px;
+             display: inline-flex; align-items: center; justify-content: center; }
+#btn-theme:hover { background: #8080801a; color: var(--text); }
+#btn-theme svg { display: none; }
+:root[data-theme="system"] #btn-theme .t-system,
+:root[data-theme="light"]  #btn-theme .t-light,
+:root[data-theme="dark"]   #btn-theme .t-dark { display: block; }
 
 /* Раздел «как это работает»: читаемая колонка, не растягивается на всё окно. */
 #how { flex: 1; overflow-y: auto; padding: 4px 22px 28px; line-height: 1.6; }
@@ -375,6 +398,17 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
   <div id="tabs">
     <button class="tab on" data-tab="log">Логи</button>
     <button class="tab" data-tab="how">Как это работает</button>
+    <button id="btn-theme">
+      <svg class="t-system" width="15" height="15" viewBox="0 0 16 16" fill="none"
+           stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.25"/>
+        <path d="M8 1.75a6.25 6.25 0 0 0 0 12.5z" fill="currentColor" stroke="none"/></svg>
+      <svg class="t-light" width="15" height="15" viewBox="0 0 16 16" fill="none"
+           stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="2.9"/>
+        <path d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3.05 3.05l1.13 1.13M11.82 11.82l1.13 1.13M3.05 12.95l1.13-1.13M11.82 4.18l1.13-1.13"/></svg>
+      <svg class="t-dark" width="15" height="15" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2.1" stroke-linejoin="round">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
   </div>
   <div id="logbar">
     <input id="search" placeholder="поиск по логу" spellcheck="false">
@@ -955,6 +989,22 @@ function showTab(name) {
 document.getElementById('tabs').onclick = e => {
   const t = e.target.closest('.tab');
   if (t) showTab(t.dataset.tab);
+};
+
+// Выбор темы окно подставляет до первой отрисовки (window.py, theme) — иначе
+// при тёмной теме окно на миг вспыхивало бы светлым. Здесь только кнопка.
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const b = document.getElementById('btn-theme');
+  b.title = THEME_TITLE[t];
+  b.setAttribute('aria-label', THEME_TITLE[t]);
+}
+setTheme(THEMES.includes(document.documentElement.dataset.theme)
+         ? document.documentElement.dataset.theme : 'system');
+document.getElementById('btn-theme').onclick = () => {
+  const t = nextTheme(document.documentElement.dataset.theme);
+  setTheme(t);
+  send('theme', t);
 };
 
 document.getElementById('side').addEventListener('click', e => {
