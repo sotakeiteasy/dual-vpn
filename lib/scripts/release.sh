@@ -26,6 +26,8 @@ OLD=$(cat VERSION)
 # sort -V: номер обязан расти, иначе приложения у людей не увидят обновления.
 [ "$(printf '%s\n%s\n' "$OLD" "$VER" | sort -V | tail -1)" = "$VER" ] && [ "$OLD" != "$VER" ] || {
   echo "номер $VER не больше текущего $OLD"; exit 1; }
+# Раздел станет описанием релиза: без него люди увидят пустую страницу.
+bash "$BASE/lib/scripts/changelog.sh" "$VER" >/dev/null
 
 PY="$BASE/lib/venv/bin/python"
 [ -x "$PY" ] || PY=python3

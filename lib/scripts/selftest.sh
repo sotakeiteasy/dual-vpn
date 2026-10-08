@@ -22,7 +22,7 @@ head "синтаксис"
 for f in "$BASE/vpn" "$BASE/install.sh" "$BASE/lib/scripts/install-daemon.sh" \
          "$BASE/lib/scripts/apply-update.sh" "$BASE/lib/scripts/migrate-data.sh" \
          "$BASE/lib/scripts/selftest.sh" "$BASE/lib/scripts/make-dmg.sh" \
-         "$BASE/lib/scripts/release.sh"; do
+         "$BASE/lib/scripts/release.sh" "$BASE/lib/scripts/changelog.sh"; do
   bash -n "$f" 2>/dev/null && ok "$(basename "$f")" || bad "$(basename "$f")"
 done
 for f in "$BASE"/lib/scripts/*.py; do

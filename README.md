@@ -129,6 +129,7 @@ lib/scripts/
   selftest.sh           проверки
   make-dmg.sh           сборка образа для релиза
   release.sh            выпуск: VERSION, тег mac-v*, пуш
+  changelog.sh          раздел версии из CHANGELOG.md
 lib/launchd/            описание службы
 tests/                  тесты: python -m unittest, node --test
 windows/                вариант для Windows, со своим README
@@ -181,6 +182,9 @@ node --test tests/test_view.js                   # логика окна
 ```bash
 bash lib/scripts/release.sh 0.1.4
 ```
+
+Сначала в `CHANGELOG.md` нужен раздел `## 0.1.4`: что нового, словами
+человека. Он станет описанием релиза, без него скрипт версию не выпустит.
 
 Скрипт проверяет, что дерево чистое и `main` совпадает с `origin/main`,
 гоняет тесты, пишет номер в `VERSION`, коммитит «Выпуск macOS 0.1.4», ставит
