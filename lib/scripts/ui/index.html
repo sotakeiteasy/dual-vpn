@@ -150,9 +150,6 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
               border: 1.5px solid var(--dim); }
 .conf.active .conf-radio { border-color: var(--accent); background: var(--accent);
                            box-shadow: inset 0 0 0 2.5px var(--panel); }
-/* У рабочего выбора нет: галочка вместо переключателя, чтобы не звало нажать. */
-.conf-radio.fixed { border: none; background: none; box-shadow: none; color: var(--ok); }
-.conf.active .conf-radio.fixed::before { content: '✓'; font-size: 12px; }
 .conf[data-pick="0"] { cursor: default; }
 .conf[data-pick="0"]:hover { background: none; }
 .conf-name { flex: 1; }
@@ -538,7 +535,7 @@ function renderConfs(d) {
   const rows = (list, pick) => list.map(c => `
     <div class="conf ${c.active ? 'active' : ''}" data-name="${esc(c.name)}"
          data-pick="${pick ? 1 : 0}">
-      <div class="conf-radio ${pick ? '' : 'fixed'}"></div>
+      ${pick ? '<div class="conf-radio"></div>' : ''}
       <span class="conf-name">${esc(c.name)}</span>
       <button class="conf-menu" data-menu="${esc(c.name)}" title="Действия">⋯</button>
     </div>`).join('');
