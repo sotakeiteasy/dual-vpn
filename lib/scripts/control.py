@@ -78,6 +78,20 @@ def read_last_error(path, since=0.0):
         return ""
 
 
+# Строка сторожа в логе службы (vpn: run_singbox) и сколько строк хвоста
+# смотреть: между строкой и проверкой sing-box успевает написать десяток своих.
+RESTART_MARK = "→ перезапускаю sing-box: "
+RESTART_TAIL = 40
+
+
+def restart_step(lines):
+    """Шаг «перезапускаю sing-box: …» по последней такой строке лога, или ''."""
+    for line in reversed(lines):
+        if line.startswith(RESTART_MARK):
+            return line[len("→ "):] + "…"
+    return ""
+
+
 class Ops:
     """Что контроллер умеет делать с системой. Реальная реализация — в menubar.py.
 
@@ -265,6 +279,11 @@ class Controller:
             why = self.ops.last_error(since=t0)
             if why:
                 return why
+            # Сторож службы перезапускает sing-box, когда тот стартовал без
+            # сокетов WireGuard: это лишние секунды, и человек должен видеть, на что.
+            step = restart_step(self.ops.session_tail(RESTART_TAIL))
+            if step and step != self.step:
+                self._set_step(step)
             if self.ops.daemon_running():
                 seen = True
                 gone_at = None

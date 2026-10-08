@@ -48,6 +48,7 @@ class FakeDaemon(control.Ops):
         self.err_removable = True
         self.calls = []
         self.events = []            # (время, функция)
+        self.session = ["=== старт ===", "→ собираю конфиг", "ValueError: '25-35'"]
 
     # --- расписание
     def at(self, dt, fn):
@@ -121,7 +122,8 @@ class FakeDaemon(control.Ops):
             self.err_text = ""
 
     def session_tail(self, n):
-        return ["=== старт ===", "→ собираю конфиг", "ValueError: '25-35'"][-n:]
+        self._tick()
+        return self.session[-n:]
 
 
 def make(start_mode="ok", stop_mode="ok", up=False, running=False):
@@ -150,6 +152,18 @@ class StartTests(unittest.TestCase):
         self.assertTrue(ops.up)
         self.assertGreaterEqual(clock.now() - t0, 3, "вернулся раньше, чем поднялся туннель")
         self.assertEqual(ops.calls, ["clear_error", "kickstart"])
+
+    def test_shows_watchdog_restart(self):
+        # Сторож службы перезапустил sing-box — в шаге видно, на что ушли секунды.
+        ctrl, ops, _, changes = make("ok")
+        step = "перезапускаю sing-box: порт занят (попытка 1 из 3)…"
+        ops.at(1, ops._set(session=["=== старт ===", "→ запускаю sing-box…",
+                                    "→ перезапускаю sing-box: порт занят (попытка 1 из 3)"]))
+        snap = run(ctrl, "start")
+        self.assertEqual(snap["error"], "")
+        steps = [c["step"] for c in changes]
+        self.assertEqual(steps.count(step), 1,
+                         "шага нет или он перерисовывается на каждом опросе")
 
     def test_already_up_does_not_kick(self):
         # kickstart -k на поднятой службе — это её убийство и перезапуск.

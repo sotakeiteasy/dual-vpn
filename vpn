@@ -451,6 +451,92 @@ cleanup() {
   exit "${1:-$rc}"
 }
 
+# Сторож сломанного старта. Иногда (дома — заметно чаще, чем в офисе)
+# sing-box при первом «network: updated default interface» пересоздаёт
+# сокеты WireGuard на том же порту и получает «bind: address already in use»:
+# wireguard-go повторяет bind только для порта 0, поэтому эндпоинт остаётся
+# совсем без сокетов. Туннель при этом выглядит поднятым, но трафик не идёт,
+# и сам он не чинится — лечил только выкл/вкл. Сторож делает это за человека:
+# видит такую строку в начале вывода — снимает sing-box и запускает заново.
+SB_BAD_BIND='update bind:.*address already in use'
+SB_BIND_RETRIES=3      # бывало два плохих старта подряд
+# Начало вывода sing-box: по нему сторож узнаёт, чем кончился старт.
+# Пишется только первая сотня строк — дальше sing-box пишет строку на
+# соединение, и держать вторую копию лога незачем.
+SB_HEAD="$STATE/sing-box-head.log"
+
+# Запустить sing-box. Вывод идёт туда же, куда и раньше, плюс начало — в SB_HEAD.
+spawn_singbox() {
+  # Удаляем, а не обнуляем: awk прошлой попытки мог ещё не дописать хвост,
+  # и в обнулённый файл он лёг бы как вывод новой.
+  rm -f "$SB_HEAD"
+  "$BIN/sing-box" run -c "$STATE/config.json" \
+    > >(awk -v head="$SB_HEAD" '{ print; fflush() } NR <= 200 { print >> head; fflush(head) }') 2>&1 &
+  PID=$!
+}
+
+# Снять только что запущенный sing-box: TERM, до 10 с ожидания, потом KILL.
+kill_singbox() {
+  kill "$PID" 2>/dev/null
+  for _ in $(seq 1 20); do
+    kill -0 "$PID" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$PID" 2>/dev/null; then
+    kill -KILL "$PID" 2>/dev/null
+    for _ in $(seq 1 10); do
+      kill -0 "$PID" 2>/dev/null || break
+      sleep 0.5
+    done
+  fi
+  # Забираем сами: иначе bash напишет в лог «Terminated», как о падении.
+  # Только мёртвого: wait на неубиваемом висел бы вечно.
+  kill -0 "$PID" 2>/dev/null || wait "$PID" 2>/dev/null
+  return 0
+}
+
+# Дождаться tun и конца старта. 0 — поднялся, 1 — порт занят, надо заново.
+# Плохая строка приходит до «sing-box started», поэтому после tun ждём
+# именно её, но не дольше 5 с: без неё старт считаем удачным.
+await_singbox() {
+  local after=0
+  TUN=""
+  for _ in $(seq 1 150); do           # до 30 с, шаг 0.2
+    grep -q "$SB_BAD_BIND" "$SB_HEAD" 2>/dev/null && return 1
+    if [ -z "$TUN" ]; then
+      TUN=$(find_tun) || kill -0 "$PID" 2>/dev/null \
+        || fail_start "sing-box упал на старте" "подробности — в логе выше"
+    fi
+    if [ -n "$TUN" ]; then
+      after=$((after + 1))
+      if [ "$after" -ge 25 ] || grep -q 'sing-box started' "$SB_HEAD" 2>/dev/null; then
+        # Ещё раз: плохая строка могла прийти вместе с «started».
+        ! grep -q "$SB_BAD_BIND" "$SB_HEAD" 2>/dev/null
+        return
+      fi
+    fi
+    sleep 0.2
+  done
+  fail_start "tun не поднялся за 30 с"
+}
+
+# Поднять sing-box со сторожем. На выходе заданы PID и TUN.
+run_singbox() {
+  local try
+  for try in $(seq 0 "$SB_BIND_RETRIES"); do
+    if [ "$try" = 0 ]; then
+      echo "→ запускаю sing-box…"
+    else
+      echo "→ перезапускаю sing-box: порт занят (попытка $try из $SB_BIND_RETRIES)"
+    fi
+    spawn_singbox
+    await_singbox && return 0
+    kill_singbox
+  done
+  fail_start "sing-box не смог занять порт WireGuard за $((SB_BIND_RETRIES + 1)) запуска" \
+             "выключи и включи ещё раз; подробности — в логе выше"
+}
+
 cmd_start() {
   need_root start
   mkdir -p "$STATE"
@@ -532,19 +618,7 @@ cmd_start() {
   caffeinate -i -w $$ &
   CAFF=$!
 
-  echo "→ запускаю sing-box…"
-  "$BIN/sing-box" run -c "$STATE/config.json" &
-  PID=$!
-
-  TUN=""
-  for _ in $(seq 1 30); do
-    TUN=$(find_tun) && break
-    kill -0 "$PID" 2>/dev/null || fail_start "sing-box упал на старте" "подробности — в логе выше"
-    sleep 1
-  done
-  if [ -z "$TUN" ]; then
-    fail_start "tun не поднялся за 30 с"
-  fi
+  run_singbox
   echo "→ tun: $TUN"
 
   # Порядок важен: сперва вывести пиров из-под туннеля, потом ставить 0/1.

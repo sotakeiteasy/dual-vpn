@@ -90,5 +90,70 @@ DAEMON={1 if daemon else 0}
         self.assertNotIn("\x1b", err)
 
 
+class VpnBindWatchTests(unittest.TestCase):
+    """Сторож старта: «update bind … address already in use» → sing-box заново."""
+
+    def setUp(self):
+        self.data = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.data, "conf"))
+        self.bin = tempfile.mkdtemp()
+        self.count = os.path.join(self.bin, "count")
+        # Первые BAD запусков — плохие, как на домашней сети 8 октября.
+        path = os.path.join(self.bin, "sing-box")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/bash\n"
+                     f'n=$(cat "{self.count}" 2>/dev/null || echo 0); n=$((n + 1))\n'
+                     f'echo "$n" > "{self.count}"\n'
+                     'echo "INFO[0000] network: updated default interface en0"\n'
+                     'if [ "$n" -le "$BAD" ]; then\n'
+                     '  echo "ERROR[0000] endpoint/wireguard[corp]: update bind: listen udp4'
+                     ' 0.0.0.0:51820: bind: address already in use"\n'
+                     'fi\n'
+                     'echo "INFO[0000] sing-box started (0.01s)"\n'
+                     "exec sleep 30\n")
+        os.chmod(path, 0o755)
+
+    def run_watch(self, bad):
+        script = f"""
+set -u
+VPN_SOURCE_ONLY=1 . "{VPN}"
+BIN="{self.bin}"
+DAEMON=1
+mkdir -p "$STATE"
+find_tun() {{ echo utun9; }}
+run_singbox
+echo "PID=$PID TUN=$TUN"
+kill "$PID"
+"""
+        env = {**os.environ, "DUALVPN_DATA": self.data, "BAD": str(bad)}
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                              env=env, timeout=60)
+
+    def starts(self):
+        with open(self.count, encoding="utf-8") as fh:
+            return int(fh.read())
+
+    def test_good_start_is_left_alone(self):
+        r = self.run_watch(bad=0)
+        self.assertEqual(self.starts(), 1)
+        self.assertNotIn("перезапускаю", r.stdout)
+        self.assertIn("TUN=utun9", r.stdout)
+        # Вывод sing-box по-прежнему идёт в лог службы.
+        self.assertIn("sing-box started", r.stdout)
+
+    def test_busy_port_restarts_until_clean(self):
+        r = self.run_watch(bad=2)
+        self.assertEqual(self.starts(), 3, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.count("перезапускаю sing-box: порт занят"), 2)
+        self.assertIn("TUN=utun9", r.stdout)
+
+    def test_gives_up_with_reason(self):
+        r = self.run_watch(bad=10)
+        self.assertEqual(self.starts(), 4)
+        self.assertNotIn("TUN=", r.stdout, "сломанный туннель оставлен как рабочий")
+        with open(os.path.join(self.data, "lib", "state", "last-error"), encoding="utf-8") as fh:
+            self.assertIn("не смог занять порт WireGuard", fh.read())
+
+
 if __name__ == "__main__":
     unittest.main()
