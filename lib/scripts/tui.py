@@ -57,6 +57,7 @@ CORP_PROBE = os.environ.get("CORP_PROBE") or SITE.get("CORP_PROBE", "")
 FAST_EVERY = 2.0    # локальные проверки: интерфейсы, маршруты, процесс
 SLOW_EVERY = 20.0   # сетевые: внешний IP, корп-DNS, корп-HTTPS
 CORP_MISSES = 2     # сколько промахов DNS подряд, чтобы счесть корп молчащим
+EXIT_MISSES = 2     # сколько неответов подряд, чтобы счесть личный неработающим
 MS_MISSES = 2       # сколько неудачных замеров подряд, чтобы убрать задержку
 # Адрес выхода и страна: Cloudflare отвечает строками ip=… и loc=…, без лимита.
 TRACE_URL = "https://1.1.1.1/cdn-cgi/trace"
@@ -245,7 +246,7 @@ def probe_exit():
             state = "unknown"             # реальный адрес не знаем, сравнивать не с чем
         set_st(exit_ip=ip, exit_country=country,
                exit_real=real, exit_state=state,
-               exit_is_peer=(state == "tunnel"))
+               exit_is_peer=(state == "tunnel"), exit_misses=0)
     except Exception:
         # Один неответ — не повод забывать, что было. Раньше каждый
         # сбой стирал адрес, и строка «личный» раз в 20 секунд прыгала между
@@ -253,9 +254,17 @@ def probe_exit():
         # падении туннеля (см. prober) и пока ни одного ответа ещё не было.
         with LOCK:
             known = bool(ST.get("exit_ip"))
-        if not known:
-            set_st(exit_ip="", exit_country="",
+            misses = ST.get("exit_misses", 0) + 1
+        # Туннель, поднятый без сокетов WireGuard, не отвечает вовсе, и окно
+        # вечно показывало «проверяю…». Как у корпа: два промаха подряд —
+        # уже «не работает», а не «ещё не знаю».
+        if misses >= EXIT_MISSES:
+            set_st(exit_misses=misses, exit_is_peer=False, exit_state="down")
+        elif not known:
+            set_st(exit_ip="", exit_country="", exit_misses=misses,
                    exit_is_peer=False, exit_state="unknown")
+        else:
+            set_st(exit_misses=misses)
 
 
 def probe_corp():
@@ -402,7 +411,8 @@ def prober():
             # замера, строка показывала «— через туннель» от прошлого сеанса.
             set_st(exit_ip="", exit_country="", corp_ip="",
                    corp_http="", v6_leak="", exit_is_peer=False,
-                   exit_state="unknown", corp_state="unknown", corp_misses=0,
+                   exit_state="unknown", exit_misses=0,
+                   corp_state="unknown", corp_misses=0,
                    exit_ms=None, corp_ms=None, exit_ms_misses=0, corp_ms_misses=0)
         write_status()
         STOP.wait(FAST_EVERY)

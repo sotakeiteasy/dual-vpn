@@ -91,6 +91,8 @@ def menu_model(st, op):
         out["icon"], out["title"] = "bad", "Утечка IPv6"
     elif state == "leak":
         out["icon"], out["title"] = "bad", "Трафик идёт мимо туннеля"
+    elif state == "down":
+        out["icon"], out["title"] = "bad", "Туннель не работает — перезапусти"
     elif corp_pending:
         out["icon"], out["title"] = "on", "Проверяю туннели…"
     elif not corp_ok:
@@ -105,6 +107,8 @@ def menu_model(st, op):
         personal = {"value": place or "через туннель", "ok": True}
     elif state == "leak":
         personal = {"value": "мимо туннеля", "ok": False}
+    elif state == "down":
+        personal = {"value": "не отвечает", "ok": False}
     else:
         personal = {"value": "проверяю…", "ok": None}
     if corp_pending:

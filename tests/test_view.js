@@ -141,6 +141,16 @@ test('корп ещё не проверен — «проверяю», а не к
   assert.equal(viewModel({...UP, corp_ip: '', corp_state: 'silent'}).title, 'Корп не отвечает');
 });
 
+test('личный не отвечает — «Туннель не работает», а не вечное «проверяю»', () => {
+  const v = viewModel({...UP, exit_state: 'down', corp_ip: '', corp_state: 'unknown'});
+  assert.equal(v.cls, 'bad');
+  assert.equal(v.title, 'Туннель не работает');
+  assert.equal(v.rows[0].dot, 'bad');
+  assert.equal(v.rows[0].label, 'не отвечает');
+  // Служба старше окна поля не знает — как раньше.
+  assert.equal(viewModel({...UP, exit_state: 'unknown'}).rows[0].label, 'проверяю…');
+});
+
 test('утечки перекрывают остальное', () => {
   assert.equal(viewModel({...UP, v6_leak: '2a00::1'}).title, 'Утечка IPv6');
   const v = viewModel({...UP, exit_state: 'leak', exit_ip: '5.6.7.8'});

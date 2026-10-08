@@ -157,6 +157,17 @@ class ProbeSlowTests(unittest.TestCase):
         self.assertEqual(self.probe(good, "10.0.0.5")["corp_state"], "ok")
 
 
+    def test_exit_down_after_two_misses(self):
+        # Туннель поднят без сокетов: трафик не идёт, а строка вечно «проверяю».
+        good = json.dumps({"ip": "1.2.3.4"})
+        self.assertEqual(self.probe("", "")["exit_state"], "unknown")
+        self.assertEqual(self.probe("", "")["exit_state"], "down")
+        self.assertEqual(self.probe(good, "10.0.0.5")["exit_state"], "tunnel")
+        # После ответа счёт заново: один промах снова не «не работает».
+        self.assertEqual(self.probe("", "10.0.0.5")["exit_state"], "tunnel")
+        self.assertEqual(self.probe("", "10.0.0.5")["exit_state"], "down")
+
+
 class ProbeNowTests(unittest.TestCase):
     def setUp(self):
         with tui.LOCK:

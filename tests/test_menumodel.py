@@ -92,6 +92,13 @@ class MenuModelTests(unittest.TestCase):
         self.assertEqual(m["icon"], "bad")
         self.assertEqual(m["title"], "Трафик идёт мимо туннеля")
 
+    def test_exit_down_is_bad(self):
+        # Поднят, но личный не отвечает — заголовок говорит, что делать.
+        m = menu_model({**UP, "exit_state": "down"}, IDLE)
+        self.assertEqual(m["icon"], "bad")
+        self.assertEqual(m["title"], "Туннель не работает — перезапусти")
+        self.assertIn({"name": "Личный", "value": "не отвечает", "ok": False}, m["rows"])
+
     def test_unknown_exit_is_checking(self):
         m = menu_model({**UP, "exit_state": "unknown", "exit_ip": ""}, IDLE)
         self.assertIn({"name": "Личный", "value": "проверяю…", "ok": None}, m["rows"])
