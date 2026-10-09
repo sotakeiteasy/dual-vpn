@@ -136,6 +136,11 @@ def _private_dns(conf):
     return out
 
 
+def _same_dns(conf, other):
+    """Общий частный DNS — новый доступ в ту же сеть (решение #13)."""
+    return bool(_private_dns(conf) & _private_dns(other))
+
+
 class Core:
     """Логика службы, отделённая от обвязки Windows.
 
@@ -1053,6 +1058,14 @@ class Core:
         его, иначе сборка упёрлась бы в «конфигов несколько»."""
         t["active"] = t["active"] or (before[0] if len(before) == 1 else name)
 
+    def _list_confs(self, data):
+        """[(туннель, разобранный выбранный конфиг)] туннелей «по списку»;
+        без выбранного или нечитаемого — пропущены."""
+        in_use = self._in_use(data)
+        out = [(t, _read_conf(t["id"], in_use[t["id"]]))
+               for t in data["tunnels"] if t["mode"] == "list" and in_use[t["id"]]]
+        return [(t, c) for t, c in out if c]
+
     def _place(self, conf, data):
         """Куда «Добавить конфиг…» без туннеля кладёт conf, по его AllowedIPs:
 
@@ -1068,14 +1081,10 @@ class Core:
         if not nets:
             raise ValueError("в AllowedIPs конфига ни 0.0.0.0/0, ни подсетей — "
                              "не понять, что через него пускать")
-        in_use = self._in_use(data)
-        others = [(t, _read_conf(t["id"], in_use[t["id"]]))
-                  for t in data["tunnels"] if t["mode"] == "list" and in_use[t["id"]]]
-        others = [(t, c) for t, c in others if c]
-        dns = _private_dns(conf)
+        others = self._list_confs(data)
         # Общий DNS — признак сильнее пересечения сетей: смотрим его у всех.
         for t, other in others:
-            if dns & _private_dns(other):
+            if _same_dns(conf, other):
                 return "replace", t
         for t, other in others:
             if any(a.overlaps(ipaddress.ip_network(b)) for a in nets
@@ -1088,8 +1097,9 @@ class Core:
 
         С tunnel или kind — в этот туннель, добавленный выбирается; place
         "replace" (и старый пункт «рабочий») — вместо его конфигов, туннель
-        берёт имя файла, правила остаются. place "new" — новый туннель «по
-        списку». Без них место выбирает _place; при ask ничего не пишется, а
+        берёт имя файла, правила остаются; так же с одним tunnel, если у
+        конфига общий частный DNS с выбранным в туннеле. place "new" —
+        новый туннель «по списку». Без них место выбирает _place; при ask ничего не пишется, а
         ответ несёт ask: окно спрашивает и повторяет команду с replace или new.
 
         Файл ложится под именем файла человека, очищенным от недопустимых
@@ -1110,6 +1120,11 @@ class Core:
                 t = self._target(data, tunnel, kind)
                 # У старого «рабочего» конфиг один, как до туннелей.
                 replace = place == "replace" or (kind == "corp" and not tunnel)
+                if tunnel and not place and not kind:
+                    # Трей: новый доступ в ту же сеть — вместо прежнего, как авто в окне.
+                    conf = buildconfig.parse_text(text)
+                    replace = any(u is t and _same_dns(conf, other)
+                                  for u, other in self._list_confs(data))
                 where = "replace" if replace else "to"
             else:
                 where, t = self._place(buildconfig.parse_text(text), data)

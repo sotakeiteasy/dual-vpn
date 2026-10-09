@@ -443,13 +443,16 @@ class Tray:
             reply = self._call("add-config", name=name, text=text, tunnel=tid)
             if reply is None:
                 return
+            # Тот же частный DNS — служба заменила прежний конфиг туннеля.
+            what = ("вместо прежнего" if reply.get("place") == "replace"
+                    else "добавлен")
             if self.status.get("up"):
                 # Служба перезапустит только процесс этого туннеля.
-                self._notify(f"«{title}»: конфиг {reply.get('name')}.conf,"
+                self._notify(f"«{title}»: конфиг {reply.get('name')}.conf {what},"
                              " переключаю туннель")
                 self._call("apply")
             else:
-                self._notify(f"«{title}»: добавлен конфиг {reply.get('name')}.conf")
+                self._notify(f"«{title}»: конфиг {reply.get('name')}.conf {what}")
         threading.Thread(target=work, daemon=True).start()
 
     def _call(self, op, **payload):

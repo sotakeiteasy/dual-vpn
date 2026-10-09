@@ -673,6 +673,41 @@ def test_замена_в_основном_отказывает(core):
     assert _files("home") == ["nl-1.conf"]
 
 
+def test_в_туннель_с_общим_частным_dns_заменяет(core):
+    """Трей шлёт только tunnel: тот же DNS сети — замена, как авто в окне."""
+    _put("work", "corp.conf", CORP)
+    core._set_tunnel("work", {"include": "corp.example"})
+
+    r = core._add_config("wg-new", _wg("10.20.0.0/16", "10.53.0.4"), tunnel="work")
+
+    assert r["ok"] and (r["tunnel"], r["place"]) == ("work", "replace")
+    assert _files("work") == ["wg-new.conf"]
+    t = _tunnel("work")
+    assert (t["name"], t["active"], t["include"]) == ("wg-new", "wg-new", ["corp.example"])
+
+
+@pytest.mark.parametrize("old_dns, new_dns", [("10.0.0.53", "10.53.0.4"),
+                                              ("1.1.1.1", "1.1.1.1")])
+def test_в_туннель_без_общего_частного_dns_кладёт_рядом(core, old_dns, new_dns):
+    _put("work", "corp.conf", _wg("10.10.0.0/16", old_dns))
+
+    r = core._add_config("wg-new", _wg("10.10.0.0/16", new_dns), tunnel="work")
+
+    assert r["ok"] and r["place"] == "to"
+    assert _files("work") == ["corp.conf", "wg-new.conf"]
+    assert _active("work") == "wg-new"
+
+
+def test_в_основной_с_тем_же_dns_кладёт_рядом(core):
+    """Замена — только в туннеле «по списку»: у основного прежний остаётся запасным."""
+    _put("home", "nl-1.conf", _wg("0.0.0.0/0", "10.53.0.4"))
+
+    r = core._add_config("nl-2", _wg("0.0.0.0/0", "10.53.0.4"), tunnel="home")
+
+    assert r["ok"] and r["place"] == "to"
+    assert _files("home") == ["nl-1.conf", "nl-2.conf"]
+
+
 @pytest.mark.parametrize("place", ["", "new"])
 def test_потолок_туннелей_до_записи_файла(core, place):
     extra = [{"id": f"x{i}", "name": f"X{i}", "mode": "list"} for i in range(6)]
