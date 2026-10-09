@@ -131,10 +131,14 @@ def test_двойной_левый_клик_сам_окно_не_открыва�
     assert calls == []
 
 
+def test_подпись_имя_конфига_без_имени_туннеля():
+    """Как на плитке окна: единица — конфиг, а не «рабочий/личный»."""
+    assert tray._conf_label(_work(confs=["office", "lab"], active="lab")) == "lab"
+
+
 def test_длинное_имя_обрезается_а_пустое_зовёт_добавить():
     long = tray._conf_label(_work(confs=["x" * 100]))
-    assert long.startswith("Работа: ") and long.endswith("…")
-    assert len(long) == len("Работа: ") + tray.NAME_MAX
+    assert long.endswith("…") and len(long) == tray.NAME_MAX
     assert tray._conf_label(_home()) == "Личный: добавить конфиг…"
 
 
@@ -163,7 +167,7 @@ def test_пункты_туннелей_по_порядку_с_подписью_�
     work.action()
     home.action()
 
-    assert work.text(work) == "Работа: office"
+    assert work.text(work) == "office"
     assert home.text(home) == "Личный: добавить конфиг…"
     assert app.added == ["work", "home"]
 
@@ -179,4 +183,4 @@ def test_пункты_туннелей_те_же_объекты_а_удалён�
 
     assert again == (home, work)
     assert set(app._tunnel_items) == {"home", "work"}
-    assert work.text(work) == "Работа: office"
+    assert work.text(work) == "office"

@@ -241,16 +241,16 @@ class Tray:
                 and not self.status.get("busy")),
             pystray.Menu.SEPARATOR,
         )
+        # «Открыть панель управления…» нет: окно открывает левый клик по значку.
         tail = (
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Открыть панель управления…", self.on_window),
             pystray.MenuItem("Закрыть", self.on_quit),
         )
         return pystray.Menu(
             lambda: (*head, *self._conf_items(pystray), *tail))
 
     def _conf_items(self, pystray):
-        """Пункты туннелей в порядке _menu_ids: «<имя>: <конфиг>» и кружок
+        """Пункты туннелей в порядке _menu_ids: имя конфига и кружок
         статуса слева, клик — добавить файл в этот туннель.
 
         Кружок ставит _paint_dots, а не pystray: картинок у пунктов pystray
@@ -687,9 +687,12 @@ def _conf_name(t):
 
 
 def _conf_label(t):
-    """Подпись пункта туннеля: «<имя>: <конфиг>» или приглашение добавить."""
-    name, conf = _clip(t.get("name") or t.get("id"), NAME_MAX), _conf_name(t)
-    return f"{name}: {_clip(conf, NAME_MAX)}" if conf else f"{name}: добавить конфиг…"
+    """Подпись пункта туннеля: имя его конфига, как на плитке окна, или
+    «<имя туннеля>: добавить конфиг…» — конфиг выбирать нечего."""
+    conf = _conf_name(t)
+    if conf:
+        return _clip(conf, NAME_MAX)
+    return f"{_clip(t.get('name') or t.get('id'), NAME_MAX)}: добавить конфиг…"
 
 
 def _side_bits(pending, ids):
