@@ -2,7 +2,8 @@
 
 Конфиг лежит в папке своего туннеля (conf\\tunnels\\<id>), а туннель — тот,
 через чей пункт конфиг добавили: «рабочий» — первый туннель «по списку»,
-«личный» — основной. Ошибка здесь не падает сразу: второй рабочий или не тот
+«личный» — основной; без пункта — выбранный по AllowedIPs и DNS. Ошибка здесь
+не падает сразу: второй рабочий или не тот
 личный ломают сборку только при следующем включении, когда человек уже не
 помнит, что менял.
 """
@@ -12,13 +13,27 @@ import shutil
 
 import pytest
 
-from dualvpn import buildconfig, paths, tunnels
+from dualvpn import buildconfig, paths, service, tunnels
 from dualvpn.service import Core
 
 WG = "[Interface]\nPrivateKey = x\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = y\n"
 
 WORK = {"id": "work", "name": "Работа", "mode": "list"}
 HOME = {"id": "home", "name": "Личный", "mode": "all"}
+
+
+def _wg(allowed, dns=""):
+    """Конфиг с нужными AllowedIPs и DNS: по ним служба выбирает место."""
+    lines = ["[Interface]", "PrivateKey = x", "Address = 10.0.0.2/32"]
+    if dns:
+        lines.append(f"DNS = {dns}")
+    lines += ["", "[Peer]", "PublicKey = y", "Endpoint = 203.0.113.9:51820"]
+    if allowed:
+        lines.append(f"AllowedIPs = {allowed}")
+    return "\n".join(lines) + "\n"
+
+
+FULL = _wg("0.0.0.0/0")
 
 
 def _clean():
@@ -63,10 +78,10 @@ def _files(tid):
         return []
 
 
-def _put(tid, name):
+def _put(tid, name, text=WG):
     os.makedirs(tunnels.conf_dir(tid), exist_ok=True)
     with open(os.path.join(tunnels.conf_dir(tid), name), "w", encoding="utf-8") as fh:
-        fh.write(WG)
+        fh.write(text)
 
 
 def _put_in(folder, name):
@@ -77,6 +92,14 @@ def _put_in(folder, name):
 
 def _active(tid):
     return tunnels.find(tunnels.load(), tid)["active"]
+
+
+def _tunnel(tid):
+    return tunnels.find(tunnels.load(), tid)
+
+
+def _ids():
+    return [t["id"] for t in tunnels.load()["tunnels"]]
 
 
 @pytest.mark.parametrize("given, expected", [
@@ -113,6 +136,8 @@ def test_замена_рабочего_убирает_прежние(core):
     assert _files("work") == ["Офис Иванов.conf"]
     assert _active("work") == "Офис Иванов"
     assert _files("home") == ["nl-1.conf"]
+    # Замена — тот же доступ с новым файлом: туннель зовётся им в окне.
+    assert r["place"] == "replace" and _tunnel("work")["name"] == "Офис Иванов"
 
 
 def test_тип_задаёт_пункт_а_не_имя(core):
@@ -145,7 +170,7 @@ def test_недопустимые_знаки_не_ломают_добавлен�
     assert _files("home") == ["my_vpn_.conf"]
 
 
-@pytest.mark.parametrize("kind", ["", "home", "../corp"])
+@pytest.mark.parametrize("kind", ["home", "../corp"])
 def test_неизвестный_тип_не_ложится(core, kind):
     r = core._add_config("nl-1", WG, kind=kind)
     assert not r["ok"]
@@ -530,3 +555,287 @@ def test_непонятое_в_полях_окна_отказывает(core):
 
     assert not r["ok"] and r["error"] == "не понял: foo_bar, 1.2.3"
     assert tunnels.find(tunnels.load(), "work")["include"] == []
+
+
+# ------------------------------------- «Добавить конфиг…» без туннеля
+
+CORP = _wg("10.10.0.0/16", "10.53.0.4")
+
+
+def test_полный_ложится_в_основной_запасным(core):
+    """Выбранный остаётся: запасной добавляют впрок, а не чтобы сменить выход.
+    Единственный прежний без выбора и был активным — он и фиксируется."""
+    _put("home", "nl-1.conf", FULL)
+
+    r = core._add_config("nl-2", FULL)
+
+    assert r["ok"] and (r["tunnel"], r["place"]) == ("home", "all")
+    assert _files("home") == ["nl-1.conf", "nl-2.conf"]
+    assert _active("home") == "nl-1"
+
+
+def test_полный_в_пустой_основной_выбирается(core):
+    core._add_config("nl-1", FULL)
+    assert _active("home") == "nl-1"
+
+
+def test_полный_без_основного_создаёт_его(core):
+    tunnels.save({"tunnels": [WORK]})
+
+    r = core._add_config("nl-1", FULL)
+
+    assert r["ok"] and r["tunnel"] == "t1"
+    t = _tunnel("t1")
+    assert (t["name"], t["mode"], t["active"]) == ("nl-1", "all", "nl-1")
+    assert _files("t1") == ["nl-1.conf"]
+
+
+def test_свои_сети_новый_туннель_по_списку(core):
+    _put("work", "corp.conf", CORP)
+
+    r = core._add_config("Офис 2", _wg("192.168.77.0/24", "10.0.0.53"))
+
+    assert r["ok"] and (r["tunnel"], r["place"]) == ("t1", "list")
+    t = _tunnel("t1")
+    assert (t["name"], t["mode"], t["active"]) == ("Офис 2", "list", "Офис 2")
+    assert _files("work") == ["corp.conf"]
+
+
+def test_общий_частный_dns_молча_заменяет(core):
+    """Тот же DNS рабочей сети — новый доступ туда же: правила и id остаются."""
+    _put("work", "corp.conf", CORP)
+    core._set_tunnel("work", {"include": "corp.example"})
+
+    r = core._add_config("wg-new", _wg("10.20.0.0/16", "10.53.0.4"))
+
+    assert r["ok"] and (r["tunnel"], r["place"]) == ("work", "replace")
+    assert _files("work") == ["wg-new.conf"]
+    t = _tunnel("work")
+    assert (t["name"], t["active"], t["include"]) == ("wg-new", "wg-new", ["corp.example"])
+    assert _ids() == ["work", "home"]
+
+
+def test_общий_публичный_dns_не_повод_заменять(core):
+    _put("work", "corp.conf", _wg("10.10.0.0/16", "1.1.1.1"))
+
+    r = core._add_config("other", _wg("192.168.77.0/24", "1.1.1.1"))
+
+    assert r["ok"] and r["place"] == "list"
+    assert _files("work") == ["corp.conf"]
+
+
+def test_пересечение_сетей_спрашивает_и_ничего_не_пишет(core):
+    _put("work", "corp.conf", CORP)
+
+    r = core._add_config("wg-new", _wg("10.10.5.0/24", "10.0.0.53"))
+
+    assert not r["ok"]
+    assert r["ask"] == {"id": "work", "name": "Работа", "conf": "corp"}
+    assert _files("work") == ["corp.conf"] and _ids() == ["work", "home"]
+    assert not os.path.exists(tunnels.conf_dir("t1"))
+
+
+def test_ответ_заменить(core):
+    _put("work", "corp.conf", CORP)
+    core._set_tunnel("work", {"exclude": "198.51.100.7"})
+
+    r = core._add_config("wg-new", _wg("10.10.5.0/24"), tunnel="work", place="replace")
+
+    assert r["ok"] and r["place"] == "replace"
+    assert _files("work") == ["wg-new.conf"]
+    assert _tunnel("work")["exclude"] == ["198.51.100.7/32"]
+
+
+def test_ответ_отдельный_туннель(core):
+    _put("work", "corp.conf", CORP)
+
+    r = core._add_config("wg-new", _wg("10.10.5.0/24"), place="new")
+
+    assert r["ok"] and (r["tunnel"], r["place"]) == ("t1", "list")
+    assert _files("work") == ["corp.conf"] and _files("t1") == ["wg-new.conf"]
+
+
+def test_замена_без_туннеля_отказывает(core):
+    r = core._add_config("wg-new", _wg("192.168.77.0/24"), place="replace")
+
+    assert not r["ok"]
+    assert _ids() == ["work", "home"] and not os.path.exists(tunnels.conf_dir("t1"))
+
+
+def test_замена_в_основном_отказывает(core):
+    _put("home", "nl-1.conf", FULL)
+
+    r = core._add_config("nl-2", FULL, tunnel="home", place="replace")
+
+    assert not r["ok"] and "не туннель «по списку»" in r["error"]
+    assert _files("home") == ["nl-1.conf"]
+
+
+@pytest.mark.parametrize("place", ["", "new"])
+def test_потолок_туннелей_до_записи_файла(core, place):
+    extra = [{"id": f"x{i}", "name": f"X{i}", "mode": "list"} for i in range(6)]
+    tunnels.save({"tunnels": [WORK, HOME, *extra]})
+
+    r = core._add_config("Офис 9", _wg("192.168.77.0/24"), place=place)
+
+    assert not r["ok"] and "больше нельзя" in r["error"]
+    assert len(_ids()) == tunnels.MAX_TUNNELS
+    assert not os.path.exists(tunnels.conf_dir("t1"))
+
+
+@pytest.mark.parametrize("allowed", ["", "::/0"])
+def test_без_сетей_в_allowedips_не_ложится(core, allowed):
+    r = core._add_config("odd", _wg(allowed))
+
+    assert not r["ok"] and "AllowedIPs" in r["error"]
+    assert _ids() == ["work", "home"] and _files("home") == []
+
+
+# ------------------------------------- удаление последнего конфига туннеля
+
+def test_последний_конфиг_с_drop_tunnel_уносит_туннель(core):
+    _put("work", "corp.conf")
+
+    r = core._remove_config("corp", tunnel="work", drop_tunnel=True)
+
+    assert r["ok"] and _ids() == ["home"]
+    assert not os.path.exists(tunnels.conf_dir("work"))
+
+
+def test_без_drop_tunnel_пустой_туннель_хранит_правила(core):
+    _put("work", "corp.conf")
+    core._set_tunnel("work", {"include": "corp.example"})
+
+    assert core._remove_config("corp", tunnel="work")["ok"]
+
+    assert _ids() == ["work", "home"]
+    assert _tunnel("work")["include"] == ["corp.example"] and _active("work") == ""
+
+
+def test_drop_tunnel_не_трогает_туннель_с_конфигами(core):
+    _put("work", "a.conf")
+    _put("work", "b.conf")
+
+    assert core._remove_config("a", tunnel="work", drop_tunnel=True)["ok"]
+
+    assert _ids() == ["work", "home"] and _files("work") == ["b.conf"]
+
+
+# --------------------------------------------- move-config: полный конфиг
+
+def test_полный_из_основного_в_свой_туннель(core):
+    _put("home", "nl-1.conf", FULL)
+    _put("home", "nl-2.conf", FULL)
+    core._set_active("nl-1", tunnel="home")
+
+    r = core._move_config("home", "nl-1", "new")
+
+    assert r == {"ok": True, "tunnel": "t1", "name": "nl-1"}
+    t = _tunnel("t1")
+    assert (t["name"], t["mode"], t["active"]) == ("nl-1", "list", "nl-1")
+    assert _files("t1") == ["nl-1.conf"] and _files("home") == ["nl-2.conf"]
+    assert _active("home") == "nl-2"
+
+
+def test_полный_из_списка_обратно_в_основной(core):
+    nl = {"id": "t1", "name": "nl-1", "mode": "list", "active": "nl-1"}
+    tunnels.save({"tunnels": [WORK, {**HOME, "active": "nl-2"}, nl]})
+    _put("t1", "nl-1.conf", FULL)
+    _put("home", "nl-2.conf", FULL)
+
+    r = core._move_config("t1", "nl-1", "all", drop_tunnel=True)
+
+    assert r["ok"] and r["tunnel"] == "home"
+    assert _files("home") == ["nl-1.conf", "nl-2.conf"] and _active("home") == "nl-2"
+    assert _ids() == ["work", "home"]
+    assert not os.path.exists(tunnels.conf_dir("t1"))
+
+
+def test_в_основной_без_основного_он_создаётся(core):
+    nl = {"id": "t1", "name": "nl-1", "mode": "list", "active": "nl-1"}
+    tunnels.save({"tunnels": [WORK, nl]})
+    _put("t1", "nl-1.conf", FULL)
+
+    r = core._move_config("t1", "nl-1", "all")
+
+    t = _tunnel(r["tunnel"])
+    assert (t["mode"], t["active"]) == ("all", "nl-1")
+    # Без drop_tunnel пустой туннель остаётся со своими правилами.
+    assert _active("t1") == "" and _files("t1") == []
+
+
+@pytest.mark.parametrize("tid, name, to, error", [
+    ("work", "corp", "all", "0.0.0.0/0"),
+    ("work", "corp", "new", "не туннель «весь остальной трафик»"),
+    ("home", "nl-1", "all", "не туннель «по списку»"),
+    ("home", "nl-1", "home", "new или all"),
+    ("home", "nope", "new", "нет конфига"),
+])
+def test_перенос_не_того_отказывает(core, tid, name, to, error):
+    _put("work", "corp.conf", CORP)
+    _put("home", "nl-1.conf", FULL)
+
+    r = core._move_config(tid, name, to)
+
+    assert not r["ok"] and error in r["error"]
+    assert _files("work") == ["corp.conf"] and _files("home") == ["nl-1.conf"]
+    assert _ids() == ["work", "home"]
+
+
+def test_перенос_на_занятое_имя_отказывает(core):
+    nl = {"id": "t1", "name": "nl-1", "mode": "list"}
+    tunnels.save({"tunnels": [WORK, HOME, nl]})
+    _put("t1", "nl-1.conf", FULL)
+    _put("home", "nl-1.conf", WG)
+
+    r = core._move_config("t1", "nl-1", "all")
+
+    assert not r["ok"] and "уже есть" in r["error"]
+    assert _files("t1") == ["nl-1.conf"]
+    assert core._read_config("nl-1", tunnel="home")["text"] == WG
+
+
+@pytest.mark.parametrize("drop, ok", [(True, True), (False, False)])
+def test_потолок_при_переносе_считает_удаляемый(core, drop, ok):
+    """Восемь туннелей без основного: перенос с удалением источника не
+    добавляет девятый, без удаления — добавил бы."""
+    extra = [{"id": f"x{i}", "name": f"X{i}", "mode": "list"} for i in range(7)]
+    tunnels.save({"tunnels": [WORK, *extra]})
+    _put("x0", "nl-1.conf", FULL)
+
+    r = core._move_config("x0", "nl-1", "all", drop_tunnel=drop)
+
+    assert r["ok"] is ok
+    assert ("x0" in _ids()) is not drop
+    assert _files("x0") == ([] if ok else ["nl-1.conf"])
+
+
+def test_сбой_записи_туннелей_возвращает_файл(core, monkeypatch):
+    _put("home", "nl-1.conf", FULL)
+
+    def broken(data):
+        raise OSError("диск занят")
+    monkeypatch.setattr(tunnels, "save", broken)
+
+    r = core._move_config("home", "nl-1", "new")
+
+    assert not r["ok"] and "диск занят" in r["error"]
+    assert _files("home") == ["nl-1.conf"] and _files("t1") == []
+
+
+# ------------------------------------------------ full в статусе
+
+def test_полнота_конфига_перечитывается_после_правки(core, monkeypatch):
+    """Статус спрашивают каждые пару секунд: файл читается заново, только
+    когда сменилось время правки."""
+    monkeypatch.setattr(service, "_full_cache", {})
+    _put("home", "nl-1.conf", FULL)
+    path = tunnels.conf_path("home", "nl-1")
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+
+    assert service._conf_full("home", "nl-1") is True
+    _put("home", "nl-1.conf", CORP)
+    os.utime(path, ns=(2_000_000_000, 2_000_000_000))
+    assert service._conf_full("home", "nl-1") is False
+    assert service._conf_full("home", "") is False
+    assert service._conf_full("home", "nope") is False

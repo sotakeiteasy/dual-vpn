@@ -28,7 +28,7 @@ def test_управление_туннелем_доступно_вошедшем
 
 
 @pytest.mark.parametrize("op", [
-    "add-config", "remove-config", "read-config", "get-site", "set-site",
+    "add-config", "remove-config", "move-config", "read-config", "get-site", "set-site",
     "get-tunnels", "add-tunnel", "set-tunnel", "remove-tunnel", "move-tunnel",
     "set-log-level",
 ])

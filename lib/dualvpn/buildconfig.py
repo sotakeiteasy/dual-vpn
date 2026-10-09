@@ -126,25 +126,56 @@ def check_conf_text(text):
     return None
 
 
-def parse_conf(path):
-    """Разбирает wg-quick/awg-quick файл в {'interface': {...}, 'peer': {...}}."""
+def parse_text(text, where="конфиг"):
+    """Разбирает текст wg-quick/awg-quick в {'interface': {...}, 'peer': {...}}.
+
+    Без секции — ValueError: служба разбирает так и добавляемый конфиг, а
+    ей падать нельзя. where — что назвать в причине.
+    """
     out = {"interface": {}, "peer": {}}
     section = None
-    with open(path, encoding="utf-8") as fh:
-        for raw in fh:
-            line = raw.split("#", 1)[0].strip()
-            if not line:
-                continue
-            if line.startswith("["):
-                section = line.strip("[]").strip().lower()
-                continue
-            if "=" not in line or section not in ("interface", "peer"):
-                continue
-            key, val = line.split("=", 1)
-            out[section][key.strip().lower()] = val.strip()
+    for raw in (text or "").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("["):
+            section = line.strip("[]").strip().lower()
+            continue
+        if "=" not in line or section not in ("interface", "peer"):
+            continue
+        key, val = line.split("=", 1)
+        out[section][key.strip().lower()] = val.strip()
     if not out["interface"] or not out["peer"]:
-        sys.exit(f"{path}: не хватает секции [Interface] или [Peer]")
+        raise ValueError(f"{where}: не хватает секции [Interface] или [Peer]")
     return out
+
+
+def parse_conf(path):
+    """Разбирает .conf с диска; без секции — выход сборки с причиной."""
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    try:
+        return parse_text(text, path)
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+def conf_dns(conf):
+    """IPv4-адреса из [Interface] DNS; имена и IPv6 sing-box туннеля не нужны."""
+    return [d for d in split_list(conf["interface"].get("dns", ""))
+            if re.match(r"^[\d.]+$", d)]
+
+
+def is_full(conf):
+    """Есть ли в AllowedIPs 0.0.0.0/0: такой сервер принимает любой трафик."""
+    for cidr in split_list(conf["peer"].get("allowedips", "")):
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            continue
+        if net.version == 4 and net.prefixlen == 0:
+            return True
+    return False
 
 
 def _is_cidr(value):
@@ -389,7 +420,7 @@ def num_or_range(value, tag, field):
 def allowed_nets(conf, v6=False):
     """Подсети из AllowedIPs, без маршрута по умолчанию; IPv6 — только с v6 на tun."""
     nets = []
-    for cidr in split_list(conf["peer"]["allowedips"]):
+    for cidr in split_list(conf["peer"].get("allowedips", "")):
         try:
             net = ipaddress.ip_network(cidr, strict=False)
         except ValueError:
@@ -817,8 +848,7 @@ def build(data, confs, out_path, side_path=None, log=print):
                 log(f"  [{t['id']}] «{t['name']}»: пускать нечего — ни подсетей "
                     f"в AllowedIPs, ни записей в списке")
             # DNS туннеля: из [Interface] DNS его .conf, иначе не поднимаем.
-            servers = [d for d in split_list(conf["interface"].get("dns", ""))
-                       if re.match(r"^[\d.]+$", d)]
+            servers = conf_dns(conf)
             if servers:
                 host = conf["peer"]["endpoint"].rpartition(":")[0]
                 dns = (t["id"], servers[0], off_endpoint(domains, host))

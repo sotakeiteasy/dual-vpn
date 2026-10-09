@@ -71,6 +71,36 @@ def test_без_секции_peer_это_ошибка(tmp_path):
         buildconfig.parse_conf(_write(tmp_path, "x.conf", text))
 
 
+def test_текст_без_секции_ошибка_а_не_выход():
+    """Текст разбирает и служба при добавлении конфига: ей падать нельзя."""
+    with pytest.raises(ValueError, match="wg.conf: не хватает секции"):
+        buildconfig.parse_text("[Interface]\nPrivateKey = key\n", "wg.conf")
+
+
+def test_dns_туннеля_только_ipv4():
+    conf = buildconfig.parse_text(
+        CORP.replace("DNS = 10.0.0.53", "DNS = 10.0.0.53, fd00::53, corp.example"))
+    assert buildconfig.conf_dns(conf) == ["10.0.0.53"]
+    assert buildconfig.conf_dns(buildconfig.parse_text(PERSONAL_AWG)) == []
+
+
+@pytest.mark.parametrize("allowed, full", [
+    ("0.0.0.0/0", True),
+    ("мусор, 10.10.0.0/16, 0.0.0.0/0", True),
+    ("10.10.0.0/16, 192.168.77.0/24", False),
+    ("::/0", False),
+    ("", False),
+])
+def test_полный_конфиг_по_нулевому_маршруту_ipv4(allowed, full):
+    text = PERSONAL_AWG.replace("AllowedIPs = 0.0.0.0/0", f"AllowedIPs = {allowed}")
+    assert buildconfig.is_full(buildconfig.parse_text(text)) is full
+
+
+def test_без_allowedips_подсетей_нет():
+    text = CORP.replace("AllowedIPs = 10.10.0.0/16, 192.168.77.0/24\n", "")
+    assert buildconfig.allowed_nets(buildconfig.parse_text(text)) == []
+
+
 # ------------------------------------------------------------- маршруты
 
 def test_подсети_туннеля_берутся_из_allowedips(tmp_path):

@@ -12,6 +12,7 @@
 
 import collections
 import datetime
+import ipaddress
 import json
 import os
 import re
@@ -88,6 +89,51 @@ DNS_RE = re.compile(r"\[(\d+) [^\]]*\] dns: \w+ \w+ (\S+?)\.? \d+ IN (\w+) (\S+?
 # Штамп строки sing-box и заголовка запуска из open_log: по нему команда log сводит
 # журналы трёх процессов в один.
 STAMP_RE = re.compile(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+
+
+def _read_conf(tid, name):
+    """Разобранный конфиг туннеля; нет файла или это не конфиг — None."""
+    try:
+        with open(tunnels.conf_path(tid, name), encoding="utf-8", errors="replace") as fh:
+            return buildconfig.parse_text(fh.read())
+    except (OSError, ValueError):
+        return None
+
+
+# Полный ли конфиг, {путь: (mtime, итог)}: статус окно спрашивает каждые
+# пару секунд, а файл меняется редко.
+_full_cache = {}
+
+
+def _conf_full(tid, name):
+    """Есть ли у конфига туннеля 0.0.0.0/0; нет или не читается — False."""
+    if not name:
+        return False
+    try:
+        path = tunnels.conf_path(tid, name)
+        stamp = os.stat(path).st_mtime_ns
+    except (OSError, ValueError):
+        return False
+    hit = _full_cache.get(path)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    conf = _read_conf(tid, name)
+    full = bool(conf) and buildconfig.is_full(conf)
+    _full_cache[path] = (stamp, full)
+    return full
+
+
+def _private_dns(conf):
+    """Частные адреса из [Interface] DNS. Публичный (1.1.1.1) общий у разных
+    провайдеров — о том, куда ведёт конфиг, он ничего не говорит."""
+    out = set()
+    for d in buildconfig.conf_dns(conf):
+        try:
+            if not ipaddress.ip_address(d).is_global:
+                out.add(d)
+        except ValueError:
+            pass
+    return out
 
 
 class Core:
@@ -228,10 +274,16 @@ class Core:
         if op == "add-config":
             return self._add_config(payload.get("name", ""),
                                     payload.get("text", ""),
-                                    payload.get("kind", ""), tid)
+                                    payload.get("kind", ""), tid,
+                                    payload.get("place", ""))
         if op == "remove-config":
             return self._remove_config(payload.get("name", ""),
-                                       payload.get("kind", ""), tid)
+                                       payload.get("kind", ""), tid,
+                                       bool(payload.get("drop_tunnel")))
+        if op == "move-config":
+            return self._move_config(tid, payload.get("name", ""),
+                                     payload.get("to", ""),
+                                     bool(payload.get("drop_tunnel")))
         if op == "read-config":
             return self._read_config(payload.get("name", ""),
                                      payload.get("kind", ""), tid)
@@ -271,11 +323,16 @@ class Core:
         st["last_error"] = self.last_error
         st["autostart"] = self.autostart_enabled()
         data = self._tunnels()
-        # Туннели без списков правил: окно читать conf\\ не может (права), а
-        # имена конфигов и так уходят в profiles и corp.
+        # Туннели без списков правил: в них рабочая сеть, а статус читает
+        # любой (get-tunnels — администратору). Окну хватает числа записей (rules):
+        # есть ли что терять при удалении. full — у выбранного конфига 0.0.0.0/0:
+        # такой туннель «по списку» можно вернуть в основной (move-config).
+        in_use = self._in_use(data)
         st["tunnels"] = [{"id": t["id"], "name": t["name"], "mode": t["mode"],
                           "active": t["active"],
-                          "confs": tunnels.list_confs(t["id"])}
+                          "confs": tunnels.list_confs(t["id"]),
+                          "rules": len(t["include"]) + len(t["exclude"]),
+                          "full": _conf_full(t["id"], in_use[t["id"]])}
                          for t in data["tunnels"]]
         # Итог проверки каждого туннеля; checking — как у сторон: туннель
         # проверен раньше соседей, его кружок уже свежий.
@@ -914,37 +971,137 @@ class Core:
         data = tunnels.load()
         return data, Core._target(data, tunnel, kind)
 
-    def _add_config(self, name, text, kind="", tunnel=""):
-        """Кладёт конфиг в папку туннеля.
+    @staticmethod
+    def _new_tid(data):
+        """Свободный id нового туннеля (t1, t2…): имя человека — кириллица,
+        а id — имя папки и часть тегов sing-box."""
+        ids = {t["id"] for t in data["tunnels"]}
+        n = 1
+        # Папка без туннеля — конфиги после оборванного удаления: их не подбираем.
+        while f"t{n}" in ids or os.path.exists(tunnels.conf_dir(f"t{n}")):
+            n += 1
+        return f"t{n}"
 
-        Туннель задаёт пункт, через который конфиг добавили, а не имя: файл
-        ложится под именем файла человека, очищенным от недопустимых знаков
-        (buildconfig.safe_name), а не отклонённым из-за них. Добавленный
-        выбирается; через старый пункт «рабочий» он ещё и заменяет прежние.
+    @staticmethod
+    def _write_conf(tid, name, text):
+        """Кладёт конфиг в папку туннеля через временный файл: оборванная
+        запись не оставит полконфига."""
+        paths.ensure_dirs()
+        os.makedirs(tunnels.conf_dir(tid), exist_ok=True)
+        path = tunnels.conf_path(tid, name)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _keep_active(t, before, name):
+        """Конфиг name лёг в t запасным: выбранный остаётся. Без выбора
+        единственный прежний и был активным (tunnels.active_conf) — фиксируем
+        его, иначе сборка упёрлась бы в «конфигов несколько»."""
+        t["active"] = t["active"] or (before[0] if len(before) == 1 else name)
+
+    def _place(self, conf, data):
+        """Куда «Добавить конфиг…» без туннеля кладёт conf, по его AllowedIPs:
+
+        ("all", t|None) — 0.0.0.0/0: запасным в основной (None — его нет, новый);
+        ("replace", t) — тот же частный DNS, что у конфига туннеля «по списку»:
+        новый доступ туда же, заменяем молча; ("ask", t) — сети пересекаются, а
+        DNS не общий: решает человек; ("list", None) — новый туннель «по списку».
+        Сравнивается с выбранным конфигом каждого туннеля. Иначе ValueError.
         """
-        try:
-            data, t = self._load_target(tunnel, kind)
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+        if buildconfig.is_full(conf):
+            return "all", tunnels.main_tunnel(data)
+        nets = [ipaddress.ip_network(n) for n in buildconfig.allowed_nets(conf)]
+        if not nets:
+            raise ValueError("в AllowedIPs конфига ни 0.0.0.0/0, ни подсетей — "
+                             "не понять, что через него пускать")
+        in_use = self._in_use(data)
+        others = [(t, _read_conf(t["id"], in_use[t["id"]]))
+                  for t in data["tunnels"] if t["mode"] == "list" and in_use[t["id"]]]
+        others = [(t, c) for t, c in others if c]
+        dns = _private_dns(conf)
+        # Общий DNS — признак сильнее пересечения сетей: смотрим его у всех.
+        for t, other in others:
+            if dns & _private_dns(other):
+                return "replace", t
+        for t, other in others:
+            if any(a.overlaps(ipaddress.ip_network(b)) for a in nets
+                   for b in buildconfig.allowed_nets(other)):
+                return "ask", t
+        return "list", None
+
+    def _add_config(self, name, text, kind="", tunnel="", place=""):
+        """Кладёт конфиг в туннель.
+
+        С tunnel или kind — в этот туннель, добавленный выбирается; place
+        "replace" (и старый пункт «рабочий») — вместо его конфигов, туннель
+        берёт имя файла, правила остаются. place "new" — новый туннель «по
+        списку». Без них место выбирает _place; при ask ничего не пишется, а
+        ответ несёт ask: окно спрашивает и повторяет команду с replace или new.
+
+        Файл ложится под именем файла человека, очищенным от недопустимых
+        знаков (buildconfig.safe_name), а не отклонённым из-за них.
+        """
         # BOM от Блокнота: с ним «[Interface]» в первой строке не узнаётся.
         text = (text or "").lstrip("\ufeff")
         bad = buildconfig.check_conf_text(text)
         if bad:
             return {"ok": False, "error": bad}
         name = buildconfig.safe_name(name)
-        paths.ensure_dirs()
-        os.makedirs(tunnels.conf_dir(t["id"]), exist_ok=True)
-        path = tunnels.conf_path(t["id"], name)
-        # Через временный файл: оборванная запись не оставит полконфига.
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-        self.log(f"→ в туннель «{t['name']}» добавлен конфиг {name}.conf")
-
-        if kind == "corp" and not tunnel:
-            # У рабочего конфиг один: новый заменяет прежний, как до туннелей.
-            for old in tunnels.list_confs(t["id"]):
+        try:
+            data = tunnels.load()
+            if place == "new":
+                where, t = "list", None
+            elif tunnel or kind or place == "replace":
+                # replace без туннеля — отказ _target, а не авто: заменять — значит где-то.
+                t = self._target(data, tunnel, kind)
+                # У старого «рабочего» конфиг один, как до туннелей.
+                replace = place == "replace" or (kind == "corp" and not tunnel)
+                where = "replace" if replace else "to"
+            else:
+                where, t = self._place(buildconfig.parse_text(text), data)
+            if where == "replace" and t["mode"] != "list":
+                raise ValueError(f"«{t['name']}» — не туннель «по списку», "
+                                 f"заменять в нём нечего")
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        if where == "ask":
+            return {"ok": False,
+                    "ask": {"id": t["id"], "name": t["name"],
+                            "conf": self._in_use(data)[t["id"]]},
+                    "error": f"похоже на «{t['name']}»: заменить его конфиг "
+                             f"или добавить отдельным туннелем?"}
+        if t is None:
+            # До записи файла: иначе отказ tunnels.save оставил бы конфиг без туннеля.
+            if len(data["tunnels"]) >= tunnels.MAX_TUNNELS:
+                return {"ok": False, "error": f"туннелей уже {tunnels.MAX_TUNNELS}, "
+                                               f"больше нельзя"}
+            t = {"id": self._new_tid(data), "name": name,
+                 "mode": "all" if where == "all" else "list",
+                 "active": "", "include": [], "exclude": []}
+            data["tunnels"].append(t)
+        before = tunnels.list_confs(t["id"])
+        try:
+            self._write_conf(t["id"], name, text)
+        except OSError as exc:
+            return {"ok": False, "error": f"конфиг не записать: {exc}"}
+        self.log(f"→ в туннель «{t['name']}» ({t['id']}) добавлен конфиг {name}.conf")
+        if where == "all":
+            self._keep_active(t, before, name)
+        else:
+            # Добавленный — сразу активный: его и добавляли, чтобы включить.
+            t["active"] = name
+        if where == "replace":
+            # В окне туннель зовётся своим конфигом (решение #12).
+            t["name"] = name
+        try:
+            data = tunnels.save(data)
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": f"конфиг лёг, но не выбран: {exc}"}
+        if where == "replace":
+            # После записи: сбой оставит прежние файлы, а не туннель без конфига.
+            for old in before:
                 if old == name:
                     continue
                 try:
@@ -952,13 +1109,7 @@ class Core:
                     self.log(f"→ удалён прежний конфиг {old}.conf")
                 except OSError as exc:
                     self.log(f"→ не удалить {old}.conf: {exc}")
-        # Добавленный — сразу активный: его и добавляли, чтобы включить.
-        t["active"] = name
-        try:
-            data = tunnels.save(data)
-        except (OSError, ValueError) as exc:
-            return {"ok": False, "error": f"конфиг лёг, но не выбран: {exc}"}
-        return {"ok": True, "name": name, "tunnel": t["id"],
+        return {"ok": True, "name": name, "tunnel": t["id"], "place": where,
                 "profiles": self._profiles(data), "corp": self._corp(data)}
 
     def _read_config(self, name, kind="", tunnel=""):
@@ -976,14 +1127,24 @@ class Core:
         except (OSError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
 
-    def _remove_config(self, name, kind="", tunnel=""):
+    def _remove_config(self, name, kind="", tunnel="", drop_tunnel=False):
+        """Удаляет конфиг; drop_tunnel — и сам туннель, если конфигов в нём
+        не осталось. Без него пустой туннель хранит правила до нового конфига."""
         try:
             data, t = self._load_target(tunnel, kind)
             os.remove(tunnels.conf_path(t["id"], name))
         except (OSError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
         self.log(f"→ из туннеля «{t['name']}» удалён конфиг {name}.conf")
-        if t["active"] == name:
+        if drop_tunnel and not tunnels.list_confs(t["id"]):
+            data["tunnels"].remove(t)
+            try:
+                data = tunnels.save(data)
+            except (OSError, ValueError) as exc:
+                return {"ok": False, "error": f"конфиг удалён, но туннель остался: {exc}"}
+            self.log(f"→ удалён туннель {t['id']}")
+            self._drop_conf_dir(t["id"])
+        elif t["active"] == name:
             # Активный указывал бы на удалённый файл, и следующее «Включить»
             # падало бы с «нет конфига». Берём другой, а без него — пусто:
             # сборка тогда пропустит пустой туннель.
@@ -994,6 +1155,71 @@ class Core:
             except (OSError, ValueError) as exc:
                 return {"ok": False, "error": f"конфиг удалён, но выбор не записать: {exc}"}
         return {"ok": True, "profiles": self._profiles(data), "corp": self._corp(data)}
+
+    def _move_config(self, tunnel, name, to, drop_tunnel=False):
+        """Полный конфиг (0.0.0.0/0) — между основным туннелем и своим «по списку».
+
+        to "new" — из основного в новый туннель «по списку» («только YouTube
+        через NL»); to "all" — из «по списку» в основной запасным (нет
+        основного — новым основным). Конфиг без 0.0.0.0/0 в основной не идёт:
+        его сервер отбросил бы чужой трафик. drop_tunnel — как у remove-config.
+        """
+        try:
+            if to not in ("new", "all"):
+                raise ValueError(f"переносить можно в new или all, а не {to!r}")
+            data, src = self._load_target(tunnel)
+            path = tunnels.conf_path(src["id"], name)
+            need = "all" if to == "new" else "list"
+            if src["mode"] != need:
+                raise ValueError(f"«{src['name']}» — не туннель "
+                                 + ("«весь остальной трафик»" if need == "all"
+                                    else "«по списку»"))
+            conf = _read_conf(src["id"], name)
+            if conf is None:
+                raise ValueError(f"нет конфига {name}.conf в туннеле «{src['name']}»")
+            if not buildconfig.is_full(conf):
+                raise ValueError(f"у {name}.conf в AllowedIPs нет 0.0.0.0/0: переносится "
+                                 f"только конфиг на весь трафик")
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        rest = [c for c in tunnels.list_confs(src["id"]) if c != name]
+        drop = drop_tunnel and not rest
+        dst = tunnels.main_tunnel(data) if to == "all" else None
+        if dst is not None and name in tunnels.list_confs(dst["id"]):
+            return {"ok": False, "error": f"в «{dst['name']}» уже есть {name}.conf"}
+        if dst is None and len(data["tunnels"]) - drop >= tunnels.MAX_TUNNELS:
+            return {"ok": False, "error": f"туннелей уже {tunnels.MAX_TUNNELS}, больше нельзя"}
+        if drop:
+            data["tunnels"].remove(src)
+        elif src["active"] == name:
+            src["active"] = rest[0] if rest else ""
+        if dst is None:
+            dst = {"id": self._new_tid(data), "name": name,
+                   "mode": "list" if to == "new" else "all",
+                   "active": "", "include": [], "exclude": []}
+            data["tunnels"].append(dst)
+        self._keep_active(dst, tunnels.list_confs(dst["id"]), name)
+        moved = tunnels.conf_path(dst["id"], name)
+        try:
+            os.makedirs(tunnels.conf_dir(dst["id"]), exist_ok=True)
+            os.replace(path, moved)
+        except OSError as exc:
+            return {"ok": False, "error": f"конфиг не перенести: {exc}"}
+        try:
+            tunnels.save(data)
+        except (OSError, ValueError) as exc:
+            # Файл — обратно: tunnels.json прежний и ждёт его на старом месте.
+            try:
+                os.replace(moved, path)
+            except OSError:
+                pass
+            return {"ok": False, "error": str(exc)}
+        self.log(f"→ конфиг {name}.conf из «{src['name']}» перенесён в «{dst['name']}» "
+                 f"({dst['id']})")
+        if drop:
+            self.log(f"→ удалён туннель {src['id']}")
+            self._drop_conf_dir(src["id"])
+        return {"ok": True, "tunnel": dst["id"], "name": name}
 
     def _set_active(self, name, tunnel="", kind=""):
         """Делает name активным конфигом туннеля; '' — снять выбор."""
@@ -1059,12 +1285,7 @@ class Core:
             data = tunnels.load()
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
-        ids = {t["id"] for t in data["tunnels"]}
-        n = 1
-        # Папка без туннеля — конфиги после оборванного удаления: их не подбираем.
-        while f"t{n}" in ids or os.path.exists(tunnels.conf_dir(f"t{n}")):
-            n += 1
-        tid = f"t{n}"
+        tid = self._new_tid(data)
         data["tunnels"].append({"id": tid, "name": name, "mode": mode,
                                 "active": "", "include": [], "exclude": []})
         r = self._save_tunnels(data, f"добавлен туннель {tid}")
@@ -1100,15 +1321,19 @@ class Core:
         data["tunnels"].remove(t)
         r = self._save_tunnels(data, f"удалён туннель {t['id']}")
         if r["ok"]:
-            # После записи: сбой оставит папку без туннеля, а не туннель без
-            # конфигов. Такую папку _add_tunnel обходит.
-            try:
-                shutil.rmtree(tunnels.conf_dir(t["id"]))
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                self.log(f"!! не удалить конфиги туннеля {t['id']}: {exc}")
+            self._drop_conf_dir(t["id"])
         return r
+
+    def _drop_conf_dir(self, tid):
+        """Папка конфигов удалённого туннеля — после записи tunnels.json: сбой
+        оставит папку без туннеля, а не туннель без конфигов. Такую папку
+        _new_tid обходит."""
+        try:
+            shutil.rmtree(tunnels.conf_dir(tid))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.log(f"!! не удалить конфиги туннеля {tid}: {exc}")
 
     def _move_tunnel(self, tunnel, step):
         """Сдвигает туннель на step позиций: порядок в файле — порядок правил."""
