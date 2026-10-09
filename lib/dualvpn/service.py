@@ -156,7 +156,13 @@ class Core:
         threading.Thread(target=self._watch, daemon=True).start()
         if self.autostart_enabled():
             self.log("→ автоподключение включено")
-            threading.Thread(target=self._do_start, daemon=True).start()
+            # Служба стартует при загрузке раньше сети: 9 октября в 08:19 первая
+            # попытка упала на «нет маршрута по умолчанию», и VPN так и стоял
+            # красным, пока его не включили руками. Повторы сторож тратит, только
+            # когда шлюз появился, — то есть ждёт сеть.
+            threading.Thread(target=self._do_start,
+                             kwargs={"retries": RECONNECT_TRIES},
+                             daemon=True).start()
 
     def shutdown(self):
         """Остановка службы. Туннель снимаем обязательно.

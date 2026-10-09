@@ -370,10 +370,12 @@ def test_без_windll_тёмное_меню_ничего_не_делает(monk
     tray._dark_menus()
 
 
-def test_кружки_без_vpn_берут_итог_прошлой_проверки():
+def test_кружки_без_vpn_красный_только_не_работавший_в_прошлый_раз():
+    """Зелёный «раньше работал» читался как «работает сейчас»: 9 октября
+    при упавшем автоподключении оба кружка горели зелёными, а корп был мёртв."""
     st = {"up": False, "last": {"corp": "error", "personal": "up"}}
 
-    assert tray._conf_colors(st, True, frozenset()) == ("error", "up")
+    assert tray._conf_colors(st, True, frozenset()) == ("error", "off")
 
 
 def test_кружки_без_vpn_и_без_итога_серые():

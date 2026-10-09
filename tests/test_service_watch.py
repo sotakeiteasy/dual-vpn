@@ -6,6 +6,7 @@ Core без службы: туннель — заглушка, аплинк кл
 
 import json
 import threading
+import types
 
 import pytest
 
@@ -274,6 +275,39 @@ def test_поднялся_на_повторе_повторы_прекращаю�
     assert core.tunnel.starts == 2
     assert core.tunnel.uplink == HOME
     assert core._retry_left == 0
+
+
+def test_автоподключение_без_сети_ждёт_шлюз_и_повторяет(monkeypatch):
+    """Служба стартует при загрузке раньше сети: 9 октября первая попытка упала
+    на «нет маршрута по умолчанию», и VPN стоял выключенным до ручного включения."""
+    core = _core(monkeypatch)
+    core.tunnel.uplink = None
+    core.prober.set(iface=None, gw="")
+    core.server = types.SimpleNamespace(serve_forever=lambda: None)
+    started = []
+
+    def thread(target, kwargs=None, daemon=None):
+        return types.SimpleNamespace(
+            start=lambda: started.append((target, kwargs or {})))
+
+    monkeypatch.setattr(service, "threading", types.SimpleNamespace(Thread=thread))
+    monkeypatch.setattr(service.winnet, "on_error", None)
+    monkeypatch.setattr(core, "_migrate", lambda: None)
+    monkeypatch.setattr(service.Core, "autostart_enabled", staticmethod(lambda: True))
+    core.start()
+    target, kwargs = started[-1]
+
+    core.tunnel.fail = True
+    target(**kwargs)
+    state = _rounds(core, service.UPLINK_SETTLE * 3)
+    assert core.tunnel.starts == 1
+
+    core.tunnel.fail = False
+    _net(core, HOME)
+    _rounds(core, 1, state)
+
+    assert core.tunnel.starts == 2
+    assert core.tunnel.uplink == HOME
 
 
 def test_выключение_человеком_отменяет_повторы(monkeypatch):
