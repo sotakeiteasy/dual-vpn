@@ -183,18 +183,62 @@ def test_ярлык_без_прав_при_живом_трее_открывае�
     assert elevated == []
 
 
-def test_ярлык_без_прав_без_трея_перезапускается_с_правами(monkeypatch):
+def _no_tray_yet(monkeypatch, task, listened=True):
+    """Ярлык без прав, трея нет; task — запустилась ли задача автозапуска."""
     _admin(monkeypatch, admin=False)
     monkeypatch.setattr(tray.instance, "claim", _no_claim)
     monkeypatch.setattr(tray.instance, "exists", lambda: False)
-    sent = _signals(monkeypatch)
+    monkeypatch.setattr(tray, "_run_task", lambda: task)
+    sent = _signals(monkeypatch, listened=listened)
     elevated = []
     monkeypatch.setattr(tray, "_relaunch_elevated", lambda: elevated.append(True))
     monkeypatch.setattr(tray, "Tray", _no_tray)
+    return sent, elevated
+
+
+def test_ярлык_без_прав_без_трея_и_задачи_перезапускается_с_правами(monkeypatch):
+    sent, elevated = _no_tray_yet(monkeypatch, task=False)
 
     tray.run()
     assert elevated == [True]
     assert sent == []
+
+
+def test_ярлык_без_трея_поднимает_его_задачей_без_uac(monkeypatch):
+    sent, elevated = _no_tray_yet(monkeypatch, task=True)
+
+    tray.run()
+    assert sent == [tray.instance.TRAY_OPEN]
+    assert elevated == []
+
+
+def test_трей_из_задачи_не_ответил_тогда_uac(monkeypatch):
+    sent, elevated = _no_tray_yet(monkeypatch, task=True, listened=False)
+
+    tray.run()
+    assert sent == [tray.instance.TRAY_OPEN]
+    assert elevated == [True]
+
+
+def test_вход_без_прав_поднимает_трей_задачей_без_окна(monkeypatch):
+    sent, elevated = _no_tray_yet(monkeypatch, task=True)
+
+    tray.run(background=True)
+    assert sent == []
+    assert elevated == []
+
+
+def test_задача_запускается_schtasks_по_имени(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **_kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=1)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert tray._run_task() is False
+    assert calls[0][0].lower().endswith("schtasks.exe")
+    assert calls[0][1:] == ["/Run", "/TN", tray.TRAY_TASK]
 
 
 def test_первый_запуск_и_сбой_мьютекса_запускают_трей(monkeypatch):

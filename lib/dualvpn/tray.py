@@ -35,6 +35,10 @@ WINDOW_SHOW_WAIT = 5.0
 WARM_AFTER = 10.0
 # Сколько второй запуск ждёт, пока первый трей начнёт слушать «покажи окно».
 OPEN_SIGNAL_WAIT = 2.0
+# Задача автозапуска трея (dualvpn.iss: RegisterTrayTask) и сколько ярлык
+# ждёт трей, запущенный ею: планировщик и импорт pystray — несколько секунд.
+TRAY_TASK = "DualVPN Tray"
+TASK_OPEN_WAIT = 15.0
 
 # Пределы полей NOTIFYICONDATA с завершающим нулём. pystray их не обрезает:
 # строка длиннее — ValueError, и падает тот поток, который менял подпись.
@@ -970,6 +974,24 @@ def already_running(background=False):
     return True
 
 
+def _run_task():
+    """Запускает трей задачей автозапуска. У неё наивысшие права, и запустить
+    свою задачу обычный пользователь может без UAC. False — задачи нет
+    (портативная версия, автозапуск снят при установке) или она не запустилась.
+    """
+    import subprocess
+
+    exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                       "System32", "schtasks.exe")
+    try:
+        r = subprocess.run([exe, "/Run", "/TN", TRAY_TASK], capture_output=True,
+                           timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
 def _relaunch_elevated():
     """Тот же запуск с правами администратора (UAC), без ожидания.
 
@@ -989,8 +1011,15 @@ def run(background=False):
         return
     # Ярлык запускает трей без прав (в манифесте их нет — иначе UAC спрашивал
     # бы и тогда, когда трей уже есть и нужно только показать окно). Трея нет —
-    # теперь права нужны.
+    # теперь права нужны: сначала задачей автозапуска, без UAC; без неё или
+    # если трей так и не ответил — через UAC. Второй трей мьютекс не пустит.
     if not window._is_admin():
+        if _run_task():
+            if background:
+                return
+            instance.allow_foreground()
+            if instance.signal(instance.TRAY_OPEN, wait=TASK_OPEN_WAIT):
+                return
         _relaunch_elevated()
         return
     Tray().run(background)
