@@ -99,6 +99,25 @@ def _call(op, **payload):
         sys.exit(1)
 
 
+def _apply():
+    """Выбранный конфиг — сразу на живой VPN: служба перезапускает только
+    процесс туннеля, у которого он сменился (решение #14)."""
+    r = _call("apply")
+    if not r.get("ok"):
+        print(f"не вышло: {r.get('error')}")
+        return 1
+    applied = r.get("applied")
+    if applied == "off":
+        print("  VPN выключен — применится при включении")
+    elif applied == "sides":
+        names = ", ".join(r.get("restarted") or [])
+        print(f"  перезапущен процесс: {names}" if names
+              else "  перезапускать нечего: конфиг уже в работе")
+    elif applied == "full":
+        print("  VPN перезапущен")
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else "status"
@@ -205,18 +224,22 @@ def main(argv=None):
             print("укажи туннель и конфиг: dualvpn use home nl-1")
             return 1
         r = _call("set-active", tunnel=argv[1], name=argv[2])
-        print(f"→ туннель {r.get('tunnel')}: {argv[2]}" if r.get("ok")
-              else f"не вышло: {r.get('error')}")
-        return 0 if r.get("ok") else 1
+        if not r.get("ok"):
+            print(f"не вышло: {r.get('error')}")
+            return 1
+        print(f"→ туннель {r.get('tunnel')}: {argv[2]}")
+        return _apply()
 
     if cmd == "profile":
         if len(argv) < 2:
             print("укажи имя: dualvpn profile nl-1")
             return 1
         r = _call("set-profile", profile=argv[1])
-        print(f"→ основной туннель: {argv[1]}" if r.get("ok")
-              else f"не вышло: {r.get('error')}")
-        return 0 if r.get("ok") else 1
+        if not r.get("ok"):
+            print(f"не вышло: {r.get('error')}")
+            return 1
+        print(f"→ основной туннель: {argv[1]}")
+        return _apply()
 
     if cmd == "log":
         n = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 200

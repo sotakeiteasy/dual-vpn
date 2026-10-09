@@ -39,15 +39,17 @@ def test_use_выбирает_конфиг_туннеля(sent, capsys):
 
     assert cli.main(["use", "Личный", "nl-1"]) == 0
 
-    assert sent == [("set-active", {"tunnel": "Личный", "name": "nl-1"})]
+    assert sent[0] == ("set-active", {"tunnel": "Личный", "name": "nl-1"})
     assert "home: nl-1" in capsys.readouterr().out
 
 
-def test_use_отказ_службы_код_ошибки(sent, capsys):
+def test_use_отказ_службы_код_ошибки_и_не_применяет(sent, capsys):
     sent.replies["set-active"] = {"ok": False, "error": "нет туннеля 'x'"}
 
     assert cli.main(["use", "x", "nl-1"]) == 1
+
     assert "нет туннеля 'x'" in capsys.readouterr().out
+    assert [op for op, _ in sent] == ["set-active"]
 
 
 def test_use_без_конфига_не_зовёт_службу(sent):
@@ -57,7 +59,38 @@ def test_use_без_конфига_не_зовёт_службу(sent):
 
 def test_profile_остаётся_алиасом(sent):
     assert cli.main(["profile", "nl-1"]) == 0
-    assert sent == [("set-profile", {"profile": "nl-1"})]
+    assert sent[0] == ("set-profile", {"profile": "nl-1"})
+
+
+@pytest.mark.parametrize("argv, first", [
+    (["use", "home", "nl-1"], "set-active"),
+    (["profile", "nl-1"], "set-profile"),
+])
+def test_выбор_конфига_сразу_применяется(sent, argv, first):
+    assert cli.main(argv) == 0
+    assert [op for op, _ in sent] == [first, "apply"]
+
+
+@pytest.mark.parametrize("reply, shown", [
+    ({"ok": True, "applied": "off"}, "применится при включении"),
+    ({"ok": True, "applied": "sides", "restarted": ["home"]}, "перезапущен процесс: home"),
+    ({"ok": True, "applied": "sides", "restarted": []}, "перезапускать нечего"),
+    ({"ok": True, "applied": "full"}, "VPN перезапущен"),
+])
+def test_use_показывает_как_применилось(sent, capsys, reply, shown):
+    sent.replies["apply"] = reply
+
+    assert cli.main(["use", "home", "nl-1"]) == 0
+
+    assert shown in capsys.readouterr().out
+
+
+def test_ошибка_применения_код_ошибки(sent, capsys):
+    sent.replies["apply"] = {"ok": False, "applied": "sides", "restarted": ["home"],
+                             "error": "процесс «Личный» не поднялся"}
+
+    assert cli.main(["profile", "nl-1"]) == 1
+    assert "не вышло: процесс «Личный» не поднялся" in capsys.readouterr().out
 
 
 def test_list_по_туннелям_с_активным(sent, capsys):
