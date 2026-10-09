@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-from . import instance, ipc, paths, window
+from . import instance, ipc, paths, tunnels, window
 
 # Включение у службы идёт ~1,2 с: при опросе раз в три секунды жёлтый
 # «включаю» почти не попадал в опрос, если включали из окна.
@@ -95,14 +95,16 @@ class Tray:
         self._state_lock = threading.Lock()
         # Меню и кружки — только в потоке значка (см. WM_SYNC_MENU).
         self._menu_open = False
-        # Конфиги, чей ответ на проверку при открытии меню ещё не пришёл.
+        # id туннелей, чей ответ на проверку при открытии меню ещё не пришёл.
         self._checking = frozenset()
         self._check_gen = 0
-        # Задан ли хост проверки рабочей сети. Знает только ответ check;
-        # до первой проверки считаем, что задан.
-        self.corp_probe = True
-        self._corp_item = None
-        self._personal_item = None
+        # id туннелей на момент открытия меню: номер бита в lParam WM_CHECKED.
+        self._check_ids = ()
+        # Пункты туннелей по id и id в порядке меню. Оба меняет только
+        # _sync_menu: _paint_dots ищет пункт по identity в list(self.icon.menu), и
+        # список между перестройками обязан совпадать с показанным HMENU.
+        self._tunnel_items = {}
+        self._menu_ids = ()
         self.stop_event = threading.Event()
 
     # ------------------------------------------------------------- статус
@@ -153,7 +155,7 @@ class Tray:
         """То, от чего зависят подписи, галочки и доступность пунктов меню."""
         st = self.status
         return (bool(st), bool(st.get("up")), bool(st.get("busy")),
-                _conf_labels(st))
+                tuple((t["id"], _conf_label(t)) for t in st.get("tunnels") or []))
 
     def _post(self, msg, wparam=0, lparam=0):
         """Сообщение окну значка. Окна ещё нет — опрос повторит."""
@@ -174,6 +176,7 @@ class Tray:
         sig = self._menu_sig()
         if sig != self._last_menu_sig:
             self._last_menu_sig = sig
+            self._menu_ids = tuple(t["id"] for t in self.status.get("tunnels") or [])
             self.icon.update_menu()
 
     def _refresh_icon(self):
@@ -197,10 +200,12 @@ class Tray:
         if not st.get("up"):
             err = st.get("last_error")
             return "DualVPN — выключен" + (f" ({err})" if err else "")
-        who = st.get("profile") or "personal"
+        main = tunnels.by_kind(st.get("tunnels") or [], "personal")
+        name = main["name"] if main else "основной"
+        who = st.get("profile") or name
         exit_ip = st.get("exit_ip") or "—"
         if st.get("out") == "direct":
-            return "DualVPN — запасной выход напрямую: личный не работает"
+            return f"DualVPN — запасной выход напрямую: «{name}» не работает"
         if st.get("exit_state") == "leak":
             return f"DualVPN — УТЕЧКА, виден адрес провайдера ({exit_ip})"
         return f"DualVPN — работает · {who} · выход {exit_ip}"
@@ -208,16 +213,18 @@ class Tray:
     # -------------------------------------------------------------- меню
 
     def _menu(self):
-        """Меню строится один раз, а меняется через функции в полях.
+        """Меню меняется через функции в полях, а список пунктов —
+        функцией в pystray.Menu: её pystray зовёт при каждой перестройке.
 
         Это не стилистика: pystray перечитывает text/enabled/checked при каждом
         показе меню, только если там callable. Со статичными строками
         update_menu() не поменял бы ни подписи, ни галочки — пункт так и остался
-        бы «Включить» на поднятом туннеле.
+        бы «Включить» на поднятом туннеле. Пункты создаются один раз:
+        _paint_dots ищет их место в HMENU по identity.
         """
         import pystray
 
-        return pystray.Menu(
+        head = (
             pystray.MenuItem(
                 lambda _i: "Выключить" if self.status.get("up") else "Включить",
                 self.on_toggle,
@@ -229,25 +236,37 @@ class Tray:
                 enabled=lambda _i: bool(self.status.get("up"))
                 and not self.status.get("busy")),
             pystray.Menu.SEPARATOR,
-            *self._conf_items(pystray),
+        )
+        tail = (
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Открыть панель управления…", self.on_window),
             pystray.MenuItem("Закрыть", self.on_quit),
         )
+        return pystray.Menu(
+            lambda: (*head, *self._conf_items(pystray), *tail))
 
     def _conf_items(self, pystray):
-        """Пункты конфигов: имя и кружок статуса слева, клик — другой файл.
+        """Пункты туннелей в порядке _menu_ids: «<имя>: <конфиг>» и кружок
+        статуса слева, клик — добавить файл в этот туннель.
 
         Кружок ставит _paint_dots, а не pystray: картинок у пунктов pystray
-        не умеет. Ссылки на пункты нужны, чтобы найти их место в HMENU.
+        не умеет. Пункт удалённого туннеля забываем.
         """
-        self._corp_item = pystray.MenuItem(
-            lambda _i: _conf_labels(self.status)[0],
-            lambda: self.on_add_config("corp"), enabled=self._can_edit)
-        self._personal_item = pystray.MenuItem(
-            lambda _i: _conf_labels(self.status)[1],
-            lambda: self.on_add_config("personal"), enabled=self._can_edit)
-        return self._corp_item, self._personal_item
+        items = {}
+        for tid in self._menu_ids:
+            items[tid] = self._tunnel_items.get(tid) or pystray.MenuItem(
+                self._label_of(tid), self._add_to(tid), enabled=self._can_edit)
+        self._tunnel_items = items
+        return tuple(items.values())
+
+    def _label_of(self, tid):
+        """Подпись пункта туннеля tid — из текущего статуса."""
+        return lambda _i: _conf_label(_tunnel_of(self.status, tid) or {})
+
+    def _add_to(self, tid):
+        """Действие пункта без аргументов: pystray считает co_argcount, и
+        lambda tid=tid он вызвал бы с значком вместо id."""
+        return lambda: self.on_add_config(tid)
 
     # ------------------------------------------------------ кружки в меню
 
@@ -274,14 +293,16 @@ class Tray:
             if lparam != win32.WM_RBUTTONUP:
                 return orig(wparam, lparam)
             self._check_gen += 1
-            self._checking = (frozenset(ipc.CHECK_SIDES)
+            self._check_ids = tuple(t["id"] for t in self.status.get("tunnels") or [])
+            self._checking = (frozenset(self._check_ids)
                               if self.status.get("up") else frozenset())
             try:
                 self._sync_menu()
                 self._paint_dots()
             except Exception:                              # noqa: BLE001
                 pass                       # без кружков, но меню откроется
-            threading.Thread(target=self._check_work, args=(self._check_gen,),
+            threading.Thread(target=self._check_work,
+                             args=(self._check_gen, self._check_ids),
                              daemon=True).start()
             self._menu_open = True
             try:
@@ -294,13 +315,14 @@ class Tray:
         handlers[WM_SYNC_MENU] = self._sync_menu
         handlers[WM_CHECKED] = self._on_checked
 
-    def _check_work(self, gen):
-        """Проверка при открытии меню. Кружок конфига перекрашивается, как
-        только проверен он сам: молчащий рабочий не держит рыжим личный."""
+    def _check_work(self, gen, ids):
+        """Проверка при открытии меню. Кружок туннеля перекрашивается, как
+        только проверен он сам: молчащий рабочий не держит рыжим личный.
+        ids — id туннелей на момент открытия: по ним считаются биты lParam."""
         def on_side(st, pending):
             with self._state_lock:
                 self.status = st
-            self._post(WM_CHECKED, gen, _side_bits(pending))
+            self._post(WM_CHECKED, gen, _side_bits(pending, ids))
 
         try:
             reply = ipc.check_by_side(on_side)
@@ -309,33 +331,31 @@ class Tray:
         if reply.get("status"):
             with self._state_lock:
                 self.status = reply["status"]
-        if "corp_probe" in reply:
-            self.corp_probe = bool(reply["corp_probe"])
         self._post(WM_CHECKED, gen, 0)
 
     def _on_checked(self, wparam, lparam):
         # Ответ прошлого открытия меню не гасит рыжий у текущего.
         if wparam != self._check_gen:
             return
-        # Только убавляем: поздний ответ стороны не вернёт рыжий готовой.
-        self._checking &= _sides_of(lparam)
+        # Только убавляем: поздний ответ туннеля не вернёт рыжий готовому.
+        self._checking &= _sides_of(lparam, self._check_ids)
         if self._menu_open:
             self._paint_dots()
             _redraw_menus(self.icon._hwnd)
 
     def _paint_dots(self):
-        """Кружки в пунктах конфигов текущего HMENU. Поток значка."""
+        """Кружки в пунктах туннелей текущего HMENU. Поток значка."""
         handle = self.icon._menu_handle
         if not handle:
             return
         items = list(self.icon.menu)
-        names = _conf_names(self.status)
-        colors = _conf_colors(self.status, self.corp_probe, self._checking)
-        for item, name, color in zip((self._corp_item, self._personal_item),
-                                     names, colors):
+        colors = _conf_colors(self.status, self._checking)
+        for tid, item in self._tunnel_items.items():
+            t = _tunnel_of(self.status, tid)
             if item in items:
                 _set_item_bitmap(handle[0], items.index(item),
-                                 _dot_bitmap(color) if name else None)
+                                 _dot_bitmap(colors[tid])
+                                 if t and _conf_name(t) else None)
 
     # -------------------------------------------------------------- команды
 
@@ -402,29 +422,29 @@ class Tray:
         # чтобы новый файл подействовал сразу, а не после ручного перезапуска.
         return bool(self.status) and not self.status.get("busy")
 
-    def on_add_config(self, kind):
-        """Файл .conf в службу. Тип задаёт пункт меню, имя чистит служба:
-        рабочий заменяет прежний, личный становится активным. Был поднят
-        туннель — перезапускаем его с новым конфигом."""
+    def on_add_config(self, tid):
+        """Файл .conf в туннель tid через службу: имя чистит она, добавленный
+        становится активным. Был поднят туннель — перезапускаем его с новым
+        конфигом."""
+        title = (_tunnel_of(self.status, tid) or {}).get("name") or tid
+
         def work():
             picked = _pick_file(
-                "Рабочий конфиг WireGuard" if kind == "corp"
-                else "Личный конфиг WireGuard / AmneziaWG",
+                f"Конфиг туннеля «{title}» (WireGuard / AmneziaWG)",
                 "Конфиги WireGuard (*.conf)\0*.conf\0Все файлы\0*.*\0")
             if not picked:
                 return
             path, text = picked
             name = os.path.splitext(os.path.basename(path))[0]
-            reply = self._call("add-config", name=name, text=text, kind=kind)
+            reply = self._call("add-config", name=name, text=text, tunnel=tid)
             if reply is None:
                 return
-            what = "рабочий" if kind == "corp" else "личный"
             if self.status.get("up"):
-                self._notify(f"{what} конфиг заменён: {reply.get('name')}.conf,"
+                self._notify(f"«{title}»: конфиг {reply.get('name')}.conf,"
                              " перезапускаю VPN")
                 self.on_restart()
             else:
-                self._notify(f"{what} конфиг добавлен: {reply.get('name')}.conf")
+                self._notify(f"«{title}»: добавлен конфиг {reply.get('name')}.conf")
         threading.Thread(target=work, daemon=True).start()
 
     def _call(self, op, **payload):
@@ -645,62 +665,66 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def _conf_names(st):
-    """(рабочий, личный): имена конфигов для меню, None — показывать нечего.
+def _tunnel_of(st, tid):
+    """Туннель tid из st["tunnels"], иначе None."""
+    return next((t for t in st.get("tunnels") or [] if t["id"] == tid), None)
 
-    Личный — выбранный, а без выбора единственный, как берёт его сборка.
-    Из нескольких без выбора не показываем ни один: выбирают их в окне.
+
+def _conf_name(t):
+    """Имя конфига туннеля t для меню, None — показывать нечего.
+
+    Выбранный, а без выбора единственный, как берёт его сборка
+    (tunnels.active_conf). Из нескольких без выбора не показываем ни один:
+    выбирают их в окне.
     """
-    corp = st.get("corp") or []
-    names = st.get("profiles") or []
-    active = st.get("profile") or (names[0] if len(names) == 1 else "")
-    return (corp[0] if corp else None, active if active in names else None)
+    confs = t.get("confs") or []
+    active = t.get("active") or (confs[0] if len(confs) == 1 else "")
+    return active if active in confs else None
 
 
-def _conf_labels(st):
-    """Подписи пунктов конфигов: имя файла или приглашение добавить."""
-    corp, personal = _conf_names(st)
-    return (_clip(corp, NAME_MAX) if corp else "Добавить рабочий конфиг…",
-            _clip(personal, NAME_MAX) if personal else "Добавить личный конфиг…")
+def _conf_label(t):
+    """Подпись пункта туннеля: «<имя>: <конфиг>» или приглашение добавить."""
+    name, conf = _clip(t.get("name") or t.get("id"), NAME_MAX), _conf_name(t)
+    return f"{name}: {_clip(conf, NAME_MAX)}" if conf else f"{name}: добавить конфиг…"
 
 
-def _side_bits(sides):
-    """Набор сторон — в число для lParam сообщения окну значка."""
-    return sum(1 << i for i, s in enumerate(ipc.CHECK_SIDES) if s in sides)
+def _side_bits(pending, ids):
+    """Набор id туннелей — в число для lParam сообщения окну значка: бит
+    i — ids[i]. Туннелей не больше tunnels.MAX_TUNNELS, в lParam помещаются."""
+    return sum(1 << i for i, tid in enumerate(ids) if tid in pending)
 
 
-def _sides_of(bits):
-    return frozenset(s for i, s in enumerate(ipc.CHECK_SIDES) if bits >> i & 1)
+def _sides_of(bits, ids):
+    return frozenset(tid for i, tid in enumerate(ids) if bits >> i & 1)
 
 
-def _conf_colors(st, corp_probe, checking):
-    """(рабочий, личный): ключи COLORS для кружков.
+def _conf_colors(st, checking):
+    """{id туннеля: ключ COLORS} для кружков.
 
     VPN выключен — серые, а красный тот, что в прошлую проверку не работал
-    (st["last"]): как плашки окна. Зелёный «раньше работал» читался как
+    (last): как плашки окна. Зелёный «раньше работал» читался как
     «работает сейчас», хотя сервер мог умереть с тех пор.
-    checking — конфиги, чей ответ трей ещё ждёт: они рыжие, как и те, что
+    checking — id, чей ответ трей ещё ждёт: они рыжие, как и те, что
     служба проверяет сама. Каждый по себе: молчащий рабочий не красит рыжим
-    работающий личный. Личный работает, если
-    выход виден и он не мимо туннеля. Рабочий — если хост проверки ответил
-    по DNS или HTTP; без CORP_PROBE ответить нечему, и серый честнее красного.
+    работающий личный. Итог — check службы; у основного красный и на
+    запасном выходе напрямую, случившемся после проверки. «По списку» без
+    домена в «пускать» ответить нечему — серый честнее красного.
     """
+    items = st.get("tunnels") or []
     if not st.get("up"):
-        last = st.get("last") or {}
-        return tuple("error" if last.get(k) == "error" else "off"
-                     for k in ("corp", "personal"))
+        return {t["id"]: "error" if t.get("last") == "error" else "off" for t in items}
     if st.get("busy"):
-        return "busy", "busy"
-    personal = ("up" if st.get("exit_ip") and st.get("out") != "direct"
-                and st.get("exit_state") not in ("leak", "direct") else "error")
-    if st.get("corp_ip") or st.get("corp_http"):
-        corp = "up"
-    else:
-        corp = "error" if corp_probe else "off"
-    busy = {s for s in ipc.CHECK_SIDES
-            if s in checking or st.get(f"checking_{s}")}
-    return ("busy" if "corp" in busy else corp,
-            "busy" if "personal" in busy else personal)
+        return {t["id"]: "busy" for t in items}
+    out = {}
+    for t in items:
+        check = t.get("check")
+        if t["id"] in checking or t.get("checking"):
+            out[t["id"]] = "busy"
+        elif check == "up" and t.get("mode") == "all" and st.get("out") == "direct":
+            out[t["id"]] = "error"
+        else:
+            out[t["id"]] = check if check in ("up", "error") else "off"
+    return out
 
 
 @functools.lru_cache(maxsize=None)

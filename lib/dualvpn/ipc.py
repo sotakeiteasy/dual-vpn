@@ -279,16 +279,15 @@ def call(op, **payload):
 
 # Как часто check_by_side спрашивает статус, пока идёт проверка.
 CHECK_POLL = 0.3
-CHECK_SIDES = ("corp", "personal")
 
 
 def check_by_side(on_side, poll=CHECK_POLL):
-    """Команда check, а пока она идёт — статус: каждый конфиг отдаём, как
-    только проверен он сам, а не оба по самому долгому.
+    """Команда check, а пока она идёт — статус: каждый туннель отдаём, как
+    только проверен он сам, а не все по самому долгому.
 
-    on_side(st, pending) — сторона стала свежей; pending — какие ещё ждут.
-    Возвращает ответ check, как call. Раньше рабочий, который молчит до
-    таймаута, держал «проверяю» и у работающего личного.
+    on_side(st, pending) — туннель стал свежим; pending — id тех, что ещё
+    ждут (из st["tunnels"]). Возвращает ответ check, как call. Раньше рабочий,
+    который молчит до таймаута, держал «проверяю» и у работающего личного.
     """
     st = call("status").get("status") or {}
     # Проверка уже идёт — check дождётся её, и её ответ тоже свежий; нет —
@@ -304,7 +303,7 @@ def check_by_side(on_side, poll=CHECK_POLL):
 
     worker = threading.Thread(target=work, daemon=True)
     worker.start()
-    pending = set(CHECK_SIDES)
+    pending = {t["id"] for t in st.get("tunnels") or []}
     while pending:
         worker.join(poll)
         if not worker.is_alive():
@@ -313,7 +312,9 @@ def check_by_side(on_side, poll=CHECK_POLL):
             st = call("status").get("status") or {}
         except NotRunning:
             continue
-        fresh = {s for s in pending if st.get(f"{s}_seq", 0) >= need}
+        seqs = {t["id"]: t.get("seq", 0) for t in st.get("tunnels") or []}
+        # Туннель удалили посреди проверки — ждать его нечего.
+        fresh = {tid for tid in pending if seqs.get(tid, need) >= need}
         if fresh:
             pending -= fresh
             on_side(st, frozenset(pending))

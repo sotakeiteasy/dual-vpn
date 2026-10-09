@@ -47,9 +47,8 @@ class _Alive:
 
 
 class _Tunnel:
-    # Как у настоящего: основной — по main_id, «по списку» — первый прочий.
+    # Как у настоящего: основной — по main_id.
     main = tunnel.Tunnel.main
-    first_list = tunnel.Tunnel.first_list
 
     def __init__(self, prober):
         self.prober = prober
@@ -614,7 +613,7 @@ def _corp_dead():
 
 def _corp_says(monkeypatch, core, ip):
     asked = []
-    monkeypatch.setattr(core.prober, "corp_answer", lambda: asked.append(1) or ip)
+    monkeypatch.setattr(core.prober, "tunnel_answer", lambda tid: asked.append(tid) or ip)
     return asked
 
 
@@ -628,10 +627,26 @@ def test_таймауты_корпа_при_живом_корпе_не_пере�
     _rounds(core, 1)
 
     assert core.tunnel.restarts == []
-    assert asked == [1]
-    [line] = _said(core, "корп отвечает")
+    assert asked == ["work"]
+    [line] = _said(core, "«Работа» отвечает")
     assert "wg-work" in line and "DNS 10.20.0.4" in line
     assert core._dead_hits == ()
+
+
+def test_таймауты_второго_по_списку_спрашивают_его_dns(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    lab = tunnel.Side("lab", "Лаб")
+    lab.proc = _Alive()
+    core.tunnel.sides.append(lab)
+    log = _side_log(core, tmp_path, "lab")
+    asked = _corp_says(monkeypatch, core, "10.30.0.4")
+    _append(log, *(line.replace("wg-work", "wg-lab") for line in _corp_dead()))
+
+    _rounds(core, 1)
+
+    assert core.tunnel.restarts == []
+    assert asked == ["lab"]
+    assert _said(core, "«Лаб» отвечает")
 
 
 def test_таймауты_корпа_при_молчащем_корпе_перезапускают_только_его(monkeypatch, tmp_path):
@@ -644,8 +659,8 @@ def test_таймауты_корпа_при_молчащем_корпе_пере
 
     assert core.tunnel.restarts == ["work"]
     assert core.tunnel.outs == [] and core.tunnel.starts == 0
-    assert asked == [1]
-    assert not _said(core, "корп отвечает")
+    assert asked == ["work"]
+    assert not _said(core, "отвечает")
 
 
 def test_мёртвый_личный_корп_не_спрашивает(monkeypatch, tmp_path):

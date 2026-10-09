@@ -113,7 +113,46 @@ def test_статус_отдаёт_туннели_без_их_правил(monke
 
     assert core._status()["tunnels"] == [
         {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
-         "confs": ["corp", "old"]}]
+         "confs": ["corp", "old"], "check": "", "answer": "", "seq": 0,
+         "last": "", "checking": False}]
+
+
+def test_итог_проверки_по_туннелям_проверенный_уже_не_ждёт(monkeypatch):
+    core = _core(monkeypatch, up=True)
+    _quiet(monkeypatch, core)
+    _with_tunnels(monkeypatch, {"id": "work", "name": "Работа", "mode": "list"},
+                  {"id": "home", "name": "Личный", "mode": "all"})
+    core.prober._take_slow()
+    seq = core.prober.snapshot()["check_seq"]
+    core.prober.set(checks={"home": {"result": "up", "answer": "185.1.2.3", "seq": seq},
+                            "work": {"result": "error", "answer": "", "seq": seq - 1}})
+
+    st = core._status()
+
+    work, home = st["tunnels"]
+    assert (home["check"], home["answer"], home["checking"]) == ("up", "185.1.2.3", False)
+    assert (work["check"], work["checking"]) == ("error", True)
+    assert "checks" not in st
+
+
+def test_прошлый_итог_по_id_туннеля_до_замены_файла(monkeypatch, tmp_path):
+    core = _core(monkeypatch, up=True)
+    monkeypatch.setattr(service, "LAST_CHECK_FILE", str(tmp_path / "last-check.json"))
+    _with_tunnels(monkeypatch, {"id": "work", "name": "Работа", "mode": "list"},
+                  {"id": "home", "name": "Личный", "mode": "all"},
+                  {"id": "lab", "name": "Лаб", "mode": "list"})
+    monkeypatch.setattr(service.tunnels, "list_confs", lambda tid: [f"{tid}-1"])
+    stamp = {"work-1": 1, "home-1": 1, "lab-1": 1}
+    monkeypatch.setattr(service.Core, "_conf_stamp",
+                        staticmethod(lambda tid, name: stamp[name]))
+
+    core._remember_check({"tunnels": [{"id": "work", "check": "up"},
+                                      {"id": "home", "check": "error"},
+                                      {"id": "lab", "check": "none"}]})
+
+    assert core._last_results() == {"work": "up", "home": "error", "lab": ""}
+    stamp["work-1"] = 2
+    assert core._last_results() == {"work": "", "home": "error", "lab": ""}
 
 
 @pytest.fixture

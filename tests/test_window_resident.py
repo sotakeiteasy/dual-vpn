@@ -53,6 +53,46 @@ def test_показанное_окно_на_ready_проверяет_тунне�
     assert "check" in [op for op, _ in calls]
 
 
+def test_проверка_окна_переводит_туннели_в_стороны_страницы(monkeypatch):
+    """Страница до шага окна знает только corp/personal: второй «по списку»
+    в стороны не попадает."""
+    api, _, _ = _api(monkeypatch)
+    sent = []
+    monkeypatch.setattr(api, "jsn", lambda fn, args: sent.append((fn, args[1])))
+    st = {"tunnels": [{"id": "work", "mode": "list"}, {"id": "lab", "mode": "list"},
+                      {"id": "home", "mode": "all"}]}
+
+    def check_by_side(on_side):
+        for pending in ({"lab", "home"}, {"work"}, set()):
+            on_side(st, frozenset(pending))
+        return {}
+    monkeypatch.setattr(ipc, "check_by_side", check_by_side)
+
+    api._check()
+
+    assert sent == [("checkSides", ["personal"]), ("checkSides", ["corp"]),
+                    ("checkSides", [])]
+
+
+def test_статус_cli_пишет_итог_проверки_у_туннеля(capsys):
+    st = {"up": True, "tunnels": [
+        {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
+         "check": "up", "answer": "10.0.0.8"},
+        {"id": "lab", "name": "Лаб", "mode": "list", "check": "none"},
+        {"id": "dev", "name": "Дев", "mode": "list", "check": "error", "checking": True},
+        {"id": "home", "name": "Личный", "mode": "all", "active": "nl-1", "check": "error"}]}
+
+    cli._print_status(st)
+    cli._print_status({**st, "up": False})
+
+    lines = [l for l in capsys.readouterr().out.splitlines() if "туннель" in l]
+    assert lines[0].endswith("— corp; отвечает 10.0.0.8")
+    assert lines[1].endswith("; не с чем проверить: в «пускать» нет домена")
+    assert lines[2].endswith("; проверяю…")
+    assert lines[3].endswith("— nl-1; молчит")
+    assert lines[4].endswith("— corp")
+
+
 class _Window:
     def __init__(self, shown):
         self.shown = shown

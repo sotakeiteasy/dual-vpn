@@ -4,6 +4,7 @@
 probe_slow (висит, пока тест не отпустит), запись status.json и HTTP-клиент.
 """
 
+import json
 import threading
 import time
 import urllib.error
@@ -159,45 +160,75 @@ def test_check_now_без_идущей_проверки_проверяет_ср�
     assert calls == [1, 1]
 
 
+def _plan(monkeypatch, *items):
+    """Что проверять — без tunnels.json и собранного конфига."""
+    monkeypatch.setattr(probe.Prober, "check_plan", staticmethod(lambda: list(items)))
+
+
+def _p_work(**over):
+    p = {"id": "work", "name": "Работа", "mode": "list", "host": "git.corp.example",
+         "dns": "10.0.0.1", "running": True}
+    p.update(over)
+    return p
+
+
+def _p_home(**over):
+    p = {"id": "home", "name": "Личный", "mode": "all", "host": "", "dns": "",
+         "running": True}
+    p.update(over)
+    return p
+
+
+def _checks(p):
+    return {tid: (c["result"], c["answer"]) for tid, c in p.snapshot()["checks"].items()}
+
+
 def test_части_probe_slow_идут_параллельно_а_не_складываются(monkeypatch):
     started = []
 
     def part(name):
-        def run(self):
-            started.append(name)
+        def run(self, *p):
+            started.append((name, *(x["id"] for x in p)))
             time.sleep(0.3)
         return run
 
-    for name in ("_slow_exit", "_slow_v6", "_slow_corp_dns", "_slow_corp_http"):
+    for name in ("_slow_exit", "_slow_v6", "_slow_dns", "_slow_http"):
         monkeypatch.setattr(probe.Prober, name, part(name))
     monkeypatch.setattr(probe.Prober, "probe_fast", lambda self: None)
+    _plan(monkeypatch, _p_work(), _p_work(id="work-2"), _p_home())
 
     t0 = time.monotonic()
     probe.Prober().probe_slow()
 
     assert time.monotonic() - t0 < 0.9
-    assert sorted(started) == ["_slow_corp_dns", "_slow_corp_http",
-                               "_slow_exit", "_slow_v6"]
+    assert sorted(started) == [("_slow_dns", "work"), ("_slow_dns", "work-2"),
+                               ("_slow_exit",), ("_slow_http", "work"),
+                               ("_slow_http", "work-2"), ("_slow_v6",)]
 
 
-def test_личный_проверен_раньше_молчащего_корпа(monkeypatch):
-    corp_go = threading.Event()
-    for name in ("_slow_exit", "_slow_v6", "_slow_corp_dns"):
+def test_основной_проверен_раньше_молчащего_рабочего(monkeypatch):
+    work_go = threading.Event()
+    for name in ("_slow_exit", "_slow_v6"):
         monkeypatch.setattr(probe.Prober, name, lambda self: None)
-    monkeypatch.setattr(probe.Prober, "_slow_corp_http",
-                        lambda self: corp_go.wait(2))
+    monkeypatch.setattr(probe.Prober, "_slow_dns", lambda self, p: "")
+    monkeypatch.setattr(probe.Prober, "_slow_http",
+                        lambda self, p: work_go.wait(2) and "")
     monkeypatch.setattr(probe.Prober, "probe_fast", lambda self: None)
+    _plan(monkeypatch, _p_work(), _p_home())
     p = probe.Prober()
     check = threading.Thread(target=p.check_now, daemon=True)
     check.start()
 
-    assert _wait(lambda: p.snapshot().get("personal_seq") == 1)
-    assert p.snapshot()["check_seq"] == 1
-    assert p.snapshot().get("corp_seq", 0) == 0
+    assert _wait(lambda: (p.snapshot().get("checks") or {}).get("home", {}).get("seq") == 1)
+    s = p.snapshot()
+    assert s["check_seq"] == 1 and s["personal_seq"] == 1
+    assert "work" not in s["checks"] and s.get("corp_seq", 0) == 0
 
-    corp_go.set()
+    work_go.set()
     check.join(2)
-    assert p.snapshot()["corp_seq"] == 1
+    s = p.snapshot()
+    assert s["checks"]["work"] == {"result": "error", "answer": "", "seq": 1}
+    assert s["corp_seq"] == 1
 
 
 def _exit_services(monkeypatch, answers):
@@ -247,21 +278,31 @@ def test_ipwho_разбирается_в_поля_ipinfo(monkeypatch):
     assert info == {"ip": "1.2.3.4", "country": "NL", "city": "Amsterdam", "org": "AS1"}
 
 
-def _slow_parts(monkeypatch, up=True, **st):
-    """Части probe_slow без сети: каждая кладёт в снимок свою долю st.
-    Быстрый опрос после них видит туннель поднятым, если up."""
+def _slow_parts(monkeypatch, up=True, dns=None, http=None, **st):
+    """Части probe_slow без сети: выход и IPv6 кладут в снимок свою долю
+    st, DNS и HTTPS туннеля отвечают из dns/http {id: ответ}. Быстрый опрос
+    после них видит туннель поднятым, если up. Возвращает список вопросов."""
+    asked = []
+
     def part(*keys):
         def run(self):
             self.set(**{k: st[k] for k in keys if k in st})
         return run
 
+    def answer(how, table):
+        def run(self, p):
+            asked.append((how, p["id"]))
+            return (table or {}).get(p["id"], "")
+        return run
+
     monkeypatch.setattr(probe.Prober, "_slow_exit",
                         part("exit_ip", "exit_country", "exit_org", "exit_state"))
     monkeypatch.setattr(probe.Prober, "_slow_v6", part("v6_leak"))
-    monkeypatch.setattr(probe.Prober, "_slow_corp_dns", part("corp_ip"))
-    monkeypatch.setattr(probe.Prober, "_slow_corp_http", part("corp_http"))
+    monkeypatch.setattr(probe.Prober, "_slow_dns", answer("dns", dns))
+    monkeypatch.setattr(probe.Prober, "_slow_http", answer("http", http))
     monkeypatch.setattr(probe.Prober, "probe_fast",
                         lambda self: self.set(tun=45 if up else None, r_low=up))
+    return asked
 
 
 def _work(**over):
@@ -284,25 +325,111 @@ def _tunnels(monkeypatch, *items):
 
 def test_итог_проверки_сети_в_журнале(monkeypatch):
     _slow_parts(monkeypatch, exit_ip="185.1.2.3", exit_country="NL",
-                exit_state="tunnel", corp_ip="10.1.1.1", corp_http="",
-                v6_leak="2a00::1")
-    _tunnels(monkeypatch, _work(include=["corp.example"]), _home())
+                exit_state="tunnel", v6_leak="2a00::1", dns={"work": "10.1.1.1"})
+    _plan(monkeypatch, _p_work(), _p_home())
     logged = []
 
     probe.Prober(logged.append).probe_slow()
 
     [line] = logged
     assert "выход 185.1.2.3 (NL), tunnel" in line
-    assert "корп DNS 10.1.1.1" in line
-    assert "корп HTTPS молчит" in line
+    assert "«Работа» DNS 10.1.1.1 (" in line
+    assert "HTTPS молчит (" in line
     assert "утечка IPv6 2a00::1" in line
+
+
+def test_итоги_по_туннелям_и_старые_поля_первого_по_списку(monkeypatch):
+    _slow_parts(monkeypatch, exit_ip="185.1.2.3", exit_state="tunnel",
+                dns={"work": "10.1.1.1"}, http={"work-2": "403"})
+    _plan(monkeypatch, _p_work(), _p_work(id="work-2", dns=""), _p_home())
+    p = probe.Prober()
+
+    p.probe_slow()
+
+    assert _checks(p) == {"work": ("up", "10.1.1.1"), "work-2": ("up", "HTTP 403"),
+                          "home": ("up", "185.1.2.3")}
+    s = p.snapshot()
+    assert (s["corp_dns"], s["corp_ip"], s["corp_http"]) == ("10.0.0.1", "10.1.1.1", "")
+
+
+def test_по_списку_без_dns_проверяется_только_https(monkeypatch):
+    asked = _slow_parts(monkeypatch)
+    _plan(monkeypatch, _p_work(dns=""))
+    p = probe.Prober()
+
+    p.probe_slow()
+
+    assert asked == [("http", "work")]
+    assert _checks(p) == {"work": ("error", "")}
+
+
+@pytest.mark.parametrize("st", [
+    {},
+    {"exit_ip": "5.6.7.8", "exit_state": "leak"},
+    {"exit_ip": "5.6.7.8", "exit_state": "direct"},
+])
+def test_основной_без_выхода_с_утечкой_или_напрямую_молчит(monkeypatch, st):
+    _slow_parts(monkeypatch, **st)
+    _plan(monkeypatch, _p_home())
+    p = probe.Prober()
+
+    p.probe_slow()
+
+    assert _checks(p)["home"][0] == "error"
+
+
+def test_запасной_выход_напрямую_у_основного_молчит(monkeypatch):
+    _slow_parts(monkeypatch, exit_ip="185.1.2.3", exit_state="tunnel")
+    _plan(monkeypatch, _p_home())
+    p = probe.Prober()
+    p.set(out=probe.buildconfig.DIRECT_TAG)
+
+    p.probe_slow()
+
+    assert _checks(p)["home"][0] == "error"
+
+
+def test_не_поднятый_туннель_не_проверяется_и_без_итога(monkeypatch):
+    asked = _slow_parts(monkeypatch, exit_ip="185.1.2.3", exit_state="tunnel")
+    _plan(monkeypatch, _p_work(running=False), _p_home(running=False))
+    logged = []
+    p = probe.Prober(logged.append)
+
+    p.probe_slow()
+
+    assert asked == []
+    assert _checks(p) == {"work": ("", ""), "home": ("", "")}
+    assert "«Работа»" not in logged[0]
+
+
+def test_итоги_удалённых_туннелей_не_остаются(monkeypatch):
+    _slow_parts(monkeypatch, exit_ip="185.1.2.3", exit_state="tunnel")
+    _plan(monkeypatch, _p_home())
+    p = probe.Prober()
+    p.set(checks={"gone": {"result": "up", "answer": "10.0.0.8", "seq": 1}})
+
+    p.probe_slow()
+
+    assert set(p.snapshot()["checks"]) == {"home"}
+
+
+def test_туннель_опустился_итоги_стираются_номера_остаются(monkeypatch):
+    net = {"up": False}
+    p, loop = _run_loop(monkeypatch, net, lambda self: None)
+    p.set(checks={"work": {"result": "up", "answer": "10.0.0.8", "seq": 3}})
+
+    try:
+        assert _wait(lambda: p.snapshot()["checks"]["work"]["result"] == "")
+        assert p.snapshot()["checks"]["work"] == {"result": "", "answer": "", "seq": 3}
+    finally:
+        _stop_loop(p, loop)
 
 
 def test_туннель_опустился_во_время_проверки_выход_не_tunnel(monkeypatch):
     # 13:52 06.10: проверку начали при живом туннеле, кончили после его
     # остановки — адрес провайдера ушёл в журнал с меткой «tunnel».
     _slow_parts(monkeypatch, up=False, exit_ip="46.242.14.241", exit_state="tunnel")
-    _tunnels(monkeypatch)
+    _plan(monkeypatch)
     logged = []
     p = probe.Prober(logged.append)
 
@@ -313,16 +440,19 @@ def test_туннель_опустился_во_время_проверки_вы
 
 
 def test_итог_без_домена_в_пускать_так_и_пишет(monkeypatch):
-    _slow_parts(monkeypatch)
-    _tunnels(monkeypatch, _work(include=["198.51.100.0/24"]), _home())
+    asked = _slow_parts(monkeypatch)
+    _plan(monkeypatch, _p_work(host=""), _p_home())
     logged = []
+    p = probe.Prober(logged.append)
 
-    probe.Prober(logged.append).probe_slow()
+    p.probe_slow()
 
     [line] = logged
     assert "выход не узнал" in line
-    assert "корп не проверял (в «пускать» нет домена)" in line
+    assert "«Работа» не проверял (в «пускать» нет домена)" in line
     assert "IPv6 без утечки" in line
+    assert asked == []
+    assert _checks(p)["work"] == ("none", "")
 
 
 class _Resp:
@@ -385,25 +515,60 @@ def test_dns_ask_потерянный_пакет_повторяется(monkeypa
     assert probe.Prober._dns_ask("10.0.0.1", "corp") == "10.0.0.8"
 
 
-def test_corp_answer_спрашивает_корп_dns_из_конфига(monkeypatch):
+def test_tunnel_answer_спрашивает_dns_этого_туннеля(monkeypatch):
     asked = []
-    _tunnels(monkeypatch, _work(include=["git.corp.example"]))
-    monkeypatch.setattr(probe.Prober, "corp_dns", lambda self: "10.0.0.1")
+    _plan(monkeypatch, _p_work(), _p_work(id="work-2", host="wiki.corp.example",
+                                          dns="10.0.0.2"))
     monkeypatch.setattr(probe.winnet, "resolve4_via",
                         lambda name, server, timeout: asked.append((name, server))
                         or "10.0.0.8")
 
-    assert probe.Prober().corp_answer() == "10.0.0.8"
-    assert asked == [("git.corp.example", "10.0.0.1")]
+    assert probe.Prober().tunnel_answer("work-2") == "10.0.0.8"
+    assert asked == [("wiki.corp.example", "10.0.0.2")]
 
 
-def test_corp_answer_без_домена_в_пускать_не_спрашивает(monkeypatch):
-    _tunnels(monkeypatch, _work(include=["198.51.100.0/24"]))
-    monkeypatch.setattr(probe.Prober, "corp_dns", lambda self: "10.0.0.1")
+@pytest.mark.parametrize("tid, plan", [
+    ("work", [_p_work(host="")]),
+    ("work", [_p_work(dns="")]),
+    ("gone", [_p_work()]),
+])
+def test_tunnel_answer_не_спрашивает_когда_нечем(monkeypatch, tid, plan):
+    _plan(monkeypatch, *plan)
     monkeypatch.setattr(probe.winnet, "resolve4_via",
-                        lambda *a, **kw: pytest.fail("спросил без домена"))
+                        lambda *a, **kw: pytest.fail("спросил без домена или DNS"))
 
-    assert probe.Prober().corp_answer() == ""
+    assert probe.Prober().tunnel_answer(tid) == ""
+
+
+def test_check_plan_по_tunnels_json_и_собранному_конфигу(monkeypatch, tmp_path):
+    _tunnels(monkeypatch,
+             _work(include=["198.51.100.7", "*.corp.example", "git.corp.example"]),
+             _work(id="work-2", include=["other.example"]),
+             _home(include=["home.example"]))
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({
+        "outbounds": [{"type": "socks", "tag": "socks-work"},
+                      {"type": "socks", "tag": "socks-home"}],
+        "dns": {"servers": [{"tag": "dns", "server": "1.1.1.1"},
+                            {"tag": "dns-work", "server": "10.0.0.1"}]}}),
+        encoding="utf-8")
+    monkeypatch.setattr(probe.paths, "CONFIG_JSON", str(cfg))
+
+    plan = probe.Prober.check_plan()
+
+    assert plan == [
+        _p_work(),
+        _p_work(id="work-2", host="other.example", dns="", running=False),
+        _p_home(),
+    ]
+
+
+def test_check_plan_испорченный_tunnels_json_пусто(monkeypatch):
+    def broken():
+        raise ValueError("tunnels.json не читается")
+    monkeypatch.setattr(probe.tunnels, "load", broken)
+
+    assert probe.Prober.check_plan() == []
 
 
 def test_corp_probe_первый_домен_первого_туннеля_по_списку(monkeypatch):

@@ -373,12 +373,13 @@ def test_без_windll_тёмное_меню_ничего_не_делает(monk
 def test_кружки_без_vpn_красный_только_не_работавший_в_прошлый_раз():
     """Зелёный «раньше работал» читался как «работает сейчас»: 9 октября
     при упавшем автоподключении оба кружка горели зелёными, а корп был мёртв."""
-    st = {"up": False, "last": {"corp": "error", "personal": "up"}}
+    st = {"up": False, "tunnels": [{"id": "work", "last": "error"},
+                                    {"id": "home", "last": "up"}]}
 
-    assert tray._conf_colors(st, True, frozenset()) == ("error", "off")
+    assert tray._conf_colors(st, frozenset()) == {"work": "error", "home": "off"}
 
 
 def test_кружки_без_vpn_и_без_итога_серые():
-    assert tray._conf_colors({"up": False}, True, frozenset()) == ("off", "off")
-    st = {"up": False, "last": {"corp": "", "personal": ""}}
-    assert tray._conf_colors(st, True, frozenset()) == ("off", "off")
+    assert tray._conf_colors({"up": False}, frozenset()) == {}
+    st = {"up": False, "tunnels": [{"id": "work", "last": ""}, {"id": "home"}]}
+    assert tray._conf_colors(st, frozenset()) == {"work": "off", "home": "off"}

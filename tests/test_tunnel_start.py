@@ -118,6 +118,10 @@ HOME_SOCKS = buildconfig.socks_tag("home")
 BUILT = [("work", "Работа"), ("home", "Личный")]
 
 
+def _side(tun, tid):
+    return next(s for s in tun.sides if s.tid == tid)
+
+
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     for name in ("SINGBOX", "WINTUN"):
@@ -345,7 +349,7 @@ def test_пропавший_на_старте_маршрут_к_пиру_ста�
 def test_маршрут_к_пиру_пропал_в_работе_ставится_заново(env):
     tun, _build, seen = env
     assert tun.start() == ""
-    assert tun.restart_side(tun.first_list) == ""
+    assert tun.restart_side(_side(tun, "work")) == ""
     net = seen["net"]
     net.gone = {"203.0.113.10/32", "203.0.113.20/32"}
     before = len(net.added)
@@ -396,21 +400,21 @@ def test_туннель_не_открыл_socks_гасим_его(env, monkeypat
 
     assert tun.start() == ""
 
-    assert tun.first_list.proc is None and tun.main.proc is None
+    assert _side(tun, "work").proc is None and tun.main.proc is None
     assert any("не открыл socks" in l for l in seen["log"])
 
 
 def test_повторное_включение_поднимает_мёртвый_корп(env):
     tun, _build, seen = env
     assert tun.start() == ""
-    tun.first_list.proc.returncode = 1
+    _side(tun, "work").proc.returncode = 1
     main = tun.proc
 
     assert tun.start() == ""
 
     assert tun.proc is main
     assert seen["started"][-1] == buildconfig.side_json("work")
-    assert tun.first_list.alive()
+    assert _side(tun, "work").alive()
 
 
 def test_повторное_включение_возвращает_выход_на_личный(env, monkeypatch):
@@ -423,16 +427,15 @@ def test_повторное_включение_возвращает_выход_�
     assert tun.start() == ""
 
     assert seen["started"][-1] == buildconfig.side_json("home")
-    assert tun.main.alive() and tun.first_list.alive()
+    assert tun.main.alive() and _side(tun, "work").alive()
     assert outs == [HOME_SOCKS]
 
 
-@pytest.mark.parametrize("which", ["first_list", "main"])
-def test_перезапуск_туннеля_не_трогает_остальные(env, monkeypatch, which):
+@pytest.mark.parametrize("which, rest", [("work", "home"), ("home", "work")])
+def test_перезапуск_туннеля_не_трогает_остальные(env, monkeypatch, which, rest):
     tun, _build, seen = env
     assert tun.start() == ""
-    side = getattr(tun, which)
-    other = tun.main if side is tun.first_list else tun.first_list
+    side, other = _side(tun, which), _side(tun, rest)
     main, old, other_proc = tun.proc, side.proc, other.proc
     # DNS изнутри туннеля отдал бы другой адрес: 7 октября в офисе корп-имя
     # так стало внешним адресом, и корп час перезапускался впустую.
@@ -557,7 +560,7 @@ def test_без_основного_упавший_туннель_выход_не
 
     assert tun.start() == ""
 
-    assert tun.main is None and tun.first_list.tid == "work"
+    assert tun.main is None and [s.tid for s in tun.sides] == ["work"]
     assert outs == []
 
 

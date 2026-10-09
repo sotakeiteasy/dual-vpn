@@ -118,12 +118,6 @@ class Tunnel:
         """Боковой процесс основного туннеля, иначе None."""
         return next((s for s in self.sides if s.tid == self.main_id), None)
 
-    @property
-    def first_list(self):
-        """Первый туннель «по списку», иначе None. Пока сторож и проверка
-        знают один рабочий туннель, это он."""
-        return next((s for s in self.sides if s.tid != self.main_id), None)
-
     # ------------------------------------------------------ журнал владения
 
     def own(self, *parts):

@@ -7,77 +7,91 @@ import pytest
 
 from dualvpn import tray
 
-UP = {"up": True, "exit_ip": "1.2.3.4", "exit_state": "tunnel", "corp_ip": "10.0.0.1"}
-BOTH = frozenset({"corp", "personal"})
 NONE = frozenset()
 
 
+def _work(**over):
+    return {"id": "work", "name": "Работа", "mode": "list", "check": "up", **over}
+
+
+def _home(**over):
+    return {"id": "home", "name": "Личный", "mode": "all", "check": "up", **over}
+
+
+def _up(*items, **st):
+    return {"up": True, "exit_ip": "1.2.3.4", "exit_state": "tunnel",
+            "tunnels": list(items or (_work(), _home())), **st}
+
+
 def test_выключенный_vpn_серый_даже_во_время_проверки():
-    assert tray._conf_colors({"up": False}, True, BOTH) == ("off", "off")
+    st = {**_up(), "up": False}
+    assert tray._conf_colors(st, frozenset({"work", "home"})) == {"work": "off", "home": "off"}
 
 
 def test_во_время_проверки_рыжий():
-    assert tray._conf_colors(UP, True, BOTH) == ("busy", "busy")
+    assert tray._conf_colors(_up(), frozenset({"work", "home"})) == {"work": "busy",
+                                                                    "home": "busy"}
 
 
-def test_оба_работают_зелёные():
-    assert tray._conf_colors(UP, True, NONE) == ("up", "up")
+def test_все_работают_зелёные():
+    st = _up(_work(), _work(id="lab"), _home())
+    assert tray._conf_colors(st, NONE) == {"work": "up", "lab": "up", "home": "up"}
 
 
-def test_проверенный_личный_зелёный_пока_корп_ещё_рыжий():
-    st = {**UP, "corp_ip": ""}
-    assert tray._conf_colors(st, True, frozenset({"corp"})) == ("busy", "up")
+def test_проверенный_основной_зелёный_пока_рабочий_ещё_рыжий():
+    st = _up(_work(check=""), _home())
+    assert tray._conf_colors(st, frozenset({"work"})) == {"work": "busy", "home": "up"}
 
 
-def test_проверка_службы_по_сторонам_тоже_рыжая():
-    st = {**UP, "checking_corp": True, "checking_personal": False}
-    assert tray._conf_colors(st, True, NONE) == ("busy", "up")
+def test_проверка_службы_по_туннелям_тоже_рыжая():
+    st = _up(_work(checking=True), _home(checking=False))
+    assert tray._conf_colors(st, NONE) == {"work": "busy", "home": "up"}
 
 
-def test_стороны_в_lparam_и_обратно():
-    for sides in (NONE, frozenset({"corp"}), frozenset({"personal"}), BOTH):
-        assert tray._sides_of(tray._side_bits(sides)) == sides
+def test_идет_включение_все_рыжие():
+    assert set(tray._conf_colors(_up(busy="включаю"), NONE).values()) == {"busy"}
 
 
-@pytest.mark.parametrize("st", [
-    {**UP, "exit_ip": ""},
-    {**UP, "exit_state": "leak"},
-    {**UP, "exit_state": "direct"},
-    {**UP, "out": "direct"},
-])
-def test_личный_без_выхода_с_утечкой_или_на_запасном_красный(st):
-    assert tray._conf_colors(st, True, NONE)[1] == "error"
+def test_туннели_в_lparam_и_обратно():
+    ids = ("work", "lab", "home")
+    for pending in (NONE, frozenset({"lab"}), frozenset({"work", "home"}), frozenset(ids)):
+        assert tray._sides_of(tray._side_bits(pending, ids), ids) == pending
+
+
+def test_удалённый_туннель_в_lparam_не_попадает():
+    assert tray._side_bits(frozenset({"gone", "home"}), ("work", "home")) == 0b10
+
+
+def test_основной_на_запасном_выходе_красный_даже_с_итогом_up():
+    """Сторож переключает выход раньше, чем проверка его перемерит."""
+    colors = tray._conf_colors(_up(out="direct"), NONE)
+    assert colors == {"work": "up", "home": "error"}
+
+
+@pytest.mark.parametrize("check, color", [("error", "error"), ("none", "off"), ("", "off")])
+def test_молчит_красный_а_без_домена_проверки_серый(check, color):
+    assert tray._conf_colors(_up(_work(check=check)), NONE) == {"work": color}
 
 
 def test_запасной_выход_в_подсказке_значка():
     app = tray.Tray.__new__(tray.Tray)
-    app.status = {**UP, "out": "direct", "exit_state": "direct"}
+    app.status = _up(_work(), _home(name="Дом"), out="direct", exit_state="direct")
 
     assert "запасной выход" in app._title()
+    assert "«Дом» не работает" in app._title()
     assert "УТЕЧКА" not in app._title()
 
 
-def test_рабочий_по_http_тоже_зелёный():
-    st = {**UP, "corp_ip": "", "corp_http": "200"}
-    assert tray._conf_colors(st, True, NONE)[0] == "up"
-
-
-@pytest.mark.parametrize("corp_probe, color", [(True, "error"), (False, "off")])
-def test_рабочий_молчит_красный_а_без_хоста_проверки_серый(corp_probe, color):
-    st = {**UP, "corp_ip": "", "corp_http": ""}
-    assert tray._conf_colors(st, corp_probe, NONE)[0] == color
-
-
-@pytest.mark.parametrize("st, names", [
-    ({}, (None, None)),
-    ({"corp": ["office"], "profiles": ["nl-1"]}, ("office", "nl-1")),
-    ({"profiles": ["nl-1", "nl-2"], "profile": "nl-2"}, (None, "nl-2")),
+@pytest.mark.parametrize("t, name", [
+    ({}, None),
+    ({"confs": ["nl-1"]}, "nl-1"),
+    ({"confs": ["nl-1", "nl-2"], "active": "nl-2"}, "nl-2"),
     # Из нескольких без выбора сборка не возьмёт ни один — и меню не покажет.
-    ({"profiles": ["nl-1", "nl-2"]}, (None, None)),
-    ({"profiles": ["nl-1"], "profile": "удалённый"}, (None, None)),
+    ({"confs": ["nl-1", "nl-2"]}, None),
+    ({"confs": ["nl-1"], "active": "удалённый"}, None),
 ])
-def test_имена_конфигов(st, names):
-    assert tray._conf_names(st) == names
+def test_имя_конфига_туннеля(t, name):
+    assert tray._conf_name(t) == name
 
 
 def _hooked(calls, monkeypatch):
@@ -118,6 +132,51 @@ def test_двойной_левый_клик_сам_окно_не_открыва�
 
 
 def test_длинное_имя_обрезается_а_пустое_зовёт_добавить():
-    corp, personal = tray._conf_labels({"corp": ["x" * 100]})
-    assert len(corp) == tray.NAME_MAX and corp.endswith("…")
-    assert personal == "Добавить личный конфиг…"
+    long = tray._conf_label(_work(confs=["x" * 100]))
+    assert long.startswith("Работа: ") and long.endswith("…")
+    assert len(long) == len("Работа: ") + tray.NAME_MAX
+    assert tray._conf_label(_home()) == "Личный: добавить конфиг…"
+
+
+class _Item:
+    """Пункт pystray без pystray: подпись и действие как есть."""
+
+    def __init__(self, text, action, enabled=None):
+        self.text, self.action, self.enabled = text, action, enabled
+
+
+def _menu_app(st):
+    app = tray.Tray.__new__(tray.Tray)
+    app.status = st
+    app._tunnel_items = {}
+    app._menu_ids = tuple(t["id"] for t in st["tunnels"])
+    app.added = []
+    app.on_add_config = app.added.append
+    return app
+
+
+def test_пункты_туннелей_по_порядку_с_подписью_и_своим_туннелем():
+    app = _menu_app(_up(_work(confs=["office"]), _home()))
+    stub = types.SimpleNamespace(MenuItem=_Item)
+
+    work, home = app._conf_items(stub)
+    work.action()
+    home.action()
+
+    assert work.text(work) == "Работа: office"
+    assert home.text(home) == "Личный: добавить конфиг…"
+    assert app.added == ["work", "home"]
+
+
+def test_пункты_туннелей_те_же_объекты_а_удалённый_забыт():
+    app = _menu_app(_up(_work(), _work(id="lab", name="Лаб"), _home()))
+    stub = types.SimpleNamespace(MenuItem=_Item)
+    work, lab, home = app._conf_items(stub)
+
+    app.status = _up(_home(), _work(confs=["office"]))
+    app._menu_ids = ("home", "work")
+    again = app._conf_items(stub)
+
+    assert again == (home, work)
+    assert set(app._tunnel_items) == {"home", "work"}
+    assert work.text(work) == "Работа: office"

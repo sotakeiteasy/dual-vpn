@@ -264,9 +264,10 @@ class Core:
         # без этого окно до её ответа показывало «корп молчит».
         st["checking"] = self.prober.slow_busy.is_set()
         # И по сторонам: личный проверен раньше корпа — его кружок уже свежий.
-        for side in probe.SIDE_PARTS:
+        for side in probe.LEGACY_SIDES:
             st[f"checking_{side}"] = (st["checking"] and st.get(f"{side}_seq", 0)
                                       < st.get("check_seq", 0))
+        checks = st.pop("checks", None) or {}
         st["last_error"] = self.last_error
         st["autostart"] = self.autostart_enabled()
         data = self._tunnels()
@@ -276,6 +277,15 @@ class Core:
                           "active": t["active"],
                           "confs": tunnels.list_confs(t["id"])}
                          for t in data["tunnels"]]
+        # Итог проверки каждого туннеля; checking — как у сторон: туннель
+        # проверен раньше соседей, его кружок уже свежий.
+        last = self._last_results(data)
+        for t in st["tunnels"]:
+            c = checks.get(t["id"]) or {}
+            seq = c.get("seq", 0)
+            t.update(check=c.get("result", ""), answer=c.get("answer", ""),
+                     seq=seq, last=last.get(t["id"], ""),
+                     checking=st["checking"] and seq < st.get("check_seq", 0))
         # Раздельное туннелирование включено, когда у рабочего туннеля
         # есть правила; иначе кнопка в окне говорит «выключено».
         work = self._kind_tunnel("corp", data)
@@ -284,7 +294,11 @@ class Core:
         st["singbox"] = self._singbox_version()
         st["profiles"] = self._profiles(data)
         st["corp"] = self._corp(data)
-        st["last"] = self._last_results()
+        # Старые стороны окна — до шага окна.
+        st["last"] = {}
+        for kind in tunnels.LEGACY:
+            t = self._kind_tunnel(kind, data)
+            st["last"][kind] = last.get(t["id"], "") if t else ""
         return st
 
     @staticmethod
@@ -324,51 +338,40 @@ class Core:
         except (OSError, ValueError):
             return None
 
-    def _in_use(self):
-        """{'corp': (id, имя), 'personal': (id, имя)} конфигов, с которыми
-        соберётся включение; имя '' — не выбран. Как tunnels.active_conf:
-        без выбора единственный конфиг и есть активный."""
-        data = self._tunnels()
+    def _in_use(self, data=None):
+        """{id: имя} конфигов каждого туннеля, с которыми соберётся
+        включение; имя '' — не выбран. Как tunnels.active_conf: без выбора
+        единственный конфиг и есть активный."""
+        data = data if data is not None else self._tunnels()
         out = {}
-        for kind in tunnels.LEGACY:
-            t = self._kind_tunnel(kind, data)
-            if t is None:
-                out[kind] = (None, "")
-                continue
+        for t in data["tunnels"]:
             confs = tunnels.list_confs(t["id"])
-            name = t["active"] or (confs[0] if len(confs) == 1 else "")
-            out[kind] = (t["id"], name)
+            out[t["id"]] = t["active"] or (confs[0] if len(confs) == 1 else "")
         return out
 
-    def _last_results(self):
-        """{'corp': 'up'|'error'|'', 'personal': …} для файлов, что лежат сейчас."""
+    def _last_results(self, data=None):
+        """{id: 'up'|'error'|''} — прошлый итог файлов, что лежат сейчас."""
         try:
             with open(LAST_CHECK_FILE, encoding="utf-8") as fh:
                 saved = json.load(fh)
         except (OSError, ValueError):
             saved = {}
         out = {}
-        for kind, (tid, name) in self._in_use().items():
-            rec = saved.get(kind) or {}
+        for tid, name in self._in_use(data).items():
+            rec = saved.get(tid) or {}
             fresh = (name and rec.get("name") == name
                      and rec.get("stamp") == self._conf_stamp(tid, name))
-            out[kind] = rec.get("result", "") if fresh else ""
+            out[tid] = rec.get("result", "") if fresh else ""
         return out
 
-    def _remember_check(self, st, corp_probe):
-        """Запоминает итог проверки при поднятом туннеле — по тем же правилам,
-        что красит кружки трей."""
-        cur = self._in_use()
-        result = {
-            # Запасной выход напрямую — личный не работает, хоть интернет и есть.
-            "personal": ("up" if st.get("exit_ip")
-                         and st.get("exit_state") not in ("leak", "direct")
-                         else "error"),
-            "corp": ("up" if st.get("corp_ip") or st.get("corp_http")
-                     else "error" if corp_probe else ""),
-        }
-        data = {k: {"name": n, "stamp": self._conf_stamp(tid, n),
-                    "result": result[k]} for k, (tid, n) in cur.items() if n}
+    def _remember_check(self, st):
+        """Запоминает итог проверки при поднятом туннеле: up и error из
+        st["tunnels"]; «не с чем проверить» и не поднятый — без итога."""
+        result = {t["id"]: t.get("check") if t.get("check") in ("up", "error")
+                  else "" for t in st.get("tunnels") or []}
+        data = {tid: {"name": n, "stamp": self._conf_stamp(tid, n),
+                      "result": result.get(tid, "")}
+                for tid, n in self._in_use().items() if n}
         try:
             paths.ensure_dirs()
             with open(LAST_CHECK_FILE, "w", encoding="utf-8") as fh:
@@ -380,18 +383,17 @@ class Core:
         """Проверяет туннели сейчас и отдаёт статус.
 
         При выключенном VPN проверять нечем: WireGuard без рукопожатия не
-        отвечает. corp_probe — задан ли хост проверки рабочей сети: без него
-        «корп молчит» значит «не с чем сравнить», а не «не работает».
+        отвечает. Итог каждого туннеля — в st["tunnels"][i]["check"].
         """
         st = self.prober.snapshot()
         if st.get("tun") and st.get("r_low") and not self.busy:
             self.prober.check_now()
-        corp_probe = bool(probe.Prober.corp_probe())
         st = self._status()
         if st["up"] and not self.busy:
-            self._remember_check(st, corp_probe)
-            st["last"] = self._last_results()
-        return {"ok": True, "status": st, "corp_probe": corp_probe}
+            self._remember_check(st)
+            # last в статусе — уже из только что записанного.
+            st = self._status()
+        return {"ok": True, "status": st}
 
     _singbox_cached = None
 
@@ -677,7 +679,8 @@ class Core:
                 self._restart_side(side)
 
     def _side_down(self, side, hits):
-        """Что с туннелем, для журнала, или '' — корп всё-таки отвечает."""
+        """Что с туннелем, для журнала, или '' — туннель «по списку» всё-таки
+        отвечает: его DNS назвал адрес домена проверки."""
         if not side.alive():
             if side.proc is None:
                 return f"процесс «{side.title}» не запущен"
@@ -689,10 +692,10 @@ class Core:
         what = (f"через {side.tag} соединения не открываются: таймаутов "
                 f"{len(hits)} за {now - hits[0][0]:.0f} с, "
                 f"адреса: {', '.join(sorted({h[2] for h in hits}))}")
-        if side is self.tunnel.first_list:
-            ip = self.prober.corp_answer()
+        if side is not self.tunnel.main:
+            ip = self.prober.tunnel_answer(side.tid)
             if ip:
-                self.log(f"!! {what} — но корп отвечает (DNS {ip} за "
+                self.log(f"!! {what} — но «{side.title}» отвечает (DNS {ip} за "
                          f"{time.monotonic() - now:.1f} с), не перезапускаю")
                 return ""
         return what
@@ -728,7 +731,7 @@ class Core:
             err = self.tunnel.restart_side(side)
             if err:
                 self.log(f"!! {err}")
-            elif side is self.tunnel.first_list:
+            elif side is not self.tunnel.main:
                 self.prober.remeasure()
         finally:
             self.busy = ""

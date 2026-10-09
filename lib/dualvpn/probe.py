@@ -13,6 +13,7 @@
 открывался, а сервисы адреса выхода с общего адреса VPN отвечали 429.
 """
 
+import functools
 import json
 import os
 import re
@@ -36,9 +37,40 @@ CHECK_WAIT = 40.0
 CORP_TRIES = 2
 CORP_DNS_TIMEOUT = 2.5
 CORP_HTTP_TIMEOUT = 6.0
-# Части проверки, после которых известен итог конфига. Сторона готова, как
-# только кончились её части: личный не ждёт долгого корп-HTTPS.
-SIDE_PARTS = {"personal": ("exit",), "corp": ("dns", "http")}
+# Старые стороны окна: corp — первый туннель «по списку», personal — основной.
+# Их <сторона>_seq пробер ведёт до шага окна, рядом с итогами по туннелям.
+LEGACY_SIDES = ("corp", "personal")
+
+
+def _probe_host(tunnel):
+    """Чем проверять туннель «по списку»: первый домен из «пускать» — не
+    подсеть и не *.домен. '' — проверить нечем."""
+    return next((e for e in (tunnel or {}).get("include") or []
+                 if "/" not in e and not e.startswith("*.")), "")
+
+
+def _check_result(p, got, st):
+    """(итог, ответ) проверки туннеля p по ответам его частей got и снимку st.
+
+    Итог: up — ответил, error — молчит, none — «по списку» без домена в
+    «пускать», проверять нечем; '' — туннель не поднят. Основной работает,
+    если выход виден и он не мимо туннеля и не запасной напрямую.
+    """
+    if not p["running"]:
+        return "", ""
+    if p["mode"] == "all":
+        ip = st.get("exit_ip") or ""
+        ok = (ip and st.get("out") != buildconfig.DIRECT_TAG
+              and st.get("exit_state") not in ("leak", "direct"))
+        return ("up" if ok else "error"), ip
+    if not p["host"]:
+        return "none", ""
+    mine = got.get(p["id"]) or {}
+    if mine.get("dns"):
+        return "up", mine["dns"]
+    if mine.get("http"):
+        return "up", f"HTTP {mine['http']}"
+    return "error", ""
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -92,9 +124,9 @@ class Prober:
         # Служба переподключила туннель: цикл мог не застать его упавшим между
         # двумя кругами, и тогда остались бы ответы прошлой сети.
         self._remeasure = threading.Event()
-        # Номер сетевой проверки. check_seq — последней начатой, <сторона>_seq —
-        # последней, в которой эта сторона уже проверена: по ним трей и окно
-        # красят кружок каждого конфига, не дожидаясь второго.
+        # Номер сетевой проверки. check_seq — последней начатой, seq в
+        # checks[id] — последней, в которой этот туннель уже проверен: по ним
+        # трей и окно красят кружок каждого туннеля, не дожидаясь остальных.
         self._seq = 0
 
     def remeasure(self):
@@ -140,15 +172,31 @@ class Prober:
 
     @staticmethod
     def corp_probe():
-        """Чем проверять рабочую сеть: первый домен из «пускать» первого
-        туннеля «по списку» — не подсеть и не *.домен. '' — проверить нечем."""
+        """Чем проверять рабочую сеть — домен проверки первого туннеля «по
+        списку» (_probe_host). '' — проверить нечем."""
         try:
             data = tunnels.load()
         except ValueError:
             return ""
-        work = tunnels.by_kind(data["tunnels"], "corp")
-        return next((e for e in (work["include"] if work else [])
-                     if "/" not in e and not e.startswith("*.")), "")
+        return _probe_host(tunnels.by_kind(data["tunnels"], "corp"))
+
+    @staticmethod
+    def check_plan():
+        """Что проверять у каждого туннеля, по порядку tunnels.json:
+        [{id, name, mode, host, dns, running}]. host — домен проверки «по
+        списку», dns — DNS туннеля из собранного конфига, running — процесс
+        туннеля есть в собранном конфиге (без конфига сборка его пропускает)."""
+        try:
+            items = tunnels.load()["tunnels"]
+        except ValueError:
+            return []
+        cfg = buildconfig.read_json(paths.CONFIG_JSON)
+        running = set(buildconfig.side_ids(cfg))
+        dns = buildconfig.tunnel_dns(cfg)
+        return [{"id": t["id"], "name": t["name"], "mode": t["mode"],
+                 "host": _probe_host(t) if t["mode"] == "list" else "",
+                 "dns": dns.get(t["id"], ""), "running": t["id"] in running}
+                for t in items]
 
     @staticmethod
     def main_tag():
@@ -190,15 +238,6 @@ class Prober:
                 pass
         return out
 
-    def corp_dns(self):
-        """Корп-DNS — DNS первого туннеля «по списку» из собранного конфига."""
-        try:
-            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
-                cfg = json.load(fh)
-            return next(iter(buildconfig.tunnel_dns(cfg).values()), "")
-        except Exception:
-            return ""
-
     def _exit_info(self):
         """Внешний адрес и страна. Несколько сервисов по очереди.
 
@@ -231,10 +270,68 @@ class Prober:
     def probe_slow(self):
         """Сетевая проверка. Части независимы и идут параллельно: по очереди
         их таймауты складывались, и проверка «висела» до минуты, хотя каждая
-        часть по отдельности укладывается в секунды."""
+        часть по отдельности укладывается в секунды.
+
+        Основной туннель проверяет выход, туннель «по списку» — домен
+        проверки через свой DNS и HTTPS разом: пакет через WireGuard теряется и
+        при живом туннеле, и хватает одного ответа. Итог туннеля — в checks,
+        как только кончились его части: молчащий сосед его не держит.
+        """
         took = {}
         seq = self.snapshot().get("check_seq", 0)
-        left = {side: set(names) for side, names in SIDE_PARTS.items()}
+        plan = self.check_plan()
+        by_id = {p["id"]: p for p in plan}
+        work = next((p for p in plan if p["mode"] == "list"), None)
+        got = {p["id"]: {} for p in plan}      # id → {"dns": адрес, "http": код}
+        legacy = {"dns": "corp_ip", "http": "corp_http"}
+
+        def ask(how, fn, p):
+            answer = fn(p)
+            got[p["id"]][how] = answer
+            if p is work:
+                self.set(**{legacy[how]: answer})
+
+        jobs = {"exit": self._slow_exit, "v6": self._slow_v6}
+        # (вид, имя) → части, после которых известен итог туннеля или старой стороны.
+        waits = {}
+        for p in plan:
+            mine = set()
+            if p["running"] and p["mode"] == "all":
+                mine.add("exit")
+            elif p["running"] and p["host"]:
+                for how, fn in (("dns", self._slow_dns), ("http", self._slow_http)):
+                    if how == "dns" and not p["dns"]:
+                        continue
+                    name = f"{how} {p['id']}"
+                    jobs[name] = functools.partial(ask, how, fn, p)
+                    mine.add(name)
+            waits[("tunnel", p["id"])] = mine
+        waits[("side", "personal")] = {"exit"}
+        waits[("side", "corp")] = set(waits[("tunnel", work["id"])]) if work else set()
+        wid = work["id"] if work else ""
+        self.set(corp_dns=work["dns"] if work else "",
+                 **{field: "" for how, field in legacy.items()
+                    if f"{how} {wid}" not in jobs})
+
+        def finish(key):
+            """Итог туннеля или стороны известен. Под self.lock; номер — вместе
+            с итогом: кто увидел свежий seq, видит и свежий итог."""
+            kind, name = key
+            if kind == "side":
+                self.st[f"{name}_seq"] = seq
+                return
+            result, answer = _check_result(by_id[name], got, self.st)
+            # Новый словарь, а не правка прежнего: snapshot отдаёт его без замка.
+            self.st["checks"] = {**(self.st.get("checks") or {}), name: {
+                "result": result, "answer": answer, "seq": seq}}
+
+        with self.lock:
+            # Итоги удалённых туннелей не таскаем; прежний итог остаётся до свежего.
+            kept = self.st.get("checks") or {}
+            self.st["checks"] = {tid: kept[tid] for tid in by_id if tid in kept}
+            for key, names in waits.items():
+                if not names:
+                    finish(key)
 
         def timed(name, fn):
             began = time.monotonic()
@@ -243,17 +340,15 @@ class Prober:
             finally:
                 took[name] = time.monotonic() - began
                 with self.lock:
-                    for side, names in left.items():
+                    for key, names in waits.items():
                         if name in names:
                             names.discard(name)
                             if not names:
-                                self.st[f"{side}_seq"] = seq
+                                finish(key)
 
         began = time.monotonic()
         parts = [threading.Thread(target=timed, args=item, daemon=True)
-                 for item in (("exit", self._slow_exit), ("v6", self._slow_v6),
-                              ("dns", self._slow_corp_dns),
-                              ("http", self._slow_corp_http))]
+                 for item in jobs.items()]
         for t in parts:
             t.start()
         for t in parts:
@@ -268,9 +363,9 @@ class Prober:
         if not (s.get("tun") and s.get("r_low")):
             self.set(exit_state="unknown", exit_is_peer=False)
         if self.log:
-            self.log(self._slow_summary(time.monotonic() - began, took))
+            self.log(self._slow_summary(time.monotonic() - began, took, plan, got))
 
-    def _slow_summary(self, total, took):
+    def _slow_summary(self, total, took, plan, got):
         """Строка для журнала: что намерила проверка и сколько шла каждая часть."""
         s = self.snapshot()
 
@@ -281,14 +376,21 @@ class Prober:
         out = (f"выход {s.get('exit_ip') or 'не узнал'}"
                f"{f' ({where})' if where else ''}, {s.get('exit_state') or 'unknown'}, "
                f"{sec('exit')}")
-        if self.corp_probe():
-            corp = (f"корп DNS {s.get('corp_ip') or 'молчит'}, {sec('dns')}; "
-                    f"корп HTTPS {s.get('corp_http') or 'молчит'}, {sec('http')}")
-        else:
-            corp = "корп не проверял (в «пускать» нет домена)"
+        lines = [out]
+        for p in plan:
+            if p["mode"] != "list" or not p["running"]:
+                continue
+            if not p["host"]:
+                lines.append(f"«{p['name']}» не проверял (в «пускать» нет домена)")
+                continue
+            mine, tid = got.get(p["id"]) or {}, p["id"]
+            asked = [f"{label} {mine.get(how) or 'молчит'} ({sec(how + ' ' + tid)})"
+                     for how, label in (("dns", "DNS"), ("http", "HTTPS"))
+                     if how != "dns" or p["dns"]]
+            lines.append(f"«{p['name']}» {', '.join(asked)}")
         v6 = (f"утечка IPv6 {s['v6_leak']}" if s.get("v6_leak")
               else "IPv6 без утечки")
-        return (f"→ проверка сети за {total:.1f} с: {out}; {corp}; "
+        return (f"→ проверка сети за {total:.1f} с: {'; '.join(lines)}; "
                 f"{v6}, {sec('v6')}")
 
     def _slow_exit(self):
@@ -332,22 +434,17 @@ class Prober:
         v6 = self._get("https://api6.ipify.org", 6)
         self.set(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
 
-    def corp_answer(self):
-        """Адрес corp_probe() от корп-DNS через туннель; "" — молчит или
-        спрашивать нечего (нет домена или корп-DNS в конфиге)."""
-        probe_host = self.corp_probe()
-        dns = self.corp_dns()
-        return self._dns_ask(dns, probe_host) if dns and probe_host else ""
+    def tunnel_answer(self, tid):
+        """Адрес домена проверки туннеля tid от его DNS через туннель; '' —
+        молчит или спрашивать нечего (нет домена в «пускать» или DNS у туннеля)."""
+        p = next((p for p in self.check_plan() if p["id"] == tid), None)
+        return self._slow_dns(p) if p and p["host"] and p["dns"] else ""
 
-    def _slow_corp_dns(self):
-        self.set(corp_dns=self.corp_dns(), corp_ip=self.corp_answer())
+    def _slow_dns(self, p):
+        return self._dns_ask(p["dns"], p["host"])
 
-    def _slow_corp_http(self):
-        probe_host = self.corp_probe()
-        if probe_host:
-            self.set(corp_http=self._http_code(f"https://{probe_host}"))
-        else:
-            self.set(corp_http="")
+    def _slow_http(self, p):
+        return self._http_code(f"https://{p['host']}")
 
     @staticmethod
     def _dns_ask(server, name):
@@ -426,6 +523,7 @@ class Prober:
                 want_slow = False
                 self.set(exit_ip="", corp_ip="", corp_http="", v6_leak="",
                          exit_is_peer=False, exit_state="unknown")
+                self._forget_checks()
             elif want_slow and self._take_slow():
                 # Занято — ответ той проверки мерил прошлый туннель (она шла
                 # во время переподключения): ждём её конца и меряем заново.
@@ -434,6 +532,12 @@ class Prober:
                                  daemon=True).start()
             self.write_status()
             self.stop_event.wait(FAST_EVERY)
+
+    def _forget_checks(self):
+        """Туннель опущен: итоги прошлой сети не в счёт, номера проверок остаются."""
+        with self.lock:
+            self.st["checks"] = {tid: {**c, "result": "", "answer": ""}
+                                 for tid, c in (self.st.get("checks") or {}).items()}
 
     def _take_slow(self):
         """Занимает сетевую проверку. False — она уже идёт."""

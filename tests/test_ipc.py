@@ -90,49 +90,77 @@ def test_сервер_сбрасывает_буфер_до_отключения(
                          "CloseHandle"]
 
 
-def _fake_service(monkeypatch, st):
-    """Служба без канала: check ставит личный готовым и ждёт release,
-    а корп отмечает только после него."""
+def _status(check_seq, checking, home, work):
+    return {"check_seq": check_seq, "checking": checking,
+            "tunnels": [{"id": "work", "seq": work}, {"id": "home", "seq": home}]}
+
+
+def _seq(st, tid):
+    return next(t["seq"] for t in st["tunnels"] if t["id"] == tid)
+
+
+def _fake_service(monkeypatch, st, drop_work=False):
+    """Служба без канала: check ставит основной готовым и ждёт release,
+    а рабочий отмечает только после него (drop_work — рабочий удалили)."""
     release = threading.Event()
 
     def call(op, **_payload):
         if op == "check":
             seq = st["check_seq"] if st["checking"] else st["check_seq"] + 1
-            st.update(check_seq=seq, checking=True, personal_seq=seq)
+            st.update(_status(seq, True, home=seq, work=_seq(st, "work")))
+            if drop_work:
+                st["tunnels"] = st["tunnels"][1:]
             release.wait(2)
-            st.update(corp_seq=seq, checking=False)
-        return {"ok": True, "status": dict(st)}
+            st.update(checking=False)
+            for t in st["tunnels"]:
+                t["seq"] = seq
+        return {"ok": True, "status": {**st, "tunnels": [dict(t) for t in st["tunnels"]]}}
 
     monkeypatch.setattr(ipc, "call", call)
     return release
 
 
 @pytest.mark.parametrize("st", [
-    {"check_seq": 3, "checking": False, "personal_seq": 3, "corp_seq": 3},
+    _status(3, False, home=3, work=3),
     # Проверка уже шла — check её дождётся, её ответ тоже свежий.
-    {"check_seq": 3, "checking": True, "personal_seq": 2, "corp_seq": 2},
+    _status(3, True, home=2, work=2),
 ])
-def test_check_by_side_отдаёт_личный_не_дожидаясь_корпа(monkeypatch, st):
+def test_check_by_side_отдаёт_основной_не_дожидаясь_рабочего(monkeypatch, st):
+    need = st["check_seq"] + (0 if st["checking"] else 1)
     release = _fake_service(monkeypatch, st)
     seen = []
 
     def on_side(got, pending):
-        seen.append((got["personal_seq"], pending))
+        seen.append((_seq(got, "home"), pending))
         release.set()
 
     reply = ipc.check_by_side(on_side, poll=0.01)
 
-    assert seen[0] == (st["check_seq"], frozenset({"corp"}))
-    assert reply["status"]["corp_seq"] == st["check_seq"]
+    assert seen[0] == (need, frozenset({"work"}))
+    assert _seq(reply["status"], "work") == need
 
 
 def test_check_by_side_прошлый_итог_не_считает_свежим(monkeypatch):
-    st = {"check_seq": 3, "checking": False, "personal_seq": 3, "corp_seq": 3}
+    st = _status(3, False, home=3, work=3)
     release = _fake_service(monkeypatch, st)
     seen = []
     threading.Timer(0.2, release.set).start()
 
-    ipc.check_by_side(lambda got, pending: seen.append(got["personal_seq"]),
+    ipc.check_by_side(lambda got, pending: seen.append(_seq(got, "home")),
                       poll=0.01)
 
     assert all(seq == 4 for seq in seen)
+
+
+def test_check_by_side_удалённый_туннель_не_ждёт(monkeypatch):
+    st = _status(3, False, home=3, work=3)
+    release = _fake_service(monkeypatch, st, drop_work=True)
+    seen = []
+
+    def on_side(got, pending):
+        seen.append(pending)
+        release.set()
+
+    ipc.check_by_side(on_side, poll=0.01)
+
+    assert seen[0] == frozenset()

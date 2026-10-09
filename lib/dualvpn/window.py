@@ -333,10 +333,17 @@ class Api:
         """Проверка туннелей службой сейчас; страница на это время пишет
         «проверяю…» — у каждого конфига, пока не проверен он сам."""
         self.js("checkStart")
+
+        def on_side(st, pending):
+            # Страница до шага окна знает только стороны corp/personal: ждущие
+            # id — в стороны; стороны без туннеля не ждёт никто.
+            items = st.get("tunnels") or []
+            sides = [k for k in tunnels.LEGACY
+                     if (tunnels.by_kind(items, k) or {}).get("id") in pending]
+            self.jsn("checkSides", (st, sides))
+
         try:
-            st = ipc.check_by_side(
-                lambda st, pending: self.jsn("checkSides", (st, sorted(pending)))
-            ).get("status")
+            st = ipc.check_by_side(on_side).get("status")
             if st:
                 self.js("render", st)
         except ipc.NotRunning:

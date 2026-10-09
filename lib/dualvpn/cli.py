@@ -44,6 +44,15 @@ if hasattr(sys.stdout, "reconfigure"):
 _MODES = {"list": "по списку", "all": "весь остальной трафик"}
 
 
+def _check_text(t):
+    """Итог последней проверки туннеля для строки status; '' — не поднят."""
+    if t.get("checking"):
+        return "проверяю…"
+    return {"up": f"отвечает {t.get('answer') or ''}".rstrip(),
+            "error": "молчит",
+            "none": "не с чем проверить: в «пускать» нет домена"}.get(t.get("check"), "")
+
+
 def _print_status(st):
     up = st.get("up")
     print(f"DualVPN {st.get('version', '?')}: "
@@ -54,8 +63,10 @@ def _print_status(st):
         print(f"  ошибка   : {st['last_error']}")
     print(f"  профиль  : {st.get('profile') or 'единственный конфиг основного'}")
     for t in st.get("tunnels") or []:
+        check = _check_text(t) if up else ""
         print(f"  туннель  : {t.get('name')} [{t.get('id')}], {_MODES.get(t.get('mode'), '?')}"
-              f" — {t.get('active') or 'конфиг не выбран'}")
+              f" — {t.get('active') or 'конфиг не выбран'}"
+              + (f"; {check}" if check else ""))
     print(f"  sing-box : {st.get('pid') or 'не запущен'}")
     print(f"  tun      : {st.get('tun') or 'нет'}")
     print(f"  аплинк   : интерфейс {st.get('iface')} / шлюз {st.get('gw') or '—'}")
