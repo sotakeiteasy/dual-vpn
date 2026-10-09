@@ -73,6 +73,9 @@ class Side:
         self.logfile = None
         # (путь, смещение) начала текущего запуска в его журнале.
         self.log_start = None
+        # Метка .conf, из которого собран процесс (_conf_stamp): по ней
+        # reload_sides узнаёт, у кого сменился конфиг.
+        self.source = None
 
     @property
     def tag(self):
@@ -329,6 +332,9 @@ class Tunnel:
         self.profile = want
         self.main_id = buildconfig.main_id(buildconfig.read_json(paths.CONFIG_JSON))
         self.sides = [Side(tid, name) for tid, name in built]
+        stamps = _stamps()
+        for side in self.sides:
+            side.source = stamps.get(side.tid)
 
         # Отдельной строкой: сборка и проверка шли под одной, и по журналу
         # нельзя было сказать, кто из них ест до 11 с включения.
@@ -600,6 +606,82 @@ class Tunnel:
             self.log(f"→ процесс «{side.title}» перезапущен")
         return err
 
+    def reload_sides(self):
+        """Правка конфигов на поднятом VPN: перезапуск только тех боковых, чей
+        активный .conf сменился. [(процесс, ошибка или '')] перезапущенных или
+        None, если без полного перезапуска не обойтись.
+
+        Полный нужен, когда новая сборка меняет основной конфиг: набор туннелей,
+        подсети и DNS туннеля «по списку», MTU и IPv6 основного, правила, журнал.
+        Основной процесс конфиг не перечитывает, а tun, маршруты и остальные
+        туннели здесь не трогаем — интернет на перезапуск не падает. Пока лежит
+        процесс основного туннеля, выход идёт напрямую.
+        """
+        if self.uplink is None or self.proc is None or self.proc.poll() is not None:
+            return None
+        running = buildconfig.read_json(paths.CONFIG_JSON)
+        links = {tid: buildconfig.side_link(running, tid)
+                 for tid in buildconfig.side_ids(running)}
+        try:
+            data, confs = buildconfig.sources()
+            # Имена пиров не резолвим: в основном конфиге адресов пиров нет,
+            # а резолвить всех заново незачем — только сменившихся, ниже.
+            config, sides, _, _ = buildconfig.assemble(
+                data, confs, self.log, links, _api_link(running), resolve=False)
+        except SystemExit:
+            return None
+        if json.loads(json.dumps(config)) != running:
+            return None
+        stamps = {tid: _conf_stamp(path) for tid, path in confs.items()}
+        main = tunnels.main_tunnel(data)
+        self.profile = main["active"] if main else ""
+        done = []
+        for side in self.sides:
+            if stamps.get(side.tid) == side.source:
+                continue
+            done.append((side, self._swap_side(side, sides[side.tid],
+                                               stamps.get(side.tid))))
+        return done
+
+    def _swap_side(self, side, cfg, stamp):
+        """Боковой процесс на новый конфиг cfg (пир ещё именем) из .conf с меткой
+        stamp. '' или ошибка; при ошибке до записи конфига старый процесс работает
+        дальше, а метка прежняя — следующая правка попробует снова."""
+        peer = cfg["endpoints"][0]["peers"][0]
+        try:
+            # Резолвим, как на включении: системный DNS вместе с публичными. Он
+            # сейчас туннельный, но новому пиру другого пути нет.
+            peer["address"] = buildconfig.peer_host(peer["address"], side.tag, self.log)
+        except SystemExit as exc:
+            return f"«{side.title}»: {exc}"
+        up_idx, gw = self.uplink
+        ip = peer["address"]
+        if ip not in self._peers_owned():
+            # Мимо туннеля до старта процесса — иначе его пакеты к пиру уйдут
+            # в tun петлёй.
+            self.own("host", ip, gw, up_idx)
+            winnet.add_routes([(f"{ip}/32", up_idx, gw, 1)])
+            self.log(f"→ пир «{side.title}» {ip} пойдёт мимо туннеля")
+        try:
+            buildconfig.write_json(buildconfig.side_json(side.tid), cfg)
+        except OSError as exc:
+            return f"конфиг процесса «{side.title}» не записать: {exc}"
+        # На диске уже новый: не поднимется — сторож поднимет его из этого файла.
+        side.source = stamp
+        is_main = side is self.main
+        if is_main:
+            self.set_out(buildconfig.DIRECT_TAG)
+        self.log(f"→ сменился конфиг «{side.title}» — перезапускаю только его процесс")
+        err = self.restart_side(side)
+        if is_main and not err:
+            self.set_out(buildconfig.socks_tag(side.tid))
+        return err
+
+    def _peers_owned(self):
+        """Адреса пиров, host-маршруты к которым мы уже ставили."""
+        return {parts[1] for parts in self.owned_lines()
+                if parts[0] == "host" and len(parts) > 1}
+
     def mend_peer_routes(self, uplink=None):
         """Ставит заново пропавшие host-маршруты к пирам. Список их адресов.
 
@@ -815,6 +897,37 @@ class Tunnel:
         else:
             self.log("!! маршрут по умолчанию отсутствует — сеть не поднята?")
 
+
+
+def _conf_stamp(path):
+    """(путь, mtime_ns, размер) .conf или None: сменился файл или выбран
+    другой — метка другая."""
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return path, st.st_mtime_ns, st.st_size
+
+
+def _stamps():
+    """{id: метка активного .conf} по tunnels.json; испорчен — пусто."""
+    try:
+        data = tunnels.load()
+    except ValueError:
+        return {}
+    return {t["id"]: _conf_stamp(tunnels.active_conf(t)) for t in data["tunnels"]}
+
+
+def _api_link(main_cfg):
+    """clash_api собранного конфига в форме buildconfig.new_api, иначе None."""
+    api = buildconfig.api_of(main_cfg)
+    if api is None:
+        return None
+    addr, secret = api
+    port = addr.rpartition(":")[2]
+    return {"port": int(port), "secret": secret} if port.isdigit() else None
 
 
 def _port_open(port):

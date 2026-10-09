@@ -330,8 +330,9 @@ def peer_host(host, tag, log=print):
     return host
 
 
-def endpoint(conf, tag, default_mtu, log=print):
-    """Строит sing-box endpoint из разобранного .conf."""
+def endpoint(conf, tag, default_mtu, log=print, resolve=True):
+    """Строит sing-box endpoint из разобранного .conf. resolve=False — имя
+    пира остаётся именем: основному конфигу адрес пира не нужен."""
     iface, peer = conf["interface"], conf["peer"]
 
     for required, where in (("privatekey", iface), ("publickey", peer),
@@ -346,7 +347,8 @@ def endpoint(conf, tag, default_mtu, log=print):
     # Имя резолвим ЗДЕСЬ, пока системный DNS ещё обычный. Иначе sing-box при
     # старте попробует резолвить его через свой же туннель, который в этот
     # момент не поднят, и упадёт с "context deadline exceeded".
-    host = peer_host(host, tag, log)
+    if resolve:
+        host = peer_host(host, tag, log)
 
     ep = {
         "type": "wireguard",
@@ -783,7 +785,26 @@ def build(data, confs, out_path, side_path=None, log=print):
     без конфига пропускается: пустой слот не держит остальные.
     """
     side_path = side_path or side_json
-    level = data["log_level"]
+    config, sides, built, report = assemble(data, confs, log)
+    write_json(out_path, config)
+    for tid, side in sides.items():
+        write_json(side_path(tid), side)
+
+    print(f"собрано: {out_path}")
+    for line in report:
+        print(line)
+    return built
+
+
+def assemble(data, confs, log=print, links=None, api=None, resolve=True):
+    """(основной конфиг, {id: боковой конфиг}, [(id, имя)], строки сводки) без
+    записи на диск.
+
+    links — {id: связь socks} и api — clash_api работающего запуска: с ними
+    основной конфиг выходит тем же, если туннели не менялись. resolve=False —
+    имена пиров в боковых не резолвятся.
+    """
+    links, level = links or {}, data["log_level"]
     built = []                       # (туннель, разобранный .conf, endpoint)
     for t in data["tunnels"]:
         path = confs.get(t["id"])
@@ -798,7 +819,8 @@ def build(data, confs, out_path, side_path=None, log=print):
         # nl-1 рукопожатие проходило, а данные не пролезали — туннель выглядел
         # поднятым, но интернета не было. Конфиги со своим MTU это не
         # затрагивает: там значение берётся из файла.
-        built.append((t, conf, endpoint(conf, ep_tag(t["id"]), 1280, log)))
+        built.append((t, conf, endpoint(conf, ep_tag(t["id"]), 1280, log,
+                                        resolve)))
     if not built:
         sys.exit("ни у одного туннеля нет конфига — добавь .conf")
     main = next((b for b in built if b[0]["mode"] == "all"), None)
@@ -865,8 +887,8 @@ def build(data, confs, out_path, side_path=None, log=print):
         if bypass:
             rules.append({**bypass, "outbound": DIRECT_TAG})
 
-    links = {t["id"]: new_link() for t, _, _ in built}
-    api = new_api()
+    links = {t["id"]: links.get(t["id"]) or new_link() for t, _, _ in built}
+    api = api or new_api()
     outbounds = [{"type": "direct", "tag": DIRECT_TAG}]
     outbounds += [{"type": "socks", "tag": socks_tag(tid), "version": "5",
                    "server": "127.0.0.1", "server_port": link["port"],
@@ -926,14 +948,8 @@ def build(data, confs, out_path, side_path=None, log=print):
         },
     }
 
-    write_json(out_path, config)
-    for t, _, ep in built:
-        write_json(side_path(t["id"]), side_config(ep, links[t["id"]], level))
-
-    print(f"собрано: {out_path}")
-    for line in report:
-        print(line)
-    return [(t["id"], t["name"]) for t, _, _ in built]
+    sides = {t["id"]: side_config(ep, links[t["id"]], level) for t, _, ep in built}
+    return config, sides, [(t["id"], t["name"]) for t, _, _ in built], report
 
 
 def _drop_stale_sides(keep):

@@ -605,6 +605,139 @@ def test_выключил_и_включил_посреди_круга_новый
     assert core.tunnel.restarts == []
 
 
+def test_таймауты_прочитанные_до_перезапуска_vpn_свежий_туннель_не_трогают(
+        monkeypatch, tmp_path):
+    """9 октября в 23:52 круг, заставший выключение и включение, досчитал
+    таймауты прежних процессов и назвал свежий процесс «не запущенным»."""
+    core = _core(monkeypatch)
+    log = _side_log(core, tmp_path)
+    _append(log, *_three_dead())
+
+    def mend():
+        core._do_stop()
+        core._do_start()
+
+    monkeypatch.setattr(core.tunnel, "mend_peer_routes", mend)
+
+    _rounds(core, 1)
+
+    assert not _said(core, "перезапускаю процесс")
+    assert core._side_after == {} and core.tunnel.outs == []
+
+
+def test_правка_конфигов_ставит_круг_сторожа_на_паузу(monkeypatch):
+    core = _core(monkeypatch)
+    core.tunnel.work.proc = _Proc()
+    core.lock.acquire()                          # идёт _apply: busy пуст
+
+    _rounds(core, 1)
+
+    assert core.tunnel.restarts == [] and core.tunnel.mends == 0
+
+
+# ------------------------------------------------------- правка конфигов
+
+
+def _reload(monkeypatch, core, result):
+    """reload_sides туннеля: отдаёт result и запоминает, что видел в этот момент."""
+    seen = []
+
+    def reload_sides():
+        seen.append({"busy": core.busy, "locked": core.lock.locked()})
+        return result() if callable(result) else result
+
+    monkeypatch.setattr(core.tunnel, "reload_sides", reload_sides, raising=False)
+    return seen
+
+
+def test_правка_при_выключенном_vpn_ничего_не_поднимает(monkeypatch):
+    core = _core(monkeypatch)
+    core.tunnel.uplink = None
+    seen = _reload(monkeypatch, core, [])
+
+    assert core._apply() == {"ok": True, "applied": "off"}
+
+    assert seen == [] and core.tunnel.starts == 0
+
+
+def test_правка_перезапускает_только_сменившийся_туннель(monkeypatch):
+    core = _core(monkeypatch)
+    home, work = core.tunnel.home, core.tunnel.work
+    core._dead_hits = ((0.0, home.tag, "1.1.1.1"), (0.0, work.tag, "10.53.0.4"))
+    core._side_after = {"home": 9e9, "work": 9e9}
+    core._side_noted = {"home": 9e9, "work": 9e9}
+    seen = _reload(monkeypatch, core, [(home, "")])
+
+    reply = core._apply()
+
+    assert reply == {"ok": True, "applied": "sides", "restarted": ["home"]}
+    # Трей не сереет: busy пуст, а замок держим — сторож ждёт.
+    assert seen == [{"busy": "", "locked": True}]
+    assert core.tunnel.starts == 0
+    # Таймауты и пауза перезапуска были у прежнего конфига.
+    assert [h[1] for h in core._dead_hits] == [work.tag]
+    assert core._side_after == {"work": 9e9} and core._side_noted == {"work": 9e9}
+    assert core.prober._remeasure.is_set()
+
+
+def test_правка_без_смены_процессов_проверку_не_просит(monkeypatch):
+    core = _core(monkeypatch)
+    _reload(monkeypatch, core, [])
+
+    assert core._apply() == {"ok": True, "applied": "sides", "restarted": []}
+
+    assert not core.prober._remeasure.is_set()
+
+
+def test_ошибка_перезапуска_туннеля_в_ответе_и_журнале(monkeypatch):
+    core = _core(monkeypatch)
+    _reload(monkeypatch, core, [(core.tunnel.work, "«Работа»: не удалось разрешить x")])
+
+    reply = core._apply()
+
+    assert reply["ok"] is False and reply["applied"] == "sides"
+    assert reply["error"] == "«Работа»: не удалось разрешить x"
+    assert _said(core, "!! «Работа»: не удалось разрешить x")
+
+
+def test_сменился_основной_конфиг_полный_перезапуск(monkeypatch):
+    core = _core(monkeypatch)
+    _reload(monkeypatch, core, None)
+
+    reply = core._apply()
+
+    assert reply == {"ok": True, "applied": "full"}
+    assert core.tunnel.starts == 1 and core.tunnel.uplink == OFFICE
+    assert _said(core, "сменилось то, что держит основной процесс")
+
+
+def test_правка_посреди_круга_сторожа_перезапуск_не_делает(monkeypatch):
+    """Процесс, который правка как раз перезапускает, сторож увидел бы лежащим."""
+    core = _core(monkeypatch)
+    core.tunnel.out = buildconfig.DIRECT_TAG
+    core.tunnel.work.proc = _Proc()
+    _reload(monkeypatch, core, [(core.tunnel.work, "")])
+
+    def delay(_tag):
+        core._apply()
+        return None
+
+    monkeypatch.setattr(core.tunnel, "delay", delay)
+
+    _rounds(core, 1)
+
+    assert core.tunnel.restarts == []
+    assert not _said(core, "перезапускаю процесс") and core._side_after == {}
+
+
+def test_правка_пока_идёт_включение_отказ(monkeypatch):
+    core = _core(monkeypatch)
+    core.busy = "включаю"
+    core.lock.acquire()
+
+    assert core._apply() == {"ok": False, "error": "уже идёт: включаю"}
+
+
 def _corp_dead():
     return (_timeout("172.15.0.228:3000", "wg-work"),
             _timeout("10.160.138.4:443", "wg-work"),

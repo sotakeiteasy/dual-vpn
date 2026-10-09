@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from dualvpn import buildconfig, paths, tunnels
+from dualvpn import buildconfig, paths, tunnel, tunnels
 
 
 CORP = """
@@ -598,6 +598,39 @@ def test_помощники_читают_собранный_конфиг(build):
     assert buildconfig.side_link(main, "lab")["port"] == _by_tag(
         main["outbounds"], "socks-lab")["server_port"]
     assert buildconfig.side_link(main, "нет") is None
+
+
+def _again(main, tmp_path, texts):
+    """Сборка, как в Tunnel.reload_sides: связи и clash_api работающего запуска,
+    имена пиров не резолвим."""
+    data = tunnels.validate({"tunnels": THREE})
+    confs = {tid: _write(tmp_path, f"{tid}-2.conf", text) for tid, text in texts.items()}
+    links = {tid: buildconfig.side_link(main, tid) for tid in buildconfig.side_ids(main)}
+    config, sides, _, _ = buildconfig.assemble(
+        data, confs, lambda line: None, links, tunnel._api_link(main), resolve=False)
+    return json.loads(json.dumps(config)), sides
+
+
+def test_другой_конфиг_основного_туннеля_основной_процесс_не_меняет(build, tmp_path):
+    """Иначе смена конфига всегда уходила бы в полный перезапуск с падением интернета."""
+    main, _ = build(THREE)
+    texts = dict(CONFS, home=PERSONAL_AWG.replace("203.0.113.5", "nl-2.example")
+                 .replace("cHVibGljLXBlcnNvbmFs", "cHVibGljLW5sLTI="))
+
+    again, sides = _again(main, tmp_path, texts)
+
+    assert again == main
+    # Пира резолвит Tunnel._swap_side — только у сменившегося туннеля.
+    assert sides["home"]["endpoints"][0]["peers"][0]["address"] == "nl-2.example"
+
+
+def test_другие_подсети_туннеля_по_списку_меняют_основной_процесс(build, tmp_path):
+    main, _ = build(THREE)
+    texts = dict(CONFS, work=CORP.replace("192.168.77.0/24", "192.168.78.0/24"))
+
+    again, _ = _again(main, tmp_path, texts)
+
+    assert again != main
     assert buildconfig.tunnel_dns(main) == {"work": "10.0.0.53"}
     assert buildconfig.tunnel_domains(main) == ["corp.example", ".intra.example"]
     assert buildconfig.tunnel_nets(main, "work") == ["10.10.0.0/16", "192.168.77.0/24"]

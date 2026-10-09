@@ -129,8 +129,11 @@ def test_правка_при_выключенном_vpn_не_включает_е
     assert "restarting" not in [fn for fn, _ in shown]
 
 
-def test_правка_при_включённом_vpn_перезапускает_туннель(monkeypatch):
+def test_правка_при_включённом_vpn_применяет_её_службой_без_выключения(monkeypatch):
     ops, _, shown = _save_rules(monkeypatch, up=True)
 
-    assert ops.index("stop") < ops.index("start")
-    assert "restarting" in [fn for fn, _ in shown]
+    # Что перезапускать — процесс туннеля или всё, — решает служба (apply):
+    # окно само VPN не выключает, иначе интернет падал на каждую правку.
+    assert "apply" in ops
+    assert "start" not in ops and "stop" not in ops
+    assert "restarting" not in [fn for fn, _ in shown]

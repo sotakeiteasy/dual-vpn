@@ -260,6 +260,8 @@ class Core:
             return self._do_start(payload.get("profile", ""))
         if op == "stop":
             return self._do_stop()
+        if op == "apply":
+            return self._apply()
         if op == "set-profile":
             return self._set_profile(payload.get("profile", ""))
         if op == "set-active":
@@ -527,6 +529,46 @@ class Core:
             self.busy = ""
             self.lock.release()
 
+    def _apply(self):
+        """Правка конфигов — на живой VPN (решение #14): перезапуск только
+        боковых со сменившимся конфигом, tun и интернет не падают. Сменилось
+        то, что держит основной процесс, — выключение и включение. Выключенный
+        VPN не включаем: правка подхватится на включении."""
+        if not self.lock.acquire(blocking=False):
+            return {"ok": False, "error": f"уже идёт: {self.busy or 'операция'}"}
+        try:
+            if self.tunnel.uplink is None:
+                return {"ok": True, "applied": "off"}
+            # Круг сторожа, начатый до правки, увидел бы перезапускаемый
+            # процесс лежащим и перезапустил бы его сам.
+            self._human += 1
+            done = self.tunnel.reload_sides()
+            if done is not None:
+                errs = [err for _, err in done if err]
+                for side, err in done:
+                    if err:
+                        self.log(f"!! {err}")
+                    self._forget_side(side)
+                if done:
+                    self.prober.set(out=self.tunnel.out_now())
+                    self.prober.remeasure()
+                return {"ok": not errs, "applied": "sides",
+                        "restarted": [side.tid for side, _ in done],
+                        **({"error": "; ".join(errs)} if errs else {})}
+        finally:
+            self.lock.release()
+        self.log("→ сменилось то, что держит основной процесс, — перезапускаю VPN")
+        reply = self._do_stop()
+        if not reply.get("ok"):
+            return reply
+        return {**self._do_start(), "applied": "full"}
+
+    def _forget_side(self, side):
+        """Таймауты и пауза перезапуска процесса — от старого конфига."""
+        self._dead_hits = tuple(h for h in self._dead_hits if h[1] != side.tag)
+        self._side_after.pop(side.tid, None)
+        self._side_noted.pop(side.tid, None)
+
     def _do_stop(self):
         if not self.lock.acquire(blocking=False):
             return {"ok": False, "error": f"уже идёт: {self.busy or 'операция'}"}
@@ -576,7 +618,8 @@ class Core:
     def _watch_once(self, seen, streak, retry_at):
         """Один круг сторожа. Принимает и возвращает его состояние:
         какую новую сеть видим, сколько кругов подряд и когда следующий повтор."""
-        if self.busy:
+        # Замок без busy — правка конфигов (_apply): трей не сереет, а сторож ждёт.
+        if self.busy or self.lock.locked():
             return None, 0, retry_at
         self._round_human = self._human
         st = self.prober.snapshot()
@@ -691,6 +734,11 @@ class Core:
         """Упавший или мёртвый туннель — перезапуск только его процесса, не чаще
         DEAD_GAP. Пока основной не везёт, выход наружу напрямую: главное — чтобы
         интернет работал; везёт снова — выход обратно через него."""
+        # Круг идёт секундами. Выключили, включили или правили конфиги за это время —
+        # его таймауты и замеры от прежних процессов: 9 октября так сторож после
+        # перезапуска назвал свежий процесс «не запущенным» и увёл выход на 17 с напрямую.
+        if self._round_human != self._human:
+            return
         dead = self._dead_tunnels(lines)
         main = self.tunnel.main
         out, carries = self.tunnel.out_now(), None
@@ -698,6 +746,8 @@ class Core:
             out, carries = self._try_back(main)
         self.prober.set(out=out)
         for side in self.tunnel.sides:
+            if self._round_human != self._human:
+                return
             hits = dead.get(side.tag)
             # Живой основной, через который проверка не дошла: трафика через
             # него нет, и таймаутов в журнале не будет.

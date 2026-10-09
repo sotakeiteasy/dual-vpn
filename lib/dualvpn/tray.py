@@ -444,9 +444,10 @@ class Tray:
             if reply is None:
                 return
             if self.status.get("up"):
+                # Служба перезапустит только процесс этого туннеля.
                 self._notify(f"«{title}»: конфиг {reply.get('name')}.conf,"
-                             " перезапускаю VPN")
-                self.on_restart()
+                             " переключаю туннель")
+                self._call("apply")
             else:
                 self._notify(f"«{title}»: добавлен конфиг {reply.get('name')}.conf")
         threading.Thread(target=work, daemon=True).start()

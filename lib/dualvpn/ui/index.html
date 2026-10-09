@@ -774,11 +774,6 @@ function failed(msg) {
   notice(msg, 'var(--bad)', 7000);
 }
 
-function restarting() {
-  PENDING = {mode: 'restart', at: Date.now(), sawDown: false};
-  notice('применяю изменения, туннель перезапускается…', 'var(--dim)', 25000);
-}
-
 function renderVersion(v) {
   document.getElementById('version').textContent =
     `DualVPN ${v.app}` + (v.singbox ? ` · sing-box ${v.singbox}` : '');

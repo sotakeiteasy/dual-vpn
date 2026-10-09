@@ -572,6 +572,170 @@ def test_пиры_после_перезапуска_службы_берутся_
     assert sorted(tun._peer_ips()) == ["203.0.113.10", "203.0.113.20"]
 
 
+# ------------------------------------------------- смена конфига на ходу
+
+
+def _use(tid, name):
+    data = tunnels.load()
+    tunnels.find(data, tid)["active"] = name
+    tunnels.save(data)
+
+
+@pytest.fixture
+def live(env, monkeypatch):
+    """Поднятый VPN; сборка отдаёт основной конфиг как у работающего (или
+    seen["main_cfg"]) и боковые с пиром по имени, пир резолвится в seen["peer"]."""
+    tun, build, seen = env
+    assert tun.start() == ""
+    running = buildconfig.read_json(paths.CONFIG_JSON)
+    seen.update(asked=[], main_cfg=running, peer="203.0.113.30")
+
+    def assemble(data, confs, log, links, api, resolve):
+        seen["asked"].append({"links": links, "resolve": resolve})
+        sides = {tid: {"endpoints": [{"peers": [{"address": f"{tid}.example"}]}]}
+                 for tid in confs}
+        return seen["main_cfg"], sides, [], []
+
+    def peer_host(host, _tag, _log):
+        if not seen["peer"]:
+            raise SystemExit(f"не удалось разрешить {host}")
+        return seen["peer"]
+
+    build.assemble, build.peer_host = assemble, peer_host
+    seen["outs"] = []
+    monkeypatch.setattr(tun, "set_out", seen["outs"].append)
+    return tun, seen
+
+
+def _peer(tid):
+    return buildconfig.read_json(buildconfig.side_json(tid))["endpoints"][0]["peers"][0]
+
+
+def test_смена_конфига_основного_перезапускает_только_его_процесс(live):
+    tun, seen = live
+    main, work, home = tun.proc, _side(tun, "work").proc, tun.main.proc
+    _use("home", "nl-2")
+
+    done = tun.reload_sides()
+
+    assert [(side.tid, err) for side, err in done] == [("home", "")]
+    assert home.terminated and tun.main.alive() and tun.main.proc is not home
+    assert not main.terminated and not work.terminated and tun.proc is main
+    # Пока процесс основного лежит — выход напрямую, потом обратно.
+    assert seen["outs"] == [buildconfig.DIRECT_TAG, HOME_SOCKS]
+    assert _peer("home")["address"] == "203.0.113.30"
+    assert ("203.0.113.30/32", 18, "192.168.0.1", 1) in seen["net"].added
+    assert any(parts[:2] == ["host", "203.0.113.30"] for parts in tun.owned_lines())
+    assert tun.profile == "nl-2"
+
+
+def test_сборка_берёт_связи_работающего_запуска_без_резолва(live):
+    tun, seen = live
+    _use("home", "nl-2")
+
+    tun.reload_sides()
+
+    [asked] = seen["asked"]
+    assert asked["resolve"] is False
+    assert {tid: link["port"] for tid, link in asked["links"].items()} == {
+        "work": 1080, "home": 1081}
+
+
+def test_переписанный_файл_того_же_конфига_тоже_смена(live):
+    tun, seen = live
+    work = _side(tun, "work").proc
+    with open(tunnels.active_conf(tunnels.find(tunnels.load(), "work")), "a",
+              encoding="utf-8") as fh:
+        fh.write("MTU = 1380\n")
+
+    done = tun.reload_sides()
+
+    assert [side.tid for side, _ in done] == ["work"]
+    assert work.terminated
+    # Не основной: выход не трогаем.
+    assert seen["outs"] == []
+
+
+def test_без_смены_конфигов_никого_не_перезапускает(live):
+    tun, seen = live
+    _use("home", "nl-2")
+    tun.reload_sides()
+    started = list(seen["started"])
+
+    assert tun.reload_sides() == []
+    assert seen["started"] == started
+
+
+def test_сменился_основной_конфиг_нужен_полный_перезапуск(live):
+    """Подсети или DNS туннеля «по списку» держит основной процесс: он конфиг не перечитывает."""
+    tun, seen = live
+    seen["main_cfg"] = {**seen["main_cfg"], "route": {"final": "direct"}}
+    home = tun.main.proc
+    _use("home", "nl-2")
+
+    assert tun.reload_sides() is None
+
+    assert not home.terminated
+    assert _peer("home")["address"] == "203.0.113.10"
+
+
+def test_испорченный_tunnels_json_нужен_полный_перезапуск(live):
+    tun, _seen = live
+    with open(paths.TUNNELS_JSON, "w", encoding="utf-8") as fh:
+        fh.write("{")
+
+    assert tun.reload_sides() is None
+
+
+def test_без_поднятого_vpn_нужен_полный(env):
+    tun, _build, seen = env
+
+    assert tun.reload_sides() is None
+    assert seen["started"] == []
+
+
+def test_пир_не_резолвится_прежний_процесс_работает(live):
+    tun, seen = live
+    seen["peer"] = ""
+    home = tun.main.proc
+    _use("home", "nl-2")
+
+    [(side, err)] = tun.reload_sides()
+
+    assert side is tun.main and "не удалось разрешить home.example" in err
+    assert not home.terminated and tun.main.proc is home
+    assert seen["outs"] == []
+    assert _peer("home")["address"] == "203.0.113.10"
+    # Метка старая: следующая правка попробует снова.
+    seen["peer"] = "203.0.113.30"
+    assert [s.tid for s, _ in tun.reload_sides()] == ["home"]
+
+
+def test_не_поднявшийся_на_новом_конфиге_следующая_правка_не_трогает(live):
+    """Его конфиг уже на диске: поднимать будет сторож, лишний перезапуск не нужен."""
+    tun, seen = live
+    seen["dies"] = {"work"}
+    with open(tunnels.active_conf(tunnels.find(tunnels.load(), "work")), "a",
+              encoding="utf-8") as fh:
+        fh.write("MTU = 1380\n")
+
+    [(side, err)] = tun.reload_sides()
+
+    assert side.tid == "work" and "упал" in err
+    assert tun.reload_sides() == []
+
+
+def test_пир_с_маршрутом_второй_раз_не_ставится(live):
+    """Новый конфиг на тот же сервер, что у соседа: маршрут к нему уже наш."""
+    tun, seen = live
+    seen["peer"] = "203.0.113.20"
+    before = list(seen["net"].added)
+    _use("home", "nl-2")
+
+    tun.reload_sides()
+
+    assert seen["net"].added == before
+
 
 # ------------------------------------------------------------ выход наружу
 

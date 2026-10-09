@@ -32,8 +32,9 @@ from . import paths
 READ_OPS = frozenset({"status", "list-profiles", "log", "check", "howto"})
 # Команды управления туннелем: их разрешаем любому вошедшему пользователю.
 # set-active, как set-profile, только выбирает среди уже лежащих конфигов.
+# apply только применяет уже записанные конфиги к живому VPN, как start.
 # Списки правил туннелей (get-tunnels) — администратору: в них рабочая сеть.
-USER_OPS = frozenset({"start", "stop", "set-profile", "set-active"})
+USER_OPS = frozenset({"start", "stop", "set-profile", "set-active", "apply"})
 
 
 def requires_admin(op):

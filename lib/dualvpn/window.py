@@ -248,18 +248,15 @@ class Api:
             raise RuntimeError(reply.get("error") or "служба отказала")
 
     def _apply(self):
-        """Правка туннелей действует на живом VPN только после перезапуска
-        (решение #12). Выключенный не включаем: раньше он включался сам,
-        а без конфига падал с ошибкой."""
+        """Правка туннелей — на живой VPN через службу (решение #14): она
+        перезапускает только процесс туннеля со сменившимся конфигом, а
+        целиком — лишь когда сменилось то, что держит основной процесс.
+        Выключенный не включает."""
         try:
             try:
-                up = ipc.call("status").get("status", {}).get("up")
+                self._guard(ipc.call("apply"))
             except ipc.NotRunning:
-                up = False
-            if up:
-                self.js("restarting")
-                ipc.call("stop")
-                self._guard(ipc.call("start", profile=""))
+                pass
         finally:
             self.refresh(full=True)
 
