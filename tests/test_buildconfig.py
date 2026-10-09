@@ -405,8 +405,8 @@ THREE = [
 
 @pytest.fixture
 def build(tmp_path, monkeypatch):
-    """Собирает туннели во временную state\\: (основной, {id: боковой})."""
-    monkeypatch.setattr(paths, "STATE", str(tmp_path))
+    """Собирает туннели во временную state\\run\\: (основной, {id: боковой})."""
+    monkeypatch.setattr(paths, "RUN", str(tmp_path))
 
     def run(items, level="info", texts=CONFS):
         data = tunnels.validate({"log_level": level, "tunnels": items})
@@ -586,11 +586,14 @@ def test_socks_выход_в_статистике_под_тегом_туннел
 @pytest.fixture
 def state(tmp_path, monkeypatch):
     """conf\\ и state\\ во временной папке, sing-box не запущен: рабочий
-    «по списку» и личный основной, по конфигу у каждого."""
+    «по списку» и личный основной, по конфигу у каждого. Возвращает
+    state\\run\\ — туда пишет сборка."""
     state = tmp_path / "state"
+    run = state / "run"
     monkeypatch.setattr(paths, "STATE", str(state))
+    monkeypatch.setattr(paths, "RUN", str(run))
     monkeypatch.setattr(paths, "CONF", str(tmp_path / "conf"))
-    monkeypatch.setattr(paths, "CONFIG_JSON", str(state / "config.json"))
+    monkeypatch.setattr(paths, "CONFIG_JSON", str(run / "config.json"))
     monkeypatch.setattr(paths, "TUNNELS_JSON", str(tmp_path / "conf" / "tunnels.json"))
     monkeypatch.setattr(paths, "CONF_TUNNELS", str(tmp_path / "conf" / "tunnels"))
     monkeypatch.setattr(buildconfig, "running_pid", lambda: "")
@@ -600,7 +603,7 @@ def state(tmp_path, monkeypatch):
     tunnels.save({"tunnels": [
         _tunnel("work", "list", ["corp.example"], ["10.10.5.9"]),
         _tunnel("home", "all")]})
-    return state
+    return run
 
 
 def _conf(tmp_path, tid, name, text):
@@ -676,16 +679,30 @@ def test_испорченный_tunnels_json_это_внятная_ошибка(
         buildconfig.main(log=lambda line: None)
 
 
-def test_старые_и_лишние_боковые_конфиги_удаляются(state):
+def test_лишние_боковые_конфиги_удаляются(state):
     """В них приватные ключи туннелей, которых больше нет."""
-    state.mkdir()
-    for name in ("corp.json", "personal.json", "tunnel-old.json", "status.json"):
-        (state / name).write_text("{}", encoding="utf-8")
+    state.mkdir(parents=True)
+    (state / "tunnel-old.json").write_text("{}", encoding="utf-8")
 
     buildconfig.main(log=lambda line: None)
 
     assert sorted(p.name for p in state.iterdir()) == [
-        "config.json", "status.json", "tunnel-home.json", "tunnel-work.json"]
+        "config.json", "tunnel-home.json", "tunnel-work.json"]
+
+
+def test_собранные_конфиги_из_открытого_state_удаляются(state):
+    """До state\\run\\ собранные конфиги лежали в state\\, который читает
+    любой пользователь. Соседей вроде status.json уборка не трогает."""
+    old = state.parent
+    old.mkdir()
+    for name in ("config.json", "corp.json", "personal.json", "tunnel-work.json",
+                 "status.json", "paths.json"):
+        (old / name).write_text("{}", encoding="utf-8")
+
+    buildconfig.main(log=lambda line: None)
+
+    assert sorted(p.name for p in old.iterdir()) == ["paths.json", "run", "status.json"]
+    assert (state / "tunnel-work.json").exists()
 
 
 @pytest.mark.parametrize("cfg", [

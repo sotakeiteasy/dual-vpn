@@ -208,6 +208,8 @@ class Core:
         tid = payload.get("tunnel", "")
         if op == "status":
             return {"ok": True, "status": self._status()}
+        if op == "howto":
+            return {"ok": True, "howto": self._howto(is_admin)}
         if op == "start":
             return self._do_start(payload.get("profile", ""))
         if op == "stop":
@@ -284,6 +286,35 @@ class Core:
         st["corp"] = self._corp(data)
         st["last"] = self._last_results()
         return st
+
+    @staticmethod
+    def _howto(is_admin):
+        """Что собрано, для «Как подключиться» в окне: собранные конфиги
+        лежат в state\\run\\, окну без прав туда не заглянуть. Ключи и пароли
+        не отдаются; подсети и домены туннеля — только администратору,
+        как списки правил в get-tunnels: в них рабочая сеть."""
+        main_cfg = buildconfig.read_json(paths.CONFIG_JSON)
+        ids = buildconfig.side_ids(main_cfg)
+        endpoints = []
+        for tid in ids:
+            for ep in buildconfig.read_json(buildconfig.side_json(tid)).get("endpoints", []):
+                peers = ep.get("peers") or [{}]
+                endpoints.append({
+                    "tag": ep.get("tag", ""),
+                    "address": ", ".join(ep.get("address") or []),
+                    "mtu": ep.get("mtu"),
+                    "awg": any(k in ep for k in ("jc", "s1", "h1")),
+                    "peer": peers[0].get("address", ""),
+                })
+        nets, domains = [], []
+        if is_admin:
+            # Рабочий — первый не основной: пока окно знает один туннель
+            # «по списку».
+            main_id = buildconfig.main_id(main_cfg)
+            work = next((tid for tid in ids if tid != main_id), None)
+            nets = buildconfig.tunnel_nets(main_cfg, work) if work else []
+            domains = buildconfig.tunnel_domains(main_cfg)
+        return {"endpoints": endpoints, "corp_nets": nets, "corp_domains": domains}
 
     @staticmethod
     def _conf_stamp(tid, name):
@@ -846,6 +877,9 @@ class Core:
             return
         for name, kind in moved:
             self.log(f"→ {name}.conf перенесён в conf\\{kind}")
+        # Собранные конфиги прошлой версии в открытом state\\ — сразу, не
+        # дожидаясь включения: в них ключи.
+        buildconfig.drop_legacy()
         try:
             tunnels.migrate(log=self.log)
         except (OSError, ValueError) as exc:

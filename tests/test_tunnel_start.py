@@ -134,6 +134,7 @@ def env(monkeypatch, tmp_path):
     }))
     monkeypatch.setattr(paths, "CONFIG_JSON", str(cfg))
     monkeypatch.setattr(paths, "STATE", str(tmp_path))
+    monkeypatch.setattr(paths, "RUN", str(tmp_path))
     for tid, ip in (("work", "203.0.113.20"), ("home", "203.0.113.10")):
         with open(buildconfig.side_json(tid), "w", encoding="utf-8") as fh:
             json.dump({"endpoints": [{"peers": [{"address": ip}]}]}, fh)

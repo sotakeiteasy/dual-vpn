@@ -66,6 +66,7 @@ Name: "{commonappdata}\{#MyName}"
 Name: "{commonappdata}\{#MyName}\conf"; Flags: uninsneveruninstall
 Name: "{commonappdata}\{#MyName}\state"; Flags: uninsneveruninstall
 Name: "{commonappdata}\{#MyName}\state\logs"; Flags: uninsneveruninstall
+Name: "{commonappdata}\{#MyName}\state\run"; Flags: uninsneveruninstall
 
 [Icons]
 Name: "{group}\{#MyName}"; Filename: "{app}\{#MyExe}"
@@ -94,6 +95,13 @@ Filename: "{sys}\icacls.exe"; \
   Parameters: """{commonappdata}\{#MyName}\state"" /inheritance:r \
     /grant:r ""*S-1-5-18"":(OI)(CI)F /grant:r ""*S-1-5-32-544"":(OI)(CI)F \
     /grant:r ""*S-1-5-11"":(OI)(CI)RX"; \
+  Flags: runhidden waituntilterminated
+; state\run\ — собранные конфиги sing-box с теми же ключами, что в conf\:
+; закрыт, как conf\. После state\: своё /inheritance:r не даёт наследовать RX.
+; Сведения для окна служба отдаёт через канал (howto).
+Filename: "{sys}\icacls.exe"; \
+  Parameters: """{commonappdata}\{#MyName}\state\run"" /inheritance:r \
+    /grant:r ""*S-1-5-18"":(OI)(CI)F /grant:r ""*S-1-5-32-544"":(OI)(CI)F"; \
   Flags: runhidden waituntilterminated
 
 ; --- Служба. Прошлую не снимаем: «service install» у существующей службы сам

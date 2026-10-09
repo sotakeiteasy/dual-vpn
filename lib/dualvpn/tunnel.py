@@ -333,7 +333,7 @@ class Tunnel:
             # buildconfig сообщает об ошибках через sys.exit с текстом.
             return str(exc) or "не удалось собрать конфиг — правь conf\\*.conf"
         self.profile = want
-        self.main_id = buildconfig.main_id(_load_json(paths.CONFIG_JSON))
+        self.main_id = buildconfig.main_id(buildconfig.read_json(paths.CONFIG_JSON))
         self.sides = [Side(tid, name) for tid, name in built]
 
         # Отдельной строкой: сборка и проверка шли под одной, и по журналу
@@ -513,11 +513,11 @@ class Tunnel:
         """
         out = []
         endpoints = []
-        main_cfg = _load_json(paths.CONFIG_JSON)
+        main_cfg = buildconfig.read_json(paths.CONFIG_JSON)
         for cfg_path in (paths.CONFIG_JSON,
                          *(buildconfig.side_json(tid)
                            for tid in buildconfig.side_ids(main_cfg))):
-            endpoints += _load_json(cfg_path).get("endpoints", [])
+            endpoints += buildconfig.read_json(cfg_path).get("endpoints", [])
         for ep in endpoints:
             for peer in ep.get("peers", []):
                 host = (peer.get("address") or "").strip()
@@ -534,7 +534,7 @@ class Tunnel:
     @staticmethod
     def _corp_domains():
         """Домены, которые собранный конфиг отдаёт DNS туннелей."""
-        return buildconfig.tunnel_domains(_load_json(paths.CONFIG_JSON))
+        return buildconfig.tunnel_domains(buildconfig.read_json(paths.CONFIG_JSON))
 
     # ---------------------------------------------------- боковые процессы
 
@@ -544,7 +544,7 @@ class Tunnel:
         Ждём именно socks, а не просто живой процесс: основной отдаёт трафик
         на этот порт, и до его открытия первые запросы получили бы отказ.
         """
-        link = buildconfig.side_link(_load_json(paths.CONFIG_JSON), side.tid)
+        link = buildconfig.side_link(buildconfig.read_json(paths.CONFIG_JSON), side.tid)
         if not link or not link.get("port"):
             return f"в собранном конфиге нет связи с процессом {side.tag}"
         self._stop_side(side)
@@ -638,7 +638,7 @@ class Tunnel:
         Прокси обходим явно: urllib берёт системный прокси Windows, и запрос
         на 127.0.0.1 ушёл бы к нему. Ошибки — OSError (HTTPError тоже он).
         """
-        api = buildconfig.api_of(_load_json(paths.CONFIG_JSON))
+        api = buildconfig.api_of(buildconfig.read_json(paths.CONFIG_JSON))
         if api is None:
             raise OSError("в конфиге нет clash_api")
         addr, secret = api
@@ -821,15 +821,6 @@ class Tunnel:
         else:
             self.log("!! маршрут по умолчанию отсутствует — сеть не поднята?")
 
-
-def _load_json(path):
-    """Собранный конфиг как словарь; нет или битый — пустой."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _port_open(port):

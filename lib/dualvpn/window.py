@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from . import buildconfig, instance, ipc, paths, tunnels
+from . import instance, ipc, paths, tunnels
 
 POLL_EVERY = 2.0
 # Сколько ждём отчёта страницы о готовности. Не дождались — WebView2 не
@@ -346,41 +346,16 @@ class Api:
 
     @staticmethod
     def _howto(st):
-        endpoints = []
-        # Туннели живут в своих процессах (buildconfig.side_json), основной
-        # отдаёт рабочему подсети правилом на его socks-выход.
+        """«Как подключиться» для renderHowto. Собранные конфиги в state\\run\\
+        закрыты — читает служба; окну без прав она не отдаёт подсети и домены."""
         try:
-            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
-                main_cfg = json.load(fh)
-        except (OSError, ValueError):
-            main_cfg = {}
-        # Рабочий — первый не основной: пока окно знает один туннель «по списку».
-        main_id = buildconfig.main_id(main_cfg)
-        work = next((tid for tid in buildconfig.side_ids(main_cfg)
-                     if tid != main_id), None)
-        nets = buildconfig.tunnel_nets(main_cfg, work) if work else []
-        for tid in buildconfig.side_ids(main_cfg):
-            try:
-                with open(buildconfig.side_json(tid), encoding="utf-8") as fh:
-                    cfg = json.load(fh)
-            except (OSError, ValueError):
-                continue
-            for ep in cfg.get("endpoints", []):
-                peers = ep.get("peers") or [{}]
-                endpoints.append({
-                    "tag": ep.get("tag", ""),
-                    "address": ", ".join(ep.get("address") or []),
-                    "mtu": ep.get("mtu"),
-                    "awg": any(k in ep for k in ("jc", "s1", "h1")),
-                    "peer": peers[0].get("address", ""),
-                })
-        return {
-            "endpoints": endpoints,
-            "corp_nets": nets,
-            "corp_domains": buildconfig.tunnel_domains(main_cfg),
-            "corp_dns": st.get("corp_dns", ""),
-            "final": "личный туннель",
-        }
+            reply = ipc.call("howto")
+        except ipc.NotRunning:
+            reply = {}
+        howto = reply.get("howto") or {"endpoints": [], "corp_nets": [],
+                                        "corp_domains": []}
+        return {**howto, "corp_dns": st.get("corp_dns", ""),
+                "final": "личный туннель"}
 
     def _push_logs(self):
         self.js("renderLogs", ipc.call("log", lines=400).get("lines", []))

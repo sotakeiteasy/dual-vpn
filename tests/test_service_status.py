@@ -1,10 +1,13 @@
 """Статус службы сразу после start/stop: up уже новый, а не из снимка
 двухсекундной давности — иначе трей после «выключаю» снова зеленел."""
 
+import json
 import threading
 import types
 
-from dualvpn import probe, service, tunnels
+import pytest
+
+from dualvpn import buildconfig, paths, probe, service, tunnels
 
 
 class _Tunnel:
@@ -111,6 +114,58 @@ def test_статус_отдаёт_туннели_без_их_правил(monke
     assert core._status()["tunnels"] == [
         {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
          "confs": ["corp", "old"]}]
+
+
+@pytest.fixture
+def run_dir(tmp_path, monkeypatch):
+    """Собранные конфиги в state\\run\\: рабочий «по списку» и личный основной."""
+    monkeypatch.setattr(paths, "RUN", str(tmp_path))
+    monkeypatch.setattr(paths, "CONFIG_JSON", str(tmp_path / "config.json"))
+    (tmp_path / "config.json").write_text(json.dumps({
+        "outbounds": [
+            {"type": "socks", "tag": "socks-work", "password": "секрет"},
+            {"type": "socks", "tag": "socks-home", "password": "секрет"},
+            {"type": "selector", "tag": "out", "default": "socks-home",
+             "outbounds": ["socks-home", "direct"]}],
+        "route": {"rules": [{"ip_cidr": ["10.10.0.0/16"], "outbound": "socks-work"}]},
+        "dns": {"rules": [{"domain_suffix": ["corp.example"], "server": "dns-work"}]},
+    }), encoding="utf-8")
+    for tid, extra in (("work", {}), ("home", {"jc": 4})):
+        buildconfig.write_json(buildconfig.side_json(tid), {"endpoints": [{
+            "tag": f"wg-{tid}", "address": ["10.8.0.2/32"], "mtu": 1280,
+            "private_key": "ключ", **extra,
+            "peers": [{"address": "203.0.113.9", "public_key": "ключ"}]}]})
+    return tmp_path
+
+
+def test_howto_отдаёт_собранное_без_ключей(run_dir, monkeypatch):
+    """Окно больше не читает state\\run\\ само — служба отдаёт только показ."""
+    reply = _core(monkeypatch, up=False).handle("howto", {}, True)
+
+    assert reply == {"ok": True, "howto": {
+        "endpoints": [
+            {"tag": "wg-work", "address": "10.8.0.2/32", "mtu": 1280, "awg": False,
+             "peer": "203.0.113.9"},
+            {"tag": "wg-home", "address": "10.8.0.2/32", "mtu": 1280, "awg": True,
+             "peer": "203.0.113.9"}],
+        "corp_nets": ["10.10.0.0/16"],
+        "corp_domains": ["corp.example"]}}
+    assert "секрет" not in json.dumps(reply) and "ключ" not in json.dumps(reply)
+
+
+def test_howto_без_прав_без_списков_рабочей_сети(run_dir, monkeypatch):
+    """Подсети и домены туннеля — как get-tunnels, только администратору."""
+    howto = _core(monkeypatch, up=False).handle("howto", {}, False)["howto"]
+
+    assert howto["corp_nets"] == [] and howto["corp_domains"] == []
+    assert [e["tag"] for e in howto["endpoints"]] == ["wg-work", "wg-home"]
+
+
+def test_howto_до_первой_сборки_пуст(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "CONFIG_JSON", str(tmp_path / "нет.json"))
+
+    assert service.Core._howto(True) == {
+        "endpoints": [], "corp_nets": [], "corp_domains": []}
 
 
 def test_после_включения_снимок_уже_с_туннелем(monkeypatch):

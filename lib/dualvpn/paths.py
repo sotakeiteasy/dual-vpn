@@ -11,7 +11,8 @@
 должна служба под LocalSystem, а читать — трей под обычным пользователем.
 Права раздаёт установщик: conf\\ виден только SYSTEM и администраторам (там
 приватные ключи), state\\ доступен пользователям на чтение — оттуда трей берёт
-status.json и логи.
+status.json и логи. Кроме state\\run\\: собранные конфиги sing-box несут те же
+ключи, он закрыт, как conf\\.
 """
 
 import os
@@ -48,6 +49,9 @@ CONF_PERSONAL = os.path.join(CONF, "personal")
 TUNNELS_JSON = os.path.join(CONF, "tunnels.json")
 CONF_TUNNELS = os.path.join(CONF, "tunnels")
 STATE = os.path.join(DATA, "state")
+# Собранные конфиги sing-box: основной (CONFIG_JSON) и боковые
+# (buildconfig.side_json). В них ключи туннелей и пароли socks-входов.
+RUN = os.path.join(STATE, "run")
 LOGS = os.path.join(STATE, "logs")
 # Журналы процессов — <префикс>-<дата>.log, дата в таком виде.
 LOG_STAMP = "%Y-%m-%d_%H%M%S"
@@ -71,8 +75,7 @@ WINTUN = os.path.join(BIN, "wintun.dll")
 UI_DIR = (os.path.join(BUNDLE, "dualvpn", "ui") if getattr(sys, "frozen", False)
           else os.path.join(BASE, "lib", "dualvpn", "ui"))
 
-CONFIG_JSON = os.path.join(STATE, "config.json")
-# Туннели — отдельные процессы sing-box, их конфиги: buildconfig.side_json.
+CONFIG_JSON = os.path.join(RUN, "config.json")
 STATUS_JSON = os.path.join(STATE, "status.json")
 PROFILE_FILE = os.path.join(STATE, "profile")
 REAL_IP_FILE = os.path.join(STATE, "real-ip")
@@ -97,7 +100,7 @@ PIPE_NAME = r"\\.\pipe\DualVPN"
 
 def ensure_dirs():
     """Создаёт каталоги данных. Зовётся и службой, и установщиком."""
-    for d in (DATA, CONF, CONF_TUNNELS, STATE, LOGS):
+    for d in (DATA, CONF, CONF_TUNNELS, STATE, RUN, LOGS):
         os.makedirs(d, exist_ok=True)
 
 

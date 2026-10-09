@@ -6,9 +6,9 @@
 .conf в conf/tunnels/<id>/. Режим list — в туннель идут подсети из его
 AllowedIPs и записи «пускать»; all — весь остальной трафик.
 
-Процессов 1 + N: state/config.json — tun, маршрутизация и DNS;
-state/tunnel-<id>.json — по процессу на туннель, каждый за своим socks на
-loopback. Сбой туннеля чинится перезапуском одного его процесса: tun не
+Процессов 1 + N: state/run/config.json — tun, маршрутизация и DNS;
+state/run/tunnel-<id>.json — по процессу на туннель, каждый за своим socks
+на loopback. Сбой туннеля чинится перезапуском одного его процесса: tun не
 падает, а трафик упавшего основного до его возвращения идёт напрямую.
 
 Подсети туннеля берутся ИЗ AllowedIPs его конфига, поэтому при ротации
@@ -536,7 +536,7 @@ def dns_section(by_tunnel, public_detour):
 LOCAL_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
               "169.254.0.0/16", "224.0.0.0/4"]
 
-# Каждый туннель живёт в своём процессе sing-box (боковой: state/tunnel-<id>.json):
+# Каждый туннель живёт в своём процессе sing-box (боковой: state/run/tunnel-<id>.json):
 # сторож перезапускает упавший один, не трогая tun, маршруты и другие туннели.
 # Основной процесс ходит в каждый через свой socks на loopback.
 #
@@ -598,10 +598,20 @@ def write_json(path, data):
     os.chmod(path, 0o600)
 
 
+def read_json(path):
+    """Собранный конфиг как словарь; нет или битый — пустой."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def side_json(tid):
     """Путь к конфигу бокового процесса туннеля. С префиксом: id «config»
-    или «status» иначе затёр бы config.json или status.json рядом."""
-    return os.path.join(paths.STATE, f"tunnel-{tid}.json")
+    иначе затёр бы config.json рядом."""
+    return os.path.join(paths.RUN, f"tunnel-{tid}.json")
 
 
 def side_config(ep, link, level="info"):
@@ -898,24 +908,41 @@ def build(data, confs, out_path, side_path=None, log=print):
 
 def _drop_stale_sides(keep):
     """Боковые конфиги туннелей, которых больше нет, — с диска: в них
-    приватные ключи. corp.json и personal.json — их имена до 0.4."""
+    приватные ключи."""
+    try:
+        names = os.listdir(paths.RUN)
+    except OSError:
+        return
+    for f in names:
+        if (f.startswith("tunnel-") and f.endswith(".json")
+                and f[len("tunnel-"):-len(".json")] not in keep):
+            _remove(os.path.join(paths.RUN, f))
+
+
+def drop_legacy():
+    """Собранные конфиги из state\\ — с диска: до state\\run\\ они лежали
+    там, где их читает любой пользователь, а в них приватные ключи.
+    corp.json и personal.json — имена боковых до 0.4."""
     try:
         names = os.listdir(paths.STATE)
     except OSError:
         return
     for f in names:
-        tid = f[len("tunnel-"):-len(".json")] if (
-            f.startswith("tunnel-") and f.endswith(".json")) else None
-        if f in ("corp.json", "personal.json") or (tid and tid not in keep):
-            try:
-                os.remove(os.path.join(paths.STATE, f))
-            except OSError:
-                pass
+        if f in ("config.json", "corp.json", "personal.json") or (
+                f.startswith("tunnel-") and f.endswith(".json")):
+            _remove(os.path.join(paths.STATE, f))
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def main(log=print):
-    """Собирает state\\config.json и боковые. [(id, имя)] собранных туннелей."""
-    os.makedirs(paths.STATE, exist_ok=True)
+    """Собирает state\\run\\config.json и боковые. [(id, имя)] собранных туннелей."""
+    os.makedirs(paths.RUN, exist_ok=True)
     out_path = paths.CONFIG_JSON
 
     # Перезаписывать конфиг под работающим процессом нельзя: адрес пира может
@@ -937,6 +964,7 @@ def main(log=print):
     built = build(data, confs, out_path, side_path, log)
     if side_path is None:
         _drop_stale_sides([tid for tid, _ in built])
+        drop_legacy()
     return built
 
 

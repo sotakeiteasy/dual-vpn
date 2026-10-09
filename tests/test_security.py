@@ -13,10 +13,11 @@ from dualvpn import buildconfig, ipc
 
 # ---------------------------------------------------- кому что разрешено
 
-@pytest.mark.parametrize("op", ["status", "list-profiles", "log", "check"])
+@pytest.mark.parametrize("op", ["status", "list-profiles", "log", "check", "howto"])
 def test_чтение_состояния_доступно_всем(op):
     """Трей опрашивает статус и просит проверку от обычного пользователя,
-    без всякого UAC."""
+    без всякого UAC. howto — окно на каждом открытии; списки правил в нём
+    служба отдаёт только администратору (service.Core._howto)."""
     assert not ipc.requires_admin(op)
 
 
