@@ -174,8 +174,9 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 dualvpn status              что сейчас поднято
 dualvpn start [ПРОФИЛЬ]     поднять
 dualvpn stop                опустить и откатить маршруты
-dualvpn list                какие конфиги видны
-dualvpn profile ИМЯ         выбрать личный конфиг по умолчанию
+dualvpn list                туннели и их конфиги (* — активный)
+dualvpn use ТУННЕЛЬ КОНФИГ  выбрать конфиг туннеля (туннель — id или имя)
+dualvpn profile ИМЯ         выбрать конфиг основного туннеля
 dualvpn log [N]             последние строки журнала sing-box
 dualvpn version
 

@@ -214,6 +214,21 @@ def test_выбранный_пропал_отказ():
         tunnels.active_conf(_tunnel(active="b"))
 
 
+
+@pytest.mark.parametrize("kind, expected", [
+    ("corp", "b"), ("personal", "home"), ("other", None),
+])
+def test_старый_тип_первый_по_списку_или_основной(kind, expected):
+    items = [_tunnel(id="home", mode="all"), _tunnel(id="b"), _tunnel(id="c")]
+    found = tunnels.by_kind(items, kind)
+    assert (found["id"] if found else None) == expected
+
+
+def test_старый_тип_без_подходящего_туннеля():
+    assert tunnels.by_kind([_tunnel()], "personal") is None
+    assert tunnels.by_kind([], "corp") is None
+
+
 # ------------------------------------------------------------------ переезд
 
 SITE_ENV = """\

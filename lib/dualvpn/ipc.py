@@ -30,7 +30,9 @@ from . import paths
 # явно перечисленных в USER_OPS.
 READ_OPS = frozenset({"status", "list-profiles", "log", "check"})
 # Команды управления туннелем: их разрешаем любому вошедшему пользователю.
-USER_OPS = frozenset({"start", "stop", "set-profile"})
+# set-active, как set-profile, только выбирает среди уже лежащих конфигов.
+# Списки правил туннелей (get-tunnels) — администратору: в них рабочая сеть.
+USER_OPS = frozenset({"start", "stop", "set-profile", "set-active"})
 
 
 def requires_admin(op):

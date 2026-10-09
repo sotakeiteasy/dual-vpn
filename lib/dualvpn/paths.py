@@ -123,24 +123,29 @@ def version():
         return "?"
 
 
+def parse_env(text):
+    """Строки KEY=value в словарь: комментарии, export и кавычки пропускаются."""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if k.startswith("export "):
+            k = k[len("export "):].strip()
+        out[k] = v.strip().strip('"').strip("'")
+    return out
+
+
 def site_env():
     """Настройки рабочей сети из conf\\site.env.
 
     Домены, проверочные хосты, исключения из маршрутов — они у каждого свои и
     в репозиторий не попадают. Без файла корп-часть просто не проверяется.
     """
-    out = {}
     try:
         with open(os.path.join(CONF, "site.env"), encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k = k.strip()
-                if k.startswith("export "):
-                    k = k[len("export "):].strip()
-                out[k] = v.strip().strip('"').strip("'")
+            return parse_env(fh.read())
     except OSError:
-        pass
-    return out
+        return {}

@@ -15,12 +15,13 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
 
-from . import buildconfig, ipc, paths, probe, tunnel, tunnels, winnet
+from . import buildconfig, ipc, paths, probe, routelist, tunnel, tunnels, winnet
 
 AUTOSTART_FILE = os.path.join(paths.STATE, "autostart")
 SERVICE_LOG = os.path.join(paths.LOGS, "service.log")
@@ -30,6 +31,10 @@ LOG_TAIL_BYTES = 256 * 1024
 # Итог последней проверки по каждому конфигу: без туннеля мерить нечем, но
 # «как он отработал в прошлый раз» видно и при выключенном VPN.
 LAST_CHECK_FILE = os.path.join(paths.STATE, "last-check.json")
+# Записей в одном списке правил через канал. Запрос канала — одно чтение
+# ipc._BUF (64 КБ), а каждая запись — правило в конфиге sing-box: тысячи —
+# скорее вставленный по ошибке файл, чем замысел. Руками в tunnels.json — сколько угодно.
+MAX_RULES = 500
 # Сколько кругов пробера (по FAST_EVERY) новая сеть должна продержаться,
 # прежде чем переподключаться: Wi-Fi при смене точки и пробуждении моргает,
 # и на каждый пропавший на секунду маршрут перезапуск только мешал бы.
@@ -195,7 +200,12 @@ class Core:
     # -------------------------------------------------------------- команды
 
     def handle(self, op, payload, is_admin):
-        """Обработчик команд из канала. Права уже проверены в ipc.Server."""
+        """Обработчик команд из канала. Права уже проверены в ipc.Server.
+
+        Туннель команды — по id или имени (tunnel), а без него — по старому
+        типу (kind: corp|personal): так зовут окно и трей до шага окна.
+        """
+        tid = payload.get("tunnel", "")
         if op == "status":
             return {"ok": True, "status": self._status()}
         if op == "start":
@@ -204,6 +214,8 @@ class Core:
             return self._do_stop()
         if op == "set-profile":
             return self._set_profile(payload.get("profile", ""))
+        if op == "set-active":
+            return self._set_active(payload.get("name", ""), tunnel=tid)
         if op == "list-profiles":
             return {"ok": True, "profiles": self._profiles(), "corp": self._corp()}
         if op == "check":
@@ -214,13 +226,26 @@ class Core:
         if op == "add-config":
             return self._add_config(payload.get("name", ""),
                                     payload.get("text", ""),
-                                    payload.get("kind", ""))
+                                    payload.get("kind", ""), tid)
         if op == "remove-config":
             return self._remove_config(payload.get("name", ""),
-                                       payload.get("kind", ""))
+                                       payload.get("kind", ""), tid)
         if op == "read-config":
             return self._read_config(payload.get("name", ""),
-                                     payload.get("kind", ""))
+                                     payload.get("kind", ""), tid)
+        if op == "get-tunnels":
+            return self._get_tunnels()
+        if op == "add-tunnel":
+            return self._add_tunnel(payload.get("name", ""),
+                                    payload.get("mode", "list"))
+        if op == "set-tunnel":
+            return self._set_tunnel(tid, payload)
+        if op == "remove-tunnel":
+            return self._remove_tunnel(tid)
+        if op == "move-tunnel":
+            return self._move_tunnel(tid, payload.get("step", 0))
+        if op == "set-log-level":
+            return self._set_log_level(payload.get("level", ""))
         if op == "set-site":
             return self._set_site(payload.get("text", ""))
         if op == "get-site":
@@ -827,26 +852,41 @@ class Core:
             self.log(f"!! не перенести настройки в tunnels.json: {exc}")
 
     @staticmethod
-    def _load_kind(kind):
-        """(tunnels.json, туннель типа kind) для правки или ValueError с причиной."""
+    def _target(data, tunnel="", kind=""):
+        """Туннель команды в data: по id, затем по имени без учёта регистра
+        (`dualvpn use Работа nl-1`); без tunnel — по старому типу corp|personal.
+        Иначе ValueError с причиной."""
+        if tunnel:
+            key = str(tunnel)
+            t = tunnels.find(data, key) or next(
+                (x for x in data["tunnels"]
+                 if x["name"].casefold() == key.casefold()), None)
+            if t is None:
+                raise ValueError(f"нет туннеля {key!r}")
+            return t
         if kind not in tunnels.LEGACY:
             raise ValueError(f"неизвестный тип конфига: {kind!r}")
-        data = tunnels.load()
         t = tunnels.by_kind(data["tunnels"], kind)
         if t is None:
             raise ValueError(f"нет туннеля для конфига типа {kind}")
-        return data, t
+        return t
 
-    def _add_config(self, name, text, kind):
-        """Кладёт конфиг в conf\\.
+    @staticmethod
+    def _load_target(tunnel="", kind=""):
+        """(tunnels.json, туннель) для правки или ValueError с причиной."""
+        data = tunnels.load()
+        return data, Core._target(data, tunnel, kind)
 
-        Тип задаёт пункт, через который конфиг добавили, а не имя: файл
-        ложится в папку своего типа под именем файла человека, очищенным от
-        недопустимых знаков (buildconfig.safe_name), а не отклонённым из-за них.
-        Рабочий заменяет прежний, личный ложится рядом с другими и выбирается.
+    def _add_config(self, name, text, kind="", tunnel=""):
+        """Кладёт конфиг в папку туннеля.
+
+        Туннель задаёт пункт, через который конфиг добавили, а не имя: файл
+        ложится под именем файла человека, очищенным от недопустимых знаков
+        (buildconfig.safe_name), а не отклонённым из-за них. Добавленный
+        выбирается; через старый пункт «рабочий» он ещё и заменяет прежние.
         """
         try:
-            data, t = self._load_kind(kind)
+            data, t = self._load_target(tunnel, kind)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         # BOM от Блокнота: с ним «[Interface]» в первой строке не узнаётся.
@@ -865,7 +905,7 @@ class Core:
         os.replace(tmp, path)
         self.log(f"→ в туннель «{t['name']}» добавлен конфиг {name}.conf")
 
-        if kind == "corp":
+        if kind == "corp" and not tunnel:
             # У рабочего конфиг один: новый заменяет прежний, как до туннелей.
             for old in tunnels.list_confs(t["id"]):
                 if old == name:
@@ -881,34 +921,29 @@ class Core:
             data = tunnels.save(data)
         except (OSError, ValueError) as exc:
             return {"ok": False, "error": f"конфиг лёг, но не выбран: {exc}"}
-        return {"ok": True, "name": name, "profiles": self._profiles(data),
-                "corp": self._corp(data)}
+        return {"ok": True, "name": name, "tunnel": t["id"],
+                "profiles": self._profiles(data), "corp": self._corp(data)}
 
-    def _read_config(self, name, kind):
+    def _read_config(self, name, kind="", tunnel=""):
         """Отдаёт конфиг целиком, вместе с ключами.
 
         Каталог conf\\ закрыт от обычного пользователя, поэтому прочитать файл
         может только служба. Права проверяет ipc.Server: команды нет ни в
         READ_OPS, ни в USER_OPS, значит нужен администратор.
         """
-        t = self._kind_tunnel(kind) if kind in tunnels.LEGACY else None
-        if t is None:
-            return {"ok": False, "error": f"нет туннеля для конфига типа {kind!r}"}
         try:
-            with open(tunnels.conf_path(t["id"], name),
-                      encoding="utf-8", errors="replace") as fh:
+            path = tunnels.conf_path(
+                self._target(self._tunnels(), tunnel, kind)["id"], name)
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 return {"ok": True, "text": fh.read()}
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
 
-    def _remove_config(self, name, kind):
+    def _remove_config(self, name, kind="", tunnel=""):
         try:
-            data, t = self._load_kind(kind)
-        except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
-        try:
+            data, t = self._load_target(tunnel, kind)
             os.remove(tunnels.conf_path(t["id"], name))
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
         self.log(f"→ из туннеля «{t['name']}» удалён конфиг {name}.conf")
         if t["active"] == name:
@@ -923,10 +958,10 @@ class Core:
                 return {"ok": False, "error": f"конфиг удалён, но выбор не записать: {exc}"}
         return {"ok": True, "profiles": self._profiles(data), "corp": self._corp(data)}
 
-    def _set_profile(self, name):
-        """Делает name активным конфигом основного туннеля."""
+    def _set_active(self, name, tunnel="", kind=""):
+        """Делает name активным конфигом туннеля; '' — снять выбор."""
         try:
-            data, t = self._load_kind("personal")
+            data, t = self._load_target(tunnel, kind)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         if name and name not in tunnels.list_confs(t["id"]):
@@ -936,24 +971,165 @@ class Core:
             tunnels.save(data)
         except (OSError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
-        return {"ok": True, "profile": name}
+        return {"ok": True, "tunnel": t["id"], "active": name}
+
+    def _set_profile(self, name):
+        """Профиль — активный конфиг основного туннеля (`dualvpn profile`)."""
+        r = self._set_active(name, kind="personal")
+        return {"ok": True, "profile": name} if r["ok"] else r
+
+    # ------------------------------------------------------------- туннели
 
     @staticmethod
-    def _read_site():
+    def _rules(text):
+        """Поле списка правил → (записи, непонятые) или ValueError."""
+        if not isinstance(text, str):
+            raise ValueError("список правил должен быть текстом")
+        entries, rejected = routelist.parse(text)
+        if len(entries) > MAX_RULES:
+            raise ValueError(f"в списке {len(entries)} записей, "
+                             f"больше {MAX_RULES} нельзя")
+        return entries, rejected
+
+    def _save_tunnels(self, data, done):
+        """Пишет tunnels.json; done — строка в журнал службы."""
         try:
-            with open(os.path.join(paths.CONF, "site.env"), encoding="utf-8") as fh:
-                return fh.read()
-        except OSError:
-            return ""
+            tunnels.save(data)
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        self.log(f"→ {done}")
+        return {"ok": True}
+
+    @staticmethod
+    def _get_tunnels():
+        """tunnels.json со списками правил и конфигами каждого туннеля.
+
+        Только администратору: в списках адреса и домены рабочей сети. Испорченный
+        файл — ошибка, а не пустой: редактор поверх пустого затёр бы туннели.
+        """
+        try:
+            data = tunnels.load()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        for t in data["tunnels"]:
+            t["confs"] = tunnels.list_confs(t["id"])
+        return {"ok": True, **data}
+
+    def _add_tunnel(self, name, mode):
+        """Новый туннель в конце списка. id выдаёт служба (t1, t2…): имя
+        человека — кириллица, а id — имя папки и часть тегов sing-box."""
+        try:
+            data = tunnels.load()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        ids = {t["id"] for t in data["tunnels"]}
+        n = 1
+        # Папка без туннеля — конфиги после оборванного удаления: их не подбираем.
+        while f"t{n}" in ids or os.path.exists(tunnels.conf_dir(f"t{n}")):
+            n += 1
+        tid = f"t{n}"
+        data["tunnels"].append({"id": tid, "name": name, "mode": mode,
+                                "active": "", "include": [], "exclude": []})
+        r = self._save_tunnels(data, f"добавлен туннель {tid}")
+        return {**r, "id": tid} if r["ok"] else r
+
+    def _set_tunnel(self, tunnel, payload):
+        """Меняет у туннеля то, что пришло: name, mode, include, exclude.
+
+        Списки — текстом поля, как его ввёл человек (routelist.parse).
+        Понятое сохраняется, непонятое возвращается в rejected: окно его
+        покажет, молча ничего не пропадает.
+        """
+        try:
+            data, t = self._load_target(tunnel)
+            rejected = {}
+            for key in ("include", "exclude"):
+                if key in payload:
+                    t[key], rejected[key] = self._rules(payload[key])
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        for key in ("name", "mode"):
+            if key in payload:
+                t[key] = payload[key]
+        r = self._save_tunnels(data, f"изменён туннель {t['id']}")
+        return {**r, "rejected": rejected} if r["ok"] else r
+
+    def _remove_tunnel(self, tunnel):
+        """Убирает туннель вместе с папкой его конфигов."""
+        try:
+            data, t = self._load_target(tunnel)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        data["tunnels"].remove(t)
+        r = self._save_tunnels(data, f"удалён туннель {t['id']}")
+        if r["ok"]:
+            # После записи: сбой оставит папку без туннеля, а не туннель без
+            # конфигов. Такую папку _add_tunnel обходит.
+            try:
+                shutil.rmtree(tunnels.conf_dir(t["id"]))
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                self.log(f"!! не удалить конфиги туннеля {t['id']}: {exc}")
+        return r
+
+    def _move_tunnel(self, tunnel, step):
+        """Сдвигает туннель на step позиций: порядок в файле — порядок правил."""
+        try:
+            data, t = self._load_target(tunnel)
+            step = int(step)
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        items = data["tunnels"]
+        i = items.index(t)
+        items.insert(max(0, min(len(items) - 1, i + step)), items.pop(i))
+        return self._save_tunnels(data, f"туннель {t['id']} перемещён")
+
+    def _set_log_level(self, level):
+        try:
+            data = tunnels.load()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        data["log_level"] = level
+        return self._save_tunnels(data, f"уровень журнала sing-box: {level}")
+
+    # ------------------------------- поля site.env старого окна, до шага окна
+
+    def _read_site(self):
+        """Поля окна «Раздельное туннелирование» из tunnels.json в виде site.env.
+
+        Домены и исключения — первого туннеля «по списку»; CORP_PROBE — чем
+        служба проверяет рабочую сеть, только показ. CORP_HOSTS не читал никто.
+        """
+        data = self._tunnels()
+        work = self._kind_tunnel("corp", data)
+        values = {
+            "CORP_DOMAINS": " ".join(work["include"]) if work else "",
+            "CORP_PROBE": probe.Prober.corp_probe(),
+            "SB_CORP_EXCLUDE": " ".join(work["exclude"]) if work else "",
+            "SB_LOG_LEVEL": "" if data["log_level"] == "info" else data["log_level"],
+        }
+        return "".join(f'{k}="{v}"\n' for k, v in values.items() if v)
 
     def _set_site(self, text):
+        """Поля окна — обратно в tunnels.json: CORP_DOMAINS в include,
+        SB_CORP_EXCLUDE в exclude первого туннеля «по списку», SB_LOG_LEVEL в
+        log_level. Непонятая запись — отказ с причиной: в старом окне её
+        негде показать, а молча выкинуть нельзя."""
         text = (text or "").lstrip("\ufeff")
-        paths.ensure_dirs()
-        with open(os.path.join(paths.CONF, "site.env"), "w",
-                  encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-        self.log("→ обновлены настройки рабочей сети")
-        return {"ok": True}
+        env = paths.parse_env(text)
+        try:
+            data, t = self._load_target(kind="corp")
+            include, bad = self._rules(env.get("CORP_DOMAINS", ""))
+            exclude, bad_ex = self._rules(env.get("SB_CORP_EXCLUDE", ""))
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        bad += [b for b in bad_ex if b not in bad]
+        if bad:
+            return {"ok": False, "error": f"не понял: {', '.join(bad)}"}
+        t["include"], t["exclude"] = include, exclude
+        data["log_level"] = env.get("SB_LOG_LEVEL", "").strip().lower() or "info"
+        return self._save_tunnels(data, "обновлены настройки рабочей сети")
 
     def _tail_log(self, lines):
         """Последние строки журналов sing-box — основного и туннелей, по

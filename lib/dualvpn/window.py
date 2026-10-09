@@ -483,17 +483,7 @@ class Api:
 # ------------------------------------------------------------ site.env
 
 def _parse_env(text):
-    out = {}
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        if k.startswith("export "):
-            k = k[len("export "):].strip()
-        out[k] = v.strip().strip('"').strip("'")
-    return out
+    return paths.parse_env(text)
 
 
 def _format_env(values):

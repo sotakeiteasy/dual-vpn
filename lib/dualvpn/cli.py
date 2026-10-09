@@ -3,8 +3,9 @@
     dualvpn status              что сейчас поднято
     dualvpn start [ПРОФИЛЬ]     поднять
     dualvpn stop                опустить и откатить маршруты
-    dualvpn list                какие конфиги видны
-    dualvpn profile ИМЯ         выбрать личный конфиг по умолчанию
+    dualvpn list                туннели и их конфиги (* — активный)
+    dualvpn use ТУННЕЛЬ КОНФИГ  выбрать конфиг туннеля (туннель — id или имя)
+    dualvpn profile ИМЯ         выбрать конфиг основного туннеля
     dualvpn log [N]             последние строки журнала sing-box
     dualvpn version
 
@@ -40,6 +41,9 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
+_MODES = {"list": "по списку", "all": "весь остальной трафик"}
+
+
 def _print_status(st):
     up = st.get("up")
     print(f"DualVPN {st.get('version', '?')}: "
@@ -48,7 +52,10 @@ def _print_status(st):
         print(f"  сейчас   : {st['busy']}")
     if st.get("last_error"):
         print(f"  ошибка   : {st['last_error']}")
-    print(f"  профиль  : {st.get('profile') or 'personal (по умолчанию)'}")
+    print(f"  профиль  : {st.get('profile') or 'единственный конфиг основного'}")
+    for t in st.get("tunnels") or []:
+        print(f"  туннель  : {t.get('name')} [{t.get('id')}], {_MODES.get(t.get('mode'), '?')}"
+              f" — {t.get('active') or 'конфиг не выбран'}")
     print(f"  sing-box : {st.get('pid') or 'не запущен'}")
     print(f"  tun      : {st.get('tun') or 'нет'}")
     print(f"  аплинк   : интерфейс {st.get('iface')} / шлюз {st.get('gw') or '—'}")
@@ -169,22 +176,32 @@ def main(argv=None):
         return 0 if r.get("ok") else 1
 
     if cmd == "list":
-        r = _call("list-profiles")
-        for title, names in (("рабочий", r.get("corp") or []),
-                             ("личные", r.get("profiles") or [])):
-            print(f"{title}:")
-            for name in names:
-                print(f"  {name}")
-            if not names:
-                print("  (нет)")
+        items = _call("status").get("status", {}).get("tunnels") or []
+        for t in items:
+            print(f"{t.get('name')} [{t.get('id')}], {_MODES.get(t.get('mode'), '?')}:")
+            for name in t.get("confs") or []:
+                print(f"  {'*' if name == t.get('active') else ' '} {name}")
+            if not t.get("confs"):
+                print("    (нет конфигов)")
+        if not items:
+            print("туннелей нет")
         return 0
+
+    if cmd == "use":
+        if len(argv) < 3:
+            print("укажи туннель и конфиг: dualvpn use home nl-1")
+            return 1
+        r = _call("set-active", tunnel=argv[1], name=argv[2])
+        print(f"→ туннель {r.get('tunnel')}: {argv[2]}" if r.get("ok")
+              else f"не вышло: {r.get('error')}")
+        return 0 if r.get("ok") else 1
 
     if cmd == "profile":
         if len(argv) < 2:
             print("укажи имя: dualvpn profile nl-1")
             return 1
         r = _call("set-profile", profile=argv[1])
-        print(f"→ личный профиль: {argv[1]}" if r.get("ok")
+        print(f"→ основной туннель: {argv[1]}" if r.get("ok")
               else f"не вышло: {r.get('error')}")
         return 0 if r.get("ok") else 1
 

@@ -20,7 +20,7 @@ def test_чтение_состояния_доступно_всем(op):
     assert not ipc.requires_admin(op)
 
 
-@pytest.mark.parametrize("op", ["start", "stop", "set-profile"])
+@pytest.mark.parametrize("op", ["start", "stop", "set-profile", "set-active"])
 def test_управление_туннелем_доступно_вошедшему(op):
     """Включить и выключить — это кнопка в трее, а не повышение прав."""
     assert not ipc.requires_admin(op)
@@ -28,6 +28,8 @@ def test_управление_туннелем_доступно_вошедшем
 
 @pytest.mark.parametrize("op", [
     "add-config", "remove-config", "read-config", "get-site", "set-site",
+    "get-tunnels", "add-tunnel", "set-tunnel", "remove-tunnel", "move-tunnel",
+    "set-log-level",
 ])
 def test_работа_с_конфигами_требует_администратора(op):
     """В conf\\ лежат приватные ключи WireGuard.

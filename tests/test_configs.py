@@ -334,3 +334,199 @@ def test_сбой_переезда_в_журнале_а_не_падением(ol
     old._migrate()
 
     assert any("не перенести" in line and "больше 8" in line for line in old.logged)
+
+
+
+# --------------------------------------------- конфиги по id туннеля
+
+def test_конфиг_ложится_в_туннель_по_id_и_выбирается(core):
+    _put("work", "old.conf")
+
+    r = core._add_config("vpn-2", WG, tunnel="work")
+
+    assert r["ok"] and r["tunnel"] == "work"
+    # По id прежние не убираются: «один рабочий» — правило старого пункта.
+    assert _files("work") == ["old.conf", "vpn-2.conf"]
+    assert _active("work") == "vpn-2"
+
+
+def test_туннель_находится_по_имени_без_учёта_регистра(core):
+    r = core._add_config("nl-1", WG, tunnel="личный")
+    assert r["ok"] and _files("home") == ["nl-1.conf"]
+
+
+def test_id_туннеля_важнее_типа(core):
+    r = core._add_config("nl-1", WG, kind="corp", tunnel="home")
+    assert r["ok"] and _files("home") == ["nl-1.conf"] and _files("work") == []
+
+
+@pytest.mark.parametrize("tid", ["nope", "../work", 5])
+def test_неизвестный_туннель_отказывает(core, tid):
+    r = core._add_config("nl-1", WG, tunnel=tid)
+    assert not r["ok"] and "нет туннеля" in r["error"]
+    assert _files("work") == [] and _files("home") == []
+
+
+def test_чтение_и_удаление_по_id(core):
+    _put("home", "nl-1.conf")
+    _put("home", "nl-2.conf")
+    core._set_active("nl-1", tunnel="home")
+
+    assert core._read_config("nl-1", tunnel="home")["text"] == WG
+    r = core._remove_config("nl-1", tunnel="home")
+
+    assert r["ok"] and _files("home") == ["nl-2.conf"]
+    assert _active("home") == "nl-2"
+
+
+def test_чтение_с_недопустимым_именем_отказывает(core):
+    r = core._read_config("..\\..\\x", tunnel="home")
+    assert not r["ok"] and "недопустимое имя" in r["error"]
+
+
+def test_выбор_конфига_туннеля(core):
+    _put("work", "a.conf")
+    _put("work", "b.conf")
+
+    assert core._set_active("b", tunnel="work") == {"ok": True, "tunnel": "work",
+                                                     "active": "b"}
+    assert _active("work") == "b"
+
+    r = core._set_active("c", tunnel="work")
+    assert not r["ok"] and "c.conf" in r["error"] and _active("work") == "b"
+
+
+# ------------------------------------------------- команды tunnels.json
+
+def test_новый_туннель_получает_свободный_id(core):
+    os.makedirs(tunnels.conf_dir("t1"))      # папка, оставшаяся от удаления
+
+    r = core._add_tunnel("Офис 2", "list")
+
+    assert r == {"ok": True, "id": "t2"}
+    t = tunnels.find(tunnels.load(), "t2")
+    assert (t["name"], t["mode"], t["include"]) == ("Офис 2", "list", [])
+
+
+def test_второй_туннель_на_весь_трафик_не_добавляется(core):
+    r = core._add_tunnel("Ещё личный", "all")
+    assert not r["ok"] and "только один" in r["error"]
+    assert len(tunnels.load()["tunnels"]) == 2
+
+
+def test_списки_разбираются_а_непонятое_возвращается(core):
+    r = core._set_tunnel("work", {"include": "a.ru, 1.2.3.4; *.b.ru  foo_bar",
+                                  "name": "Офис"})
+
+    assert r == {"ok": True, "rejected": {"include": ["foo_bar"]}}
+    t = tunnels.find(tunnels.load(), "work")
+    assert t["include"] == ["a.ru", "1.2.3.4/32", "*.b.ru"]
+    assert t["name"] == "Офис" and t["exclude"] == []
+
+
+def test_длинный_список_отклоняется_целиком(core, monkeypatch):
+    monkeypatch.setattr("dualvpn.service.MAX_RULES", 2)
+
+    r = core._set_tunnel("work", {"include": "a.ru b.ru c.ru"})
+
+    assert not r["ok"] and "больше 2" in r["error"]
+    assert tunnels.find(tunnels.load(), "work")["include"] == []
+
+
+def test_неверный_режим_не_записывается(core):
+    r = core._set_tunnel("work", {"mode": "all"})
+    assert not r["ok"]
+    assert tunnels.find(tunnels.load(), "work")["mode"] == "list"
+
+
+def test_удаление_туннеля_убирает_его_конфиги(core):
+    _put("work", "corp.conf")
+
+    r = core._remove_tunnel("work")
+
+    assert r["ok"]
+    assert [t["id"] for t in tunnels.load()["tunnels"]] == ["home"]
+    assert not os.path.exists(tunnels.conf_dir("work"))
+
+
+@pytest.mark.parametrize("step, order", [
+    (1, ["home", "work"]), (-1, ["work", "home"]), (5, ["home", "work"]),
+])
+def test_туннель_сдвигается_в_пределах_списка(core, step, order):
+    assert core._move_tunnel("work", step)["ok"]
+    assert [t["id"] for t in tunnels.load()["tunnels"]] == order
+
+
+def test_уровень_журнала(core):
+    assert core._set_log_level("debug")["ok"]
+    assert tunnels.load()["log_level"] == "debug"
+    assert not core._set_log_level("громко")["ok"]
+    assert tunnels.load()["log_level"] == "debug"
+
+
+def test_туннели_со_списками_и_конфигами(core):
+    _put("home", "nl-1.conf")
+    core._set_tunnel("work", {"exclude": "198.51.100.7"})
+
+    r = core._get_tunnels()
+
+    assert r["ok"] and r["log_level"] == "info"
+    work, home = r["tunnels"]
+    assert work["exclude"] == ["198.51.100.7/32"] and home["confs"] == ["nl-1"]
+
+
+def test_испорченный_tunnels_json_команды_туннелей_не_затирают(core):
+    with open(paths.TUNNELS_JSON, "w", encoding="utf-8") as fh:
+        fh.write("{не json")
+
+    for r in (core._get_tunnels(), core._add_tunnel("x", "list"),
+              core._set_tunnel("work", {"name": "x"}), core._remove_tunnel("work"),
+              core._move_tunnel("work", 1), core._set_log_level("debug"),
+              core._set_site('CORP_DOMAINS="a.ru"')):
+        assert not r["ok"] and "tunnels.json" in r["error"]
+
+    with open(paths.TUNNELS_JSON, encoding="utf-8") as fh:
+        assert fh.read() == "{не json"
+
+
+# ----------------------------------------- site.env старого окна → tunnels.json
+
+def test_поля_окна_пишутся_в_первый_туннель_по_списку(core):
+    r = core._set_site('CORP_DOMAINS="corp.example *.x.example"\n'
+                       'CORP_PROBE="git.corp.example"\nCORP_HOSTS="a b"\n'
+                       'SB_CORP_EXCLUDE="198.51.100.7"\nSB_LOG_LEVEL="Debug"\n')
+
+    assert r["ok"]
+    data = tunnels.load()
+    work = tunnels.find(data, "work")
+    assert work["include"] == ["corp.example", "*.x.example"]
+    assert work["exclude"] == ["198.51.100.7/32"]
+    assert data["log_level"] == "debug"
+    assert not os.path.exists(os.path.join(paths.CONF, "site.env"))
+
+
+def test_поля_окна_читаются_из_tunnels_json(core):
+    core._set_tunnel("work", {"include": "corp.example", "exclude": "203.0.113.9"})
+
+    env = paths.parse_env(core._read_site())
+
+    assert env == {"CORP_DOMAINS": "corp.example", "CORP_PROBE": "corp.example",
+                   "SB_CORP_EXCLUDE": "203.0.113.9/32"}
+
+
+def test_пустые_поля_окна_очищают_списки(core):
+    core._set_tunnel("work", {"include": "corp.example"})
+    core._set_log_level("debug")
+
+    assert core._set_site("")["ok"]
+
+    data = tunnels.load()
+    assert tunnels.find(data, "work")["include"] == [] and data["log_level"] == "info"
+    assert core._read_site() == ""
+
+
+def test_непонятое_в_полях_окна_отказывает(core):
+    r = core._set_site('CORP_DOMAINS="corp.example foo_bar"\nSB_CORP_EXCLUDE="foo_bar 1.2.3"')
+
+    assert not r["ok"] and r["error"] == "не понял: foo_bar, 1.2.3"
+    assert tunnels.find(tunnels.load(), "work")["include"] == []
