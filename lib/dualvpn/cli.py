@@ -83,8 +83,10 @@ def _print_status(st):
             state = "запасной, напрямую: личный не работает"
         print(f"  выход    : {st.get('exit_ip') or '—'} "
               f"{st.get('exit_country') or ''} {st.get('exit_city') or ''} — {state}")
+        # HTTPS проверяют только у туннеля без DNS.
+        http = f"   HTTP {st['corp_http']}" if st.get("corp_http") else ""
         print(f"  корп-DNS : {st.get('corp_dns') or 'нет'} "
-              f"→ {st.get('corp_ip') or '—'}   HTTP {st.get('corp_http') or '—'}")
+              f"→ {st.get('corp_ip') or '—'}{http}")
     print(f"  автозапуск: {'да' if st.get('autostart') else 'нет'}")
 
 

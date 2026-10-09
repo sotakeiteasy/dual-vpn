@@ -195,14 +195,13 @@ def test_части_probe_slow_идут_параллельно_а_не_скла�
     for name in ("_slow_exit", "_slow_v6", "_slow_dns", "_slow_http"):
         monkeypatch.setattr(probe.Prober, name, part(name))
     monkeypatch.setattr(probe.Prober, "probe_fast", lambda self: None)
-    _plan(monkeypatch, _p_work(), _p_work(id="work-2"), _p_home())
+    _plan(monkeypatch, _p_work(), _p_work(id="work-2", dns=""), _p_home())
 
     t0 = time.monotonic()
     probe.Prober().probe_slow()
 
     assert time.monotonic() - t0 < 0.9
-    assert sorted(started) == [("_slow_dns", "work"), ("_slow_dns", "work-2"),
-                               ("_slow_exit",), ("_slow_http", "work"),
+    assert sorted(started) == [("_slow_dns", "work"), ("_slow_exit",),
                                ("_slow_http", "work-2"), ("_slow_v6",)]
 
 
@@ -210,8 +209,7 @@ def test_основной_проверен_раньше_молчащего_ра�
     work_go = threading.Event()
     for name in ("_slow_exit", "_slow_v6"):
         monkeypatch.setattr(probe.Prober, name, lambda self: None)
-    monkeypatch.setattr(probe.Prober, "_slow_dns", lambda self, p: "")
-    monkeypatch.setattr(probe.Prober, "_slow_http",
+    monkeypatch.setattr(probe.Prober, "_slow_dns",
                         lambda self, p: work_go.wait(2) and "")
     monkeypatch.setattr(probe.Prober, "probe_fast", lambda self: None)
     _plan(monkeypatch, _p_work(), _p_home())
@@ -325,16 +323,18 @@ def _tunnels(monkeypatch, *items):
 
 def test_итог_проверки_сети_в_журнале(monkeypatch):
     _slow_parts(monkeypatch, exit_ip="185.1.2.3", exit_country="NL",
-                exit_state="tunnel", v6_leak="2a00::1", dns={"work": "10.1.1.1"})
-    _plan(monkeypatch, _p_work(), _p_home())
+                exit_state="tunnel", v6_leak="2a00::1", dns={"work": "10.1.1.1"},
+                http={"work-2": "403"})
+    _plan(monkeypatch, _p_work(), _p_work(id="work-2", name="Вики", dns=""), _p_home())
     logged = []
 
     probe.Prober(logged.append).probe_slow()
 
     [line] = logged
+    parts = line.split("; ")
     assert "выход 185.1.2.3 (NL), tunnel" in line
-    assert "«Работа» DNS 10.1.1.1 (" in line
-    assert "HTTPS молчит (" in line
+    assert any(x.startswith("«Работа» DNS 10.1.1.1 (") and "HTTPS" not in x for x in parts)
+    assert any(x.startswith("«Вики» HTTPS 403 (") for x in parts)
     assert "утечка IPv6 2a00::1" in line
 
 
@@ -350,6 +350,19 @@ def test_итоги_по_туннелям_и_старые_поля_первог�
                           "home": ("up", "185.1.2.3")}
     s = p.snapshot()
     assert (s["corp_dns"], s["corp_ip"], s["corp_http"]) == ("10.0.0.1", "10.1.1.1", "")
+
+
+def test_по_списку_с_dns_проверяется_только_dns(monkeypatch):
+    # HTTPS к домену мог бы уйти в соседний туннель: его адрес бывает в «не пускать».
+    asked = _slow_parts(monkeypatch, dns={"work": "203.0.113.9"})
+    _plan(monkeypatch, _p_work())
+    p = probe.Prober()
+
+    p.probe_slow()
+
+    assert asked == [("dns", "work")]
+    assert _checks(p) == {"work": ("up", "203.0.113.9")}
+    assert p.snapshot()["corp_http"] == ""
 
 
 def test_по_списку_без_dns_проверяется_только_https(monkeypatch):

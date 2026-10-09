@@ -49,6 +49,13 @@ def _probe_host(tunnel):
                  if "/" not in e and not e.startswith("*.")), "")
 
 
+def _list_part(p):
+    """Чем проверять туннель «по списку» p: 'dns' — домен проверки через его
+    DNS, 'http' — HTTPS к домену, когда DNS у туннеля нет. При DNS HTTPS не
+    нужен: адрес домена бывает в «не пускать», и запрос мерил бы соседа."""
+    return "dns" if p["dns"] else "http"
+
+
 def _check_result(p, got, st):
     """(итог, ответ) проверки туннеля p по ответам его частей got и снимку st.
 
@@ -273,9 +280,9 @@ class Prober:
         часть по отдельности укладывается в секунды.
 
         Основной туннель проверяет выход, туннель «по списку» — домен
-        проверки через свой DNS и HTTPS разом: пакет через WireGuard теряется и
-        при живом туннеле, и хватает одного ответа. Итог туннеля — в checks,
-        как только кончились его части: молчащий сосед его не держит.
+        проверки через свой DNS, а без DNS — по HTTPS (_list_part). Итог
+        туннеля — в checks, как только кончились его части: молчащий сосед
+        его не держит.
         """
         took = {}
         seq = self.snapshot().get("check_seq", 0)
@@ -299,12 +306,11 @@ class Prober:
             if p["running"] and p["mode"] == "all":
                 mine.add("exit")
             elif p["running"] and p["host"]:
-                for how, fn in (("dns", self._slow_dns), ("http", self._slow_http)):
-                    if how == "dns" and not p["dns"]:
-                        continue
-                    name = f"{how} {p['id']}"
-                    jobs[name] = functools.partial(ask, how, fn, p)
-                    mine.add(name)
+                how = _list_part(p)
+                fn = self._slow_dns if how == "dns" else self._slow_http
+                name = f"{how} {p['id']}"
+                jobs[name] = functools.partial(ask, how, fn, p)
+                mine.add(name)
             waits[("tunnel", p["id"])] = mine
         waits[("side", "personal")] = {"exit"}
         waits[("side", "corp")] = set(waits[("tunnel", work["id"])]) if work else set()
@@ -383,11 +389,10 @@ class Prober:
             if not p["host"]:
                 lines.append(f"«{p['name']}» не проверял (в «пускать» нет домена)")
                 continue
-            mine, tid = got.get(p["id"]) or {}, p["id"]
-            asked = [f"{label} {mine.get(how) or 'молчит'} ({sec(how + ' ' + tid)})"
-                     for how, label in (("dns", "DNS"), ("http", "HTTPS"))
-                     if how != "dns" or p["dns"]]
-            lines.append(f"«{p['name']}» {', '.join(asked)}")
+            mine, how = got.get(p["id"]) or {}, _list_part(p)
+            label = "DNS" if how == "dns" else "HTTPS"
+            lines.append(f"«{p['name']}» {label} {mine.get(how) or 'молчит'} "
+                         f"({sec(how + ' ' + p['id'])})")
         v6 = (f"утечка IPv6 {s['v6_leak']}" if s.get("v6_leak")
               else "IPv6 без утечки")
         return (f"→ проверка сети за {total:.1f} с: {'; '.join(lines)}; "
