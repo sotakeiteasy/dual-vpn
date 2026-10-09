@@ -184,3 +184,9 @@ def test_пункты_туннелей_те_же_объекты_а_удалён�
     assert again == (home, work)
     assert set(app._tunnel_items) == {"home", "work"}
     assert work.text(work) == "office"
+
+
+def test_пункты_в_порядке_окна_сначала_весь_остальной_трафик():
+    items = [_work(), _work(id="lab"), _home()]
+    assert tray._menu_order(items) == ("home", "work", "lab")
+    assert tray._menu_order([_work(), _work(id="lab")]) == ("work", "lab")

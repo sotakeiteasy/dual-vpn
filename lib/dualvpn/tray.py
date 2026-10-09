@@ -180,7 +180,7 @@ class Tray:
         sig = self._menu_sig()
         if sig != self._last_menu_sig:
             self._last_menu_sig = sig
-            self._menu_ids = tuple(t["id"] for t in self.status.get("tunnels") or [])
+            self._menu_ids = _menu_order(self.status.get("tunnels") or [])
             self.icon.update_menu()
 
     def _refresh_icon(self):
@@ -672,6 +672,12 @@ def _clip(text, limit):
 def _tunnel_of(st, tid):
     """Туннель tid из st["tunnels"], иначе None."""
     return next((t for t in st.get("tunnels") or [] if t["id"] == tid), None)
+
+
+def _menu_order(items):
+    """id туннелей в порядке окна: сначала «весь остальной трафик», за ним
+    «по списку» в порядке tunnels.json."""
+    return tuple(t["id"] for t in sorted(items, key=lambda t: t.get("mode") != "all"))
 
 
 def _conf_name(t):
