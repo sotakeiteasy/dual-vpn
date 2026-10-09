@@ -645,7 +645,7 @@ function renderHowto(h) {
   prev.howto = sig;
 
   const ep = t => (h.endpoints || []).find(e => e.tag === t) || {};
-  const p = ep('awg-personal'), c = ep('wg-corp');
+  const p = ep('wg-home'), c = ep('wg-work');
   const nets = (h.corp_nets || []).map(n => `<code>${esc(n)}</code>`).join(' ') || '<span class="note">не задано</span>';
   const doms = (h.corp_domains || []).map(d => `<code>${esc(d)}</code>`).join(' ') || '<span class="note">не задано</span>';
 

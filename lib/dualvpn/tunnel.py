@@ -66,7 +66,8 @@ class Side:
     """
 
     def __init__(self, kind, title):
-        self.kind = kind          # 'corp' | 'personal' — ключ buildconfig.SIDES
+        self.kind = kind          # 'corp' | 'personal'
+        self.tid = buildconfig.SIDE_IDS[kind]   # id туннеля: work, home
         self.title = title        # для журнала службы
         self.proc = None
         self.logfile = None
@@ -75,8 +76,8 @@ class Side:
 
     @property
     def tag(self):
-        """Тег endpoint туннеля: wg-corp, awg-personal."""
-        return buildconfig.SIDES[self.kind][0]
+        """Тег endpoint туннеля: wg-work, wg-home."""
+        return buildconfig.ep_tag(self.tid)
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -320,7 +321,8 @@ class Tunnel:
         # timeout обязателен: без него зависший sing-box повесил бы
         # весь start навсегда, а клиент ждёт ответ по каналу без таймаута —
         # снаружи это ровно ««Включить» зависло».
-        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON, paths.PERSONAL_JSON):
+        for cfg_path in (paths.CONFIG_JSON,
+                         *(buildconfig.side_json(s.tid) for s in self.sides)):
             try:
                 check = subprocess.run(
                     [paths.SINGBOX, "check", "-c", cfg_path],
@@ -487,7 +489,8 @@ class Tunnel:
         """
         out = []
         endpoints = []
-        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON, paths.PERSONAL_JSON):
+        for cfg_path in (paths.CONFIG_JSON,
+                         *(buildconfig.side_json(s.tid) for s in self.sides)):
             endpoints += _load_json(cfg_path).get("endpoints", [])
         for ep in endpoints:
             for peer in ep.get("peers", []):
@@ -504,12 +507,8 @@ class Tunnel:
 
     @staticmethod
     def _corp_domains():
-        """Домены, которые собранный конфиг отдаёт корп-DNS."""
-        names = []
-        for rule in _load_json(paths.CONFIG_JSON).get("dns", {}).get("rules", []):
-            if rule.get("server") == "dns-corp":
-                names += rule.get("domain_suffix", [])
-        return names
+        """Домены, которые собранный конфиг отдаёт DNS туннелей."""
+        return buildconfig.tunnel_domains(_load_json(paths.CONFIG_JSON))
 
     # ---------------------------------------------------- боковые процессы
 
@@ -519,7 +518,7 @@ class Tunnel:
         Ждём именно socks, а не просто живой процесс: основной отдаёт трафик
         на этот порт, и до его открытия первые запросы получили бы отказ.
         """
-        link = buildconfig.side_link(_load_json(paths.CONFIG_JSON), side.kind)
+        link = buildconfig.side_link(_load_json(paths.CONFIG_JSON), side.tid)
         if not link or not link.get("port"):
             return f"в собранном конфиге нет связи с процессом {side.tag}"
         self._stop_side(side)
@@ -528,7 +527,7 @@ class Tunnel:
         side.log_start = (log_path, side.logfile.tell())
         self.log(f"→ запускаю {side.title} процесс, журнал: {log_path}")
         side.proc = subprocess.Popen(
-            [paths.SINGBOX, "run", "-c", buildconfig.side_json(side.kind),
+            [paths.SINGBOX, "run", "-c", buildconfig.side_json(side.tid),
              "--disable-color"],
             cwd=paths.BIN,
             stdout=side.logfile, stderr=subprocess.STDOUT,

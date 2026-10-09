@@ -150,7 +150,12 @@ class Prober:
     def peer_addrs(self):
         """Адреса пиров из собранных конфигов туннелей: {tag: address}."""
         out = {}
-        for cfg_path in (paths.CORP_JSON, paths.PERSONAL_JSON):
+        try:
+            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
+                ids = buildconfig.side_ids(json.load(fh))
+        except Exception:
+            ids = []
+        for cfg_path in map(buildconfig.side_json, ids):
             try:
                 with open(cfg_path, encoding="utf-8") as fh:
                     cfg = json.load(fh)
@@ -163,16 +168,13 @@ class Prober:
         return out
 
     def corp_dns(self):
-        """Корп-DNS берём из собранного конфига, а не хардкодим."""
+        """Корп-DNS — DNS первого туннеля «по списку» из собранного конфига."""
         try:
             with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
                 cfg = json.load(fh)
-            for s in cfg.get("dns", {}).get("servers", []):
-                if s.get("tag") == "dns-corp":
-                    return s.get("server", "")
+            return next(iter(buildconfig.tunnel_dns(cfg).values()), "")
         except Exception:
-            pass
-        return ""
+            return ""
 
     def _exit_info(self):
         """Внешний адрес и страна. Несколько сервисов по очереди.
@@ -285,7 +287,7 @@ class Prober:
                 # Личный не работает, служба сама увела выход напрямую: адрес
                 # провайдера тут ожидаем, это не утечка.
                 state = "direct"
-            elif ip == peers.get("awg-personal"):
+            elif ip == peers.get(buildconfig.PERSONAL_TAG):
                 state = "tunnel"          # одноногий сервер, адреса совпали
             elif real and ip == real:
                 state = "leak"            # нас видно тем же адресом, что и без VPN

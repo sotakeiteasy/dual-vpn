@@ -83,9 +83,6 @@ DNS_RE = re.compile(r"\[(\d+) [^\]]*\] dns: \w+ \w+ (\S+?)\.? \d+ IN (\w+) (\S+?
 # Штамп строки sing-box и заголовка запуска из open_log: по нему команда log сводит
 # журналы трёх процессов в один.
 STAMP_RE = re.compile(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
-# Туннели живут в своих процессах: в журнале основного их трафик идёт через
-# socks-выходы. В статистику — под тегом самого туннеля, как до разделения.
-SOCKS_TAGS = {socks: tag for tag, socks in buildconfig.SIDES.values()}
 
 
 class Core:
@@ -688,7 +685,9 @@ class Core:
                     continue
                 host, tag = m.group(1), m.group(2)
             dest = self._ip_names.get(host, host)
-            tag = SOCKS_TAGS.get(tag, tag)
+            # Туннели живут в своих процессах: в журнале основного их трафик
+            # идёт через socks-выходы. В статистику — под тегом самого туннеля.
+            tag = buildconfig.ep_of_socks(tag)
             self._paths.setdefault(tag, collections.Counter())[dest] += 1
 
     def _save_paths(self):

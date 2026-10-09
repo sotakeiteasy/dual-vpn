@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from . import instance, ipc, paths
+from . import buildconfig, instance, ipc, paths
 
 POLL_EVERY = 2.0
 # Сколько ждём отчёта страницы о готовности. Не дождались — WebView2 не
@@ -347,18 +347,21 @@ class Api:
     @staticmethod
     def _howto(st):
         site = paths.site_env()
-        nets, endpoints = [], []
-        # Туннели живут в своих процессах (corp.json, personal.json), основной
-        # отдаёт корпу подсети правилом на socks-выход buildconfig.CORP_SOCKS_TAG.
-        for cfg_path in (paths.CONFIG_JSON, paths.CORP_JSON, paths.PERSONAL_JSON):
+        endpoints = []
+        # Туннели живут в своих процессах (buildconfig.side_json), основной
+        # отдаёт рабочему подсети правилом на его socks-выход.
+        try:
+            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
+                main_cfg = json.load(fh)
+        except (OSError, ValueError):
+            main_cfg = {}
+        nets = buildconfig.tunnel_nets(main_cfg, buildconfig.SIDE_IDS["corp"])
+        for tid in buildconfig.side_ids(main_cfg):
             try:
-                with open(cfg_path, encoding="utf-8") as fh:
+                with open(buildconfig.side_json(tid), encoding="utf-8") as fh:
                     cfg = json.load(fh)
             except (OSError, ValueError):
                 continue
-            for rule in cfg.get("route", {}).get("rules", []):
-                if rule.get("outbound") == "corp-socks":
-                    nets = rule.get("ip_cidr") or []
             for ep in cfg.get("endpoints", []):
                 peers = ep.get("peers") or [{}]
                 endpoints.append({

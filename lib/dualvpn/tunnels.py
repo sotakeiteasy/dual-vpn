@@ -203,6 +203,27 @@ def main_tunnel(data):
     return next((t for t in data["tunnels"] if t["mode"] == "all"), None)
 
 
+def active_conf(tunnel):
+    """Путь к активному конфигу туннеля; None — конфигов у него нет.
+
+    Не выбран, а конфиг один — берём его, как раньше брали единственный
+    личный. Несколько без выбора или выбранный пропал — ValueError: собрать
+    «какой-нибудь» значило бы молча включить не тот сервер.
+    """
+    have = list_confs(tunnel["id"])
+    name = tunnel.get("active") or ""
+    if name:
+        if name not in have:
+            raise ValueError(f"туннель «{tunnel['name']}»: нет конфига «{name}»")
+        return conf_path(tunnel["id"], name)
+    if not have:
+        return None
+    if len(have) > 1:
+        raise ValueError(f"туннель «{tunnel['name']}»: конфигов несколько "
+                         f"({', '.join(have)}) — выбери один")
+    return conf_path(tunnel["id"], have[0])
+
+
 # --------------------------------------------------------------- переезд
 
 # До 0.4 туннелей было ровно два, и тип задавала папка. Они становятся

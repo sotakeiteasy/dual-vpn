@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from dualvpn import buildconfig, paths
+from dualvpn import buildconfig, paths, tunnels
 
 
 CORP = """
@@ -73,25 +73,72 @@ def test_без_секции_peer_это_ошибка(tmp_path):
 
 # ------------------------------------------------------------- маршруты
 
-def test_корп_маршруты_берутся_из_allowedips(tmp_path):
+def test_подсети_туннеля_берутся_из_allowedips(tmp_path):
     conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", CORP))
-    assert buildconfig.corp_routes(conf) == ["10.10.0.0/16", "192.168.77.0/24"]
+    assert buildconfig.allowed_nets(conf) == ["10.10.0.0/16", "192.168.77.0/24"]
 
 
-def test_ноль_маршрут_в_корпе_отбрасывается(tmp_path):
-    """AllowedIPs = 0.0.0.0/0 у рабочего конфига забрал бы весь трафик."""
+def test_ноль_маршрут_и_ipv6_без_v6_на_tun_отбрасываются(tmp_path):
+    """AllowedIPs = 0.0.0.0/0 у туннеля «по списку» забрал бы весь трафик."""
     text = CORP.replace("10.10.0.0/16, 192.168.77.0/24",
-                        "0.0.0.0/0, 10.10.0.0/16")
+                        "0.0.0.0/0, 10.10.0.0/16, ::/0, fd00::/64")
     conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", text))
-    assert buildconfig.corp_routes(conf) == ["10.10.0.0/16"]
+
+    assert buildconfig.allowed_nets(conf) == ["10.10.0.0/16"]
+    assert buildconfig.allowed_nets(conf, v6=True) == ["10.10.0.0/16", "fd00::/64"]
 
 
-def test_корп_без_единой_подсети_это_ошибка(tmp_path):
-    text = CORP.replace("10.10.0.0/16, 192.168.77.0/24", "0.0.0.0/0")
-    conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", text))
-    with pytest.raises(SystemExit):
-        buildconfig.corp_routes(conf)
+def test_записи_списка_делятся_на_подсети_и_домены():
+    """*.x — только поддомены (.x), x — сам домен с поддоменами."""
+    nets, domains = buildconfig.split_entries(
+        ["corp.example", "*.intra.example", "198.51.100.7/32", "10.0.0.0/8",
+         "2001:db8::/32"])
 
+    assert nets == ["198.51.100.7/32", "10.0.0.0/8"]
+    assert domains == ["corp.example", ".intra.example"]
+
+
+def test_ipv6_из_списка_остаётся_при_v6_на_tun():
+    assert buildconfig.split_entries(["2001:db8::/32"], v6=True) == (
+        ["2001:db8::/32"], [])
+
+
+def test_правило_без_исключений_одно_условие_или():
+    rule = buildconfig.tunnel_rule(["10.0.0.0/8"], ["corp.example"], [], [],
+                                   "socks-work")
+    assert rule == {"ip_cidr": ["10.0.0.0/8"], "domain_suffix": ["corp.example"],
+                    "outbound": "socks-work"}
+
+
+def test_исключение_это_отрицание_внутри_и():
+    """/32 внутри /16 из AllowedIPs раньше не исключался: SB_CORP_EXCLUDE
+    выкидывал только подсети, целиком лежащие в исключении."""
+    rule = buildconfig.tunnel_rule(["10.10.0.0/16"], [], ["10.10.5.9/32"],
+                                   ["git.corp.example"], "socks-work")
+
+    assert rule == {"type": "logical", "mode": "and", "rules": [
+        {"ip_cidr": ["10.10.0.0/16"]},
+        {"ip_cidr": ["10.10.5.9/32"], "domain_suffix": ["git.corp.example"],
+         "invert": True}],
+        "outbound": "socks-work"}
+
+
+def test_пускать_нечего_правила_нет():
+    """Правило без условий sing-box считает совпадением со всем."""
+    assert buildconfig.tunnel_rule([], [], ["10.0.0.1/32"], [], "socks-x") is None
+
+
+@pytest.mark.parametrize("host, kept", [
+    ("vpn.corp.example", [".other.example", "intra.example"]),
+    ("corp.example", [".corp.example", ".other.example", "intra.example"]),
+    ("198.51.100.10", ["corp.example", ".corp.example", ".other.example",
+                       "intra.example"]),
+])
+def test_домен_сервера_не_уходит_в_dns_туннеля(host, kept):
+    """Имя сервера пришлось бы резолвить через DNS, доступный только когда
+    туннель уже поднят, — замкнутый круг."""
+    domains = ["corp.example", ".corp.example", ".other.example", "intra.example"]
+    assert buildconfig.off_endpoint(domains, host) == kept
 
 # ------------------------------------------------------------- endpoint
 
@@ -309,37 +356,235 @@ def test_без_dns_и_прошлого_адреса_сборка_прекращ
 
 # ---------------------------------------------------------------- DNS
 
-def test_корп_dns_по_tcp_через_корп_туннель():
+def test_dns_туннеля_по_tcp_через_его_socks():
     """По UDP ответы корп-DNS терялись, и запрос висел до таймаута sing-box."""
-    servers, rules = buildconfig.dns_section(["10.0.0.53"], ["corp.example"])
+    servers, rules = buildconfig.dns_section(
+        [("work", "10.0.0.53", ["corp.example"])], "out")
 
-    assert servers[0] == {"type": "tcp", "tag": "dns-corp",
-                          "server": "10.0.0.53", "detour": "corp-socks"}
-    assert servers[1]["tag"] == "dns-personal"
-    assert rules == [{"domain_suffix": ["corp.example"], "server": "dns-corp"}]
+    assert servers[0] == {"type": "tcp", "tag": "dns-work",
+                          "server": "10.0.0.53", "detour": "socks-work"}
+    assert servers[1] == {"type": "udp", "tag": "dns", "server": "8.8.8.8",
+                          "detour": "out"}
+    assert rules == [{"domain_suffix": ["corp.example"], "server": "dns-work"}]
 
 
-def test_без_корп_доменов_правила_dns_нет():
+def test_без_доменов_правила_dns_нет():
     """Пустой domain_suffix sing-box считает совпадением со всем: любое имя
     уходило в корп-DNS — проверено живьём на 1.14.2-lx.11."""
-    servers, rules = buildconfig.dns_section(["10.0.0.53"], [])
-    assert servers[0]["tag"] == "dns-corp"
+    servers, rules = buildconfig.dns_section([("work", "10.0.0.53", [])], "out")
+    assert servers[0]["tag"] == "dns-work"
     assert rules == []
 
 
-def test_публичный_dns_идёт_выходом_с_запасным_direct():
-    """Через awg-personal напрямую при мёртвом личном не резолвилось бы
-    ничего — и запасной direct был бы бесполезен."""
-    servers, _ = buildconfig.dns_section([], [])
-    assert servers[0]["detour"] == "out"
+def test_без_основного_туннеля_публичный_dns_напрямую():
+    """detour на пустой direct sing-box отвергает."""
+    servers, _ = buildconfig.dns_section([], None)
+    assert servers == [{"type": "udp", "tag": "dns", "server": "8.8.8.8"}]
 
 
 # ----------------------------------------------------- сборка целиком
 
+LAB = (CORP.replace("DNS = 10.0.0.53\n", "")
+       .replace("198.51.100.10", "198.51.100.20")
+       .replace("10.10.0.0/16, 192.168.77.0/24", "172.20.0.0/16"))
+CONFS = {"work": CORP, "lab": LAB, "home": PERSONAL_AWG}
+
+
+def _tunnel(tid, mode, include=(), exclude=()):
+    return {"id": tid, "name": tid.title(), "mode": mode,
+            "include": list(include), "exclude": list(exclude)}
+
+
+THREE = [
+    _tunnel("work", "list", ["corp.example", "*.intra.example"],
+            ["10.10.5.9", "git.corp.example"]),
+    _tunnel("lab", "list", ["203.0.113.9"]),
+    _tunnel("home", "all", exclude=["198.51.100.7"]),
+]
+
+
 @pytest.fixture
-def built(tmp_path, monkeypatch):
-    """Собирает три конфига из CORP и PERSONAL_AWG во временную папку:
-    (основной, корп, личный)."""
+def build(tmp_path, monkeypatch):
+    """Собирает туннели во временную state\\: (основной, {id: боковой})."""
+    monkeypatch.setattr(paths, "STATE", str(tmp_path))
+
+    def run(items, level="info", texts=CONFS):
+        data = tunnels.validate({"log_level": level, "tunnels": items})
+        confs = {t["id"]: _write(tmp_path, f"{t['id']}.conf", texts[t["id"]])
+                 for t in data["tunnels"]}
+        ids = buildconfig.build(data, confs, str(tmp_path / "config.json"),
+                                log=lambda line: None)
+        main = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        return main, {tid: json.loads(open(buildconfig.side_json(tid),
+                                           encoding="utf-8").read())
+                      for tid in ids}
+    return run
+
+
+def _by_tag(items, tag):
+    return next(i for i in items if i.get("tag") == tag)
+
+
+def test_каждый_туннель_живёт_в_своём_конфиге(build):
+    """Сторож перезапускает туннель один, не трогая tun и другие туннели."""
+    main, sides = build(THREE)
+
+    assert "endpoints" not in main
+    assert list(sides) == ["work", "lab", "home"]
+    for tid, cfg in sides.items():
+        assert [e["tag"] for e in cfg["endpoints"]] == [f"wg-{tid}"]
+        assert cfg["route"]["final"] == f"wg-{tid}"
+        # Автоопределение привязало бы сокет к tun основного процесса.
+        assert cfg["route"]["auto_detect_interface"] is False
+
+
+def test_endpoint_пускает_всё_что_отдал_основной(build):
+    """С AllowedIPs из файла домены и адреса из «пускать» отбрасывались бы
+    внутри endpoint."""
+    _, sides = build(THREE)
+    for cfg in sides.values():
+        assert cfg["endpoints"][0]["peers"][0]["allowed_ips"] == ["0.0.0.0/0"]
+
+
+def test_у_каждого_туннеля_свой_socks_с_паролем(build):
+    main, sides = build(THREE)
+
+    passwords = set()
+    for tid, cfg in sides.items():
+        socks = _by_tag(main["outbounds"], f"socks-{tid}")
+        inbound = _by_tag(cfg["inbounds"], "socks-in")
+        assert inbound["listen"] == socks["server"] == "127.0.0.1"
+        assert socks["server_port"] == inbound["listen_port"]
+        assert inbound["users"] == [{"username": socks["username"],
+                                     "password": socks["password"]}]
+        assert len(socks["password"]) >= 24
+        passwords.add(socks["password"])
+    assert len(passwords) == 3
+
+
+def test_пароль_socks_новый_на_каждую_сборку(build):
+    first, _ = build(THREE)
+    second, _ = build(THREE)
+    assert (_by_tag(first["outbounds"], "socks-work")["password"]
+            != _by_tag(second["outbounds"], "socks-work")["password"])
+
+
+def test_порядок_правил_списки_локальная_сеть_мимо_vpn(build):
+    main, _ = build(THREE)
+
+    assert main["route"]["rules"] == [
+        {"action": "sniff"},
+        {"protocol": "dns", "action": "hijack-dns"},
+        {"type": "logical", "mode": "and", "rules": [
+            {"ip_cidr": ["10.10.0.0/16", "192.168.77.0/24"],
+             "domain_suffix": ["corp.example", ".intra.example"]},
+            {"ip_cidr": ["10.10.5.9/32"], "domain_suffix": ["git.corp.example"],
+             "invert": True}],
+         "outbound": "socks-work"},
+        {"ip_cidr": ["172.20.0.0/16", "203.0.113.9/32"], "outbound": "socks-lab"},
+        {"ip_cidr": buildconfig.LOCAL_NETS, "outbound": "direct"},
+        {"ip_cidr": ["198.51.100.7/32"], "outbound": "direct"},
+    ]
+
+
+def test_остальное_через_основной_с_запасным_direct(build):
+    main, sides = build(THREE)
+
+    assert main["route"]["final"] == "out"
+    out = _by_tag(main["outbounds"], "out")
+    assert out["type"] == "selector"
+    assert out["outbounds"] == ["socks-home", "direct"]
+    assert out["default"] == "socks-home"
+    assert main["inbounds"][0]["mtu"] == sides["home"]["endpoints"][0]["mtu"]
+    assert buildconfig.api_of(main)[0].startswith("127.0.0.1:")
+    assert buildconfig.api_of(main)[1]
+
+
+def test_dns_только_у_туннелей_по_списку_с_dns_в_conf(build):
+    main, _ = build(THREE)
+
+    assert main["dns"]["servers"] == [
+        {"type": "tcp", "tag": "dns-work", "server": "10.0.0.53",
+         "detour": "socks-work"},
+        {"type": "udp", "tag": "dns", "server": "8.8.8.8", "detour": "out"},
+    ]
+    assert main["dns"]["rules"] == [
+        {"domain_suffix": ["corp.example", ".intra.example"], "server": "dns-work"}]
+    assert main["dns"]["final"] == "dns"
+    assert main["route"]["default_domain_resolver"] == "dns"
+
+
+def test_без_основного_туннеля_остальное_напрямую(build):
+    main, sides = build(THREE[:2])
+
+    assert list(sides) == ["work", "lab"]
+    assert main["route"]["final"] == "direct"
+    assert not any(o["tag"] == "out" for o in main["outbounds"])
+    assert "detour" not in _by_tag(main["dns"]["servers"], "dns")
+    assert main["inbounds"][0]["mtu"] == 1280
+
+
+def test_уровень_журнала_во_всех_конфигах(build):
+    main, sides = build(THREE, level="debug")
+    assert {main["log"]["level"]} | {s["log"]["level"] for s in sides.values()} == {"debug"}
+
+
+def test_v6_только_когда_он_есть_у_основного(build):
+    texts = dict(CONFS, home=PERSONAL_AWG.replace(
+        "Address = 10.9.0.2/32", "Address = 10.9.0.2/32, fd00::2/128"))
+
+    main, sides = build(THREE, texts=texts)
+    assert "fdfe:dcba:9876::1/126" in main["inbounds"][0]["address"]
+    assert sides["work"]["endpoints"][0]["peers"][0]["allowed_ips"] == [
+        "0.0.0.0/0", "::/0"]
+
+    main, _ = build(THREE)
+    assert main["inbounds"][0]["address"] == ["172.19.0.1/30"]
+
+
+def test_туннель_без_конфига_пропускается(build, tmp_path):
+    """Пустой слот (рабочий после переезда без рабочего .conf) не держит остальные."""
+    data = tunnels.validate({"tunnels": THREE})
+    confs = {"home": _write(tmp_path, "home.conf", PERSONAL_AWG)}
+    lines = []
+
+    assert buildconfig.build(data, confs, str(tmp_path / "c.json"),
+                             log=lines.append) == ["home"]
+    assert any("«Work»: конфига нет" in line for line in lines)
+
+
+def test_ни_одного_конфига_это_ошибка(tmp_path):
+    data = tunnels.validate({"tunnels": THREE})
+    with pytest.raises(SystemExit, match="ни у одного туннеля нет конфига"):
+        buildconfig.build(data, {}, str(tmp_path / "c.json"))
+
+
+def test_помощники_читают_собранный_конфиг(build):
+    """Служба, пробер и окно находят туннели по этим функциям, а не по строкам."""
+    main, _ = build(THREE)
+
+    assert buildconfig.side_ids(main) == ["work", "lab", "home"]
+    assert buildconfig.side_link(main, "lab")["port"] == _by_tag(
+        main["outbounds"], "socks-lab")["server_port"]
+    assert buildconfig.side_link(main, "нет") is None
+    assert buildconfig.tunnel_dns(main) == {"work": "10.0.0.53"}
+    assert buildconfig.tunnel_domains(main) == ["corp.example", ".intra.example"]
+    assert buildconfig.tunnel_nets(main, "work") == ["10.10.0.0/16", "192.168.77.0/24"]
+    assert buildconfig.tunnel_nets(main, "lab") == ["172.20.0.0/16", "203.0.113.9/32"]
+
+
+@pytest.mark.parametrize("tag, ep", [
+    ("socks-work", "wg-work"), ("socks-", "socks-"), ("direct", "direct"),
+])
+def test_socks_выход_в_статистике_под_тегом_туннеля(tag, ep):
+    assert buildconfig.ep_of_socks(tag) == ep
+
+
+# ----------------------------------------------- main: откуда туннели
+
+@pytest.fixture
+def state(tmp_path, monkeypatch):
+    """conf\\ и state\\ во временной папке, sing-box не запущен."""
     state = tmp_path / "state"
     for kind, text in (("corp", CORP), ("personal", PERSONAL_AWG)):
         d = tmp_path / "conf" / kind
@@ -348,107 +593,72 @@ def built(tmp_path, monkeypatch):
     monkeypatch.setattr(buildconfig, "CONF_CORP", str(tmp_path / "conf" / "corp"))
     monkeypatch.setattr(buildconfig, "CONF_PERSONAL",
                         str(tmp_path / "conf" / "personal"))
-    monkeypatch.setattr(buildconfig, "STATE", str(state))
-    monkeypatch.setattr(paths, "CORP_JSON", str(state / "corp.json"))
-    monkeypatch.setattr(paths, "PERSONAL_JSON", str(state / "personal.json"))
+    monkeypatch.setattr(paths, "STATE", str(state))
+    monkeypatch.setattr(paths, "CONFIG_JSON", str(state / "config.json"))
+    monkeypatch.setattr(paths, "TUNNELS_JSON", str(tmp_path / "conf" / "tunnels.json"))
+    monkeypatch.setattr(paths, "CONF_TUNNELS", str(tmp_path / "conf" / "tunnels"))
     monkeypatch.setattr(buildconfig, "running_pid", lambda: "")
     monkeypatch.setattr(buildconfig.sys, "argv", ["buildconfig"])
-    for key in ("SB_PERSONAL", "SB_CORP_EXCLUDE", "CORP_DOMAINS"):
+    for key in ("SB_PERSONAL", "SB_CORP_EXCLUDE", "CORP_DOMAINS", "SB_LOG_LEVEL"):
         monkeypatch.delenv(key, raising=False)
+    return state
 
-    def load():
+
+def _load(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_без_tunnels_json_собирает_рабочий_и_личный_из_site_env(state, monkeypatch):
+    """До переезда правила из site.env дают ту же сборку, что дал бы migrate."""
+    monkeypatch.setenv("CORP_DOMAINS", "corp.example")
+    monkeypatch.setenv("SB_CORP_EXCLUDE", "10.10.5.9")
+
+    buildconfig.main(log=lambda line: None)
+
+    main = _load(state / "config.json")
+    assert buildconfig.side_ids(main) == ["work", "home"]
+    assert (state / "tunnel-work.json").exists()
+    assert (state / "tunnel-home.json").exists()
+    rule = next(r for r in main["route"]["rules"] if r.get("outbound") == "socks-work")
+    assert rule["rules"][0]["domain_suffix"] == ["corp.example"]
+    assert rule["rules"][1] == {"ip_cidr": ["10.10.5.9/32"], "invert": True}
+    assert _by_tag(main["outbounds"], "out")["default"] == buildconfig.PERSONAL_SOCKS_TAG
+
+
+def test_без_рабочего_конфига_старая_сборка_отказывает(state, tmp_path):
+    """Окно до переезда тоже не даёт включить без рабочего конфига."""
+    (tmp_path / "conf" / "corp" / "corp.conf").unlink()
+    with pytest.raises(SystemExit, match="рабочий конфиг не добавлен"):
         buildconfig.main(log=lambda line: None)
-        return tuple(json.loads((state / name).read_text(encoding="utf-8"))
-                     for name in ("config.json", "corp.json", "personal.json"))
-    return load
 
 
-def _by_tag(items, tag):
-    return next(i for i in items if i.get("tag") == tag)
+def test_с_tunnels_json_собирает_из_него(state, tmp_path):
+    d = tmp_path / "conf" / "tunnels" / "lab"
+    d.mkdir(parents=True)
+    (d / "lab-1.conf").write_text(LAB, encoding="utf-8")
+    tunnels.save({"tunnels": [_tunnel("lab", "list")]})
+
+    buildconfig.main(log=lambda line: None)
+
+    assert buildconfig.side_ids(_load(state / "config.json")) == ["lab"]
 
 
-def test_каждый_туннель_живёт_в_своём_конфиге(built):
-    """Сторож перезапускает туннель один, не трогая tun и второй туннель."""
-    main, corp, personal = built()
-
-    assert "endpoints" not in main
-    for cfg, tag in ((corp, "wg-corp"), (personal, "awg-personal")):
-        assert [e["tag"] for e in cfg["endpoints"]] == [tag]
-        assert cfg["route"]["final"] == tag
-        # Автоопределение привязало бы сокет к tun основного процесса.
-        assert cfg["route"]["auto_detect_interface"] is False
+def test_испорченный_tunnels_json_это_внятная_ошибка(state, tmp_path):
+    (tmp_path / "conf" / "tunnels.json").write_text("{", encoding="utf-8")
+    with pytest.raises(SystemExit, match="tunnels.json не читается"):
+        buildconfig.main(log=lambda line: None)
 
 
-def test_личный_идёт_в_свой_socks_с_другим_паролем(built):
-    main, _, personal = built()
+def test_старые_и_лишние_боковые_конфиги_удаляются(state):
+    """В них приватные ключи туннелей, которых больше нет."""
+    state.mkdir()
+    for name in ("corp.json", "personal.json", "tunnel-old.json", "status.json"):
+        (state / name).write_text("{}", encoding="utf-8")
 
-    socks = _by_tag(main["outbounds"], "personal-socks")
-    inbound = _by_tag(personal["inbounds"], "socks-in")
-    assert socks["server_port"] == inbound["listen_port"]
-    assert inbound["users"] == [{"username": socks["username"],
-                                 "password": socks["password"]}]
-    corp = _by_tag(main["outbounds"], "corp-socks")
-    assert corp["server_port"] != socks["server_port"]
-    assert corp["password"] != socks["password"]
+    buildconfig.main(log=lambda line: None)
 
-
-def test_корп_подсети_и_корп_dns_идут_в_socks_с_паролем(built):
-    main, corp, _ = built()
-
-    rule = next(r for r in main["route"]["rules"] if "ip_cidr" in r
-                and r["outbound"] != "direct")
-    assert rule == {"ip_cidr": ["10.10.0.0/16", "192.168.77.0/24"],
-                    "outbound": "corp-socks"}
-    assert _by_tag(main["dns"]["servers"], "dns-corp")["detour"] == "corp-socks"
-
-    socks = _by_tag(main["outbounds"], "corp-socks")
-    inbound = _by_tag(corp["inbounds"], "socks-in")
-    assert inbound["listen"] == "127.0.0.1"
-    assert socks["server"] == "127.0.0.1"
-    assert socks["server_port"] == inbound["listen_port"]
-    assert inbound["users"] == [{"username": socks["username"],
-                                 "password": socks["password"]}]
-    assert len(socks["password"]) >= 24
-
-
-def test_пароль_socks_новый_на_каждую_сборку(built):
-    first, _, _ = built()
-    second, _, _ = built()
-    assert (_by_tag(first["outbounds"], "corp-socks")["password"]
-            != _by_tag(second["outbounds"], "corp-socks")["password"])
-
-
-def test_остальное_через_личный_с_запасным_direct(built):
-    main, _, _ = built()
-
-    assert main["route"]["final"] == "out"
-    out = _by_tag(main["outbounds"], "out")
-    assert out["type"] == "selector"
-    assert out["outbounds"] == ["personal-socks", "direct"]
-    assert out["default"] == "personal-socks"
-    assert buildconfig.api_of(main)[0].startswith("127.0.0.1:")
-    assert buildconfig.api_of(main)[1]
-
-
-def test_без_корп_dns_только_личный():
-    servers, rules = buildconfig.dns_section([], ["corp.example"])
-    assert [s["tag"] for s in servers] == ["dns-personal"]
-    assert rules == []
-
-
-def test_числовой_endpoint_не_даёт_доменов(tmp_path):
-    """Иначе домен сервера пошёл бы резолвиться через корп-DNS, который
-    доступен только когда туннель уже поднят — замкнутый круг."""
-    conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", CORP))
-    assert buildconfig.dns_domains(conf) == set()
-
-
-def test_имя_сервера_даёт_домен_второго_уровня(tmp_path):
-    text = CORP.replace("198.51.100.10:51820", "vpn.example.com:51820")
-    conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", text))
-    assert buildconfig.dns_domains(conf) == {"example.com"}
-
-
+    assert sorted(p.name for p in state.iterdir()) == [
+        "config.json", "status.json", "tunnel-home.json", "tunnel-work.json"]
 # -------------------------------------------------------------- мелочи
 
 @pytest.mark.parametrize("value, level", [

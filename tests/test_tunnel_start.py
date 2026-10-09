@@ -121,17 +121,15 @@ def env(monkeypatch, tmp_path):
         monkeypatch.setattr(paths, name, str(f))
     cfg = tmp_path / "config.json"
     cfg.write_text(json.dumps({
-        "outbounds": [{"type": "socks", "tag": buildconfig.CORP_SOCKS_TAG,
-                       "server_port": 1080},
+        "outbounds": [{"type": "socks", "tag": "socks-work", "server_port": 1080},
                       {"type": "socks", "tag": buildconfig.PERSONAL_SOCKS_TAG,
                        "server_port": 1081}],
     }))
     monkeypatch.setattr(paths, "CONFIG_JSON", str(cfg))
-    for name, ip in (("corp", "203.0.113.20"), ("personal", "203.0.113.10")):
-        side = tmp_path / f"{name}.json"
-        side.write_text(json.dumps(
-            {"endpoints": [{"peers": [{"address": ip}]}]}))
-        monkeypatch.setattr(paths, f"{name.upper()}_JSON", str(side))
+    monkeypatch.setattr(paths, "STATE", str(tmp_path))
+    for tid, ip in (("work", "203.0.113.20"), ("home", "203.0.113.10")):
+        with open(buildconfig.side_json(tid), "w", encoding="utf-8") as fh:
+            json.dump({"endpoints": [{"peers": [{"address": ip}]}]}, fh)
     monkeypatch.setattr(paths, "OWNED_FILE", str(tmp_path / "owned"))
     monkeypatch.setattr(paths, "REAL_IP_FILE", str(tmp_path / "real-ip"))
     logs = tmp_path / "logs"
@@ -163,7 +161,8 @@ def env(monkeypatch, tmp_path):
             with open(paths.REAL_IP_FILE, encoding="utf-8") as fh:
                 seen["real_ip"] = fh.read()
             net.singbox_running = True
-        elif any(buildconfig.side_json(k) == cfg_path for k in seen["dies"]):
+        elif any(buildconfig.side_json(buildconfig.SIDE_IDS[k]) == cfg_path
+                 for k in seen["dies"]):
             proc.returncode = 1
         return proc
 
@@ -252,11 +251,10 @@ def test_проверяются_все_конфиги_и_туннели_стар
 
     assert tun.start() == ""
 
-    assert sorted(seen["checked"]) == sorted(
-        [paths.CONFIG_JSON, paths.CORP_JSON, paths.PERSONAL_JSON])
+    sides = [buildconfig.side_json("work"), buildconfig.side_json("home")]
+    assert sorted(seen["checked"]) == sorted([paths.CONFIG_JSON, *sides])
     # Туннели стартуют вместе, порядок между ними не задан; основной — после.
-    assert sorted(seen["started"][:2]) == sorted(
-        [paths.CORP_JSON, paths.PERSONAL_JSON])
+    assert sorted(seen["started"][:2]) == sorted(sides)
     assert seen["started"][2:] == [paths.CONFIG_JSON]
     assert sorted(seen["socks"]) == [1080, 1081]
     for side in tun.sides:
@@ -391,7 +389,7 @@ def test_повторное_включение_поднимает_мёртвый
     assert tun.start() == ""
 
     assert tun.proc is main
-    assert seen["started"][-1] == paths.CORP_JSON
+    assert seen["started"][-1] == buildconfig.side_json("work")
     assert tun.corp.alive()
 
 
@@ -404,7 +402,7 @@ def test_повторное_включение_возвращает_выход_�
 
     assert tun.start() == ""
 
-    assert seen["started"][-1] == paths.PERSONAL_JSON
+    assert seen["started"][-1] == buildconfig.side_json("home")
     assert tun.personal.alive() and tun.corp.alive()
     assert outs == [buildconfig.PERSONAL_SOCKS_TAG]
 

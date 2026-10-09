@@ -24,7 +24,7 @@ def _paths_file(monkeypatch, tmp_path):
     return path
 
 
-def _timeout(addr, tag="awg-personal"):
+def _timeout(addr, tag="wg-home"):
     return (f"+0300 2026-10-05 09:59:57 ERROR [2478390845 15.1s] connection: open "
             f"connection to {addr} using outbound/wireguard[{tag}]: "
             f"context deadline exceeded\n")
@@ -436,7 +436,7 @@ def test_таймауты_к_одному_адресу_без_задержки_�
 
 def test_таймауты_разных_туннелей_не_складываются(monkeypatch, tmp_path):
     core = _core(monkeypatch)
-    _append(_side_log(core, tmp_path, "corp"), _timeout("10.10.0.5:443", "wg-corp"))
+    _append(_side_log(core, tmp_path, "corp"), _timeout("10.10.0.5:443", "wg-work"))
     _append(_side_log(core, tmp_path), _timeout("34.117.59.81:443"),
             _timeout("172.217.23.238:443"))
 
@@ -600,9 +600,9 @@ def test_выключил_и_включил_посреди_круга_новый
 
 
 def _corp_dead():
-    return (_timeout("172.15.0.228:3000", "wg-corp"),
-            _timeout("10.160.138.4:443", "wg-corp"),
-            _timeout("10.160.138.4:443", "wg-corp"))
+    return (_timeout("172.15.0.228:3000", "wg-work"),
+            _timeout("10.160.138.4:443", "wg-work"),
+            _timeout("10.160.138.4:443", "wg-work"))
 
 
 def _corp_says(monkeypatch, core, ip):
@@ -623,7 +623,7 @@ def test_таймауты_корпа_при_живом_корпе_не_пере�
     assert core.tunnel.restarts == []
     assert asked == [1]
     [line] = _said(core, "корп отвечает")
-    assert "wg-corp" in line and "DNS 10.20.0.4" in line
+    assert "wg-work" in line and "DNS 10.20.0.4" in line
     assert core._dead_hits == ()
 
 
@@ -686,7 +686,7 @@ def test_мёртвый_туннель_в_журнале_с_тегом_числ�
     _rounds(core, 1)
 
     [line] = _said(core, "перезапускаю личный процесс")
-    assert "awg-personal" in line
+    assert "wg-home" in line
     assert "таймаутов 3" in line
     assert "172.217.23.238, 34.117.59.81" in line
 

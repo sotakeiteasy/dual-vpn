@@ -183,6 +183,37 @@ def test_лишние_поля_не_сохраняются():
     assert "lishnee" not in saved["tunnels"][0]
 
 
+# ---------------------------------------------------------- активный конфиг
+
+def test_активный_конфиг_по_имени():
+    _put("tunnels/work", "a.conf")
+    _put("tunnels/work", "b.conf")
+    assert tunnels.active_conf(_tunnel(active="b")) == tunnels.conf_path("work", "b")
+
+
+def test_без_выбора_берётся_единственный():
+    _put("tunnels/work", "a.conf")
+    assert tunnels.active_conf(_tunnel()) == tunnels.conf_path("work", "a")
+
+
+def test_пустой_слот_без_конфига():
+    assert tunnels.active_conf(_tunnel()) is None
+
+
+def test_несколько_без_выбора_отказ():
+    """Собрать «какой-нибудь» значило бы молча включить не тот сервер."""
+    _put("tunnels/work", "a.conf")
+    _put("tunnels/work", "b.conf")
+    with pytest.raises(ValueError, match="несколько"):
+        tunnels.active_conf(_tunnel())
+
+
+def test_выбранный_пропал_отказ():
+    _put("tunnels/work", "a.conf")
+    with pytest.raises(ValueError, match="нет конфига «b»"):
+        tunnels.active_conf(_tunnel(active="b"))
+
+
 # ------------------------------------------------------------------ переезд
 
 SITE_ENV = """\

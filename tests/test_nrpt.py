@@ -99,15 +99,16 @@ def test_без_wmi_правило_не_ставится_и_это_видно(mo
     assert winnet.nrpt_set(["corp.example"], paths.TUN_DNS) is False
 
 
-def test_домены_для_nrpt_берутся_из_правила_корп_dns(tmp_path, monkeypatch):
+def test_домены_для_nrpt_берутся_из_правил_dns_туннелей(tmp_path, monkeypatch):
     cfg = tmp_path / "config.json"
     cfg.write_text(json.dumps({"dns": {"rules": [
-        {"domain_suffix": ["чужой.example"], "server": "dns-personal"},
-        {"domain_suffix": ["corp.example", "intra.example"], "server": "dns-corp"},
+        {"domain_suffix": ["чужой.example"], "server": "dns"},
+        {"domain_suffix": ["corp.example", "intra.example"], "server": "dns-work"},
+        {"domain_suffix": [".lab.example"], "server": "dns-lab"},
     ]}}), encoding="utf-8")
     monkeypatch.setattr(paths, "CONFIG_JSON", str(cfg))
 
-    assert Tunnel._corp_domains() == ["corp.example", "intra.example"]
+    assert Tunnel._corp_domains() == ["corp.example", "intra.example", ".lab.example"]
 
 
 def test_нет_конфига_нет_доменов(tmp_path, monkeypatch):

@@ -2,20 +2,21 @@
 """
 Собирает конфиги sing-box-lx из обычных WireGuard/AmneziaWG .conf файлов.
 
-    conf/personal/<имя>.conf   личный AmneziaWG  -> весь остальной трафик
-    conf/corp/<имя>.conf       корпоративный WG  -> подсети из его AllowedIPs
+Туннели и их правила — conf/tunnels.json (tunnels.py), у каждого активный
+.conf в conf/tunnels/<id>/. Режим list — в туннель идут подсети из его
+AllowedIPs и записи «пускать»; all — весь остальной трафик.
 
-Процессов три: state/config.json — tun, маршрутизация и DNS; state/corp.json
-и state/personal.json — корп и личный туннели, каждый за своим socks на
+Процессов 1 + N: state/config.json — tun, маршрутизация и DNS;
+state/tunnel-<id>.json — по процессу на туннель, каждый за своим socks на
 loopback. Сбой туннеля чинится перезапуском одного его процесса: tun не
-падает, а трафик упавшего личного до его возвращения идёт напрямую.
+падает, а трафик упавшего основного до его возвращения идёт напрямую.
 
-Рабочий ровно один. Личных сколько угодно, нужный выбирает профиль:
+Пока tunnels.json нет, туннелей два, как до 0.4: рабочий из conf/corp и
+личный из conf/personal, нужный личный выбирает профиль:
     set SB_PERSONAL=nl-1 && python -m dualvpn.buildconfig
     python -m dualvpn.buildconfig --personal nl-1
-Без профиля берётся единственный личный.
 
-Корп-маршруты берутся ИЗ AllowedIPs корп-конфига, поэтому при ротации
+Подсети туннеля берутся ИЗ AllowedIPs его конфига, поэтому при ротации
 достаточно положить новый файл — правки скрипта не нужны.
 
 Зовётся службой при каждом включении, отдельно запускать не нужно.
@@ -31,14 +32,13 @@ import sys
 import threading
 
 # Раскладку знает paths.py — здесь только имена.
-from . import paths, winnet
+from . import paths, routelist, tunnels, winnet
 from .tunnels import LOG_LEVELS, NAME_MAX, check_name, safe_name
 
 BASE = paths.BASE
 CONF = paths.CONF
 CONF_CORP = paths.CONF_CORP
 CONF_PERSONAL = paths.CONF_PERSONAL
-STATE = paths.STATE
 KINDS = ("corp", "personal")
 
 # Поля [Interface], которые sing-box ждёт как AWG-параметры (в нижнем регистре).
@@ -427,81 +427,186 @@ def num_or_range(value, tag, field):
     return f"{lo.strip()}-{hi.strip()}"
 
 
-def corp_routes(conf):
-    """Подсети корпа из AllowedIPs, без 0.0.0.0/0 и IPv6."""
+def allowed_nets(conf, v6=False):
+    """Подсети из AllowedIPs, без маршрута по умолчанию; IPv6 — только с v6 на tun."""
     nets = []
     for cidr in split_list(conf["peer"]["allowedips"]):
         try:
             net = ipaddress.ip_network(cidr, strict=False)
         except ValueError:
             continue
-        if net.version != 4 or net.prefixlen == 0:
+        if net.prefixlen == 0 or (net.version == 6 and not v6):
             continue
         nets.append(str(net))
-    if not nets:
-        sys.exit("[corp] в AllowedIPs нет ни одной IPv4-подсети")
     return nets
 
 
-def dns_domains(conf):
-    """Домены для корп-DNS: из имени корп-endpoint + известные внутренние."""
-    domains = set()
-    host = conf["peer"]["endpoint"].rpartition(":")[0]
-    if not re.match(r"^[\d.]+$", host):
-        parts = host.split(".")
-        if len(parts) >= 2:
-            domains.add(".".join(parts[-2:]))
-    return domains
+def split_entries(entries, v6=False):
+    """Записи списка туннеля (routelist) → (ip_cidr, domain_suffix) sing-box.
+
+    «x.su» — сам домен и поддомены, «*.x.su» → «.x.su» — только поддомены.
+    IPv6 без v6 на tun отбрасываем, как и AllowedIPs: соединение по нему всё
+    равно умерло бы в туннеле.
+    """
+    nets, domains = [], []
+    for entry in entries:
+        try:
+            net = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            domains.append(entry[1:] if entry.startswith("*.") else entry)
+            continue
+        if net.version == 4 or v6:
+            nets.append(str(net))
+    return nets, domains
 
 
-def dns_section(corp_dns, domains):
-    """Серверы и правила DNS: корп-домены — в корп-DNS, остальное — 8.8.8.8.
+def _match(nets, domains):
+    """Условие правила sing-box. Пустых полей не пишем: правило без условий
+    совпадает со всем."""
+    match = {}
+    if nets:
+        match["ip_cidr"] = nets
+    if domains:
+        match["domain_suffix"] = domains
+    return match
 
-    Корп-DNS спрашиваем по TCP. По UDP sing-box держит к нему один сокет
-    через wg-corp; ответы на нём терялись (больше половины запросов шли
+
+def tunnel_rule(nets, domains, ex_nets, ex_domains, outbound):
+    """Правило основного процесса для туннеля «по списку»; None — пускать нечего.
+
+    ip_cidr и domain_suffix в одном правиле sing-box объединяет через «или».
+    Исключение — отрицание внутри «и»: соединение не вырезается из подсети, а
+    идёт дальше по правилам — к локальной сети, «мимо VPN» или в выход. Так
+    /32 внутри подсети из AllowedIPs тоже исключается.
+    """
+    match = _match(nets, domains)
+    if not match:
+        return None
+    exclude = _match(ex_nets, ex_domains)
+    if not exclude:
+        return {**match, "outbound": outbound}
+    return {"type": "logical", "mode": "and",
+            "rules": [match, {**exclude, "invert": True}],
+            "outbound": outbound}
+
+
+def off_endpoint(domains, host):
+    """Домены для DNS туннеля без того, под которым живёт его сервер.
+
+    Иначе имя сервера пришлось бы резолвить через DNS туннеля, который
+    доступен только когда туннель уже поднят, — замкнутый круг.
+    """
+    host = host.lower()
+
+    def covers(d):
+        if d.startswith("."):
+            return host.endswith(d)
+        return host == d or host.endswith(f".{d}")
+    return [d for d in domains if not covers(d)]
+
+
+def corp_diagnostics(ep):
+    """SB_CORP_* — диагностика туннелей «по списку», без правки файлов."""
+    # SB_CORP_SYSTEM=1 — поднимать туннель системным интерфейсом.
+    # Оставлено запасным выходом от macOS-версии. Там для эндпоинта с одним
+    # пиром sing-box открывал connected UDP-сокет, отправка с явным адресом
+    # получателя давала EISCONN, ломалась переустановка ключей раз в ~2 минуты
+    # и туннель тихо умирал. На Windows этот путь другой, и дефект не
+    # воспроизводится — но если туннель начнёт отваливаться по тому же
+    # расписанию, проверять стоит отсюда.
+    if os.environ.get("SB_CORP_SYSTEM") == "1":
+        ep["system"] = True
+
+    # SB_CORP_AWG=1 — пустить туннель через AWG-код форка с нейтральными
+    # параметрами. При Jc=0, S1=S2=0 и H1..H4 = 1,2,3,4 пакеты AmneziaWG
+    # побайтово совпадают с ванильным WireGuard (это штатные номера типов
+    # сообщений), поэтому обычный сервер принимает их как есть.
+    # Смысл: личный туннель на этом же коде работает без ошибок, а обычный
+    # WireGuard-путь форка отбивался EISCONN при рукопожатии (см. выше).
+    if os.environ.get("SB_CORP_AWG") == "1":
+        ep.update({"jc": 0, "jmin": 0, "jmax": 0, "s1": 0, "s2": 0,
+                   "h1": 1, "h2": 2, "h3": 3, "h4": 4})
+
+    # SB_CORP_2PEERS=1 — добавить фиктивного второго пира.
+    # sing-box открывает connected UDP-сокет ТОЛЬКО когда пир один; при двух и
+    # более он использует ListenPacket, где отправка с явным адресом легальна
+    # и EISCONN не возникает. Пир-пустышка ведёт в TEST-NET-1 (RFC 5737),
+    # трафика туда нет, на маршрутизацию он не влияет.
+    if os.environ.get("SB_CORP_2PEERS") == "1":
+        ep["peers"].append({
+            "address": "192.0.2.1",
+            "port": 51820,
+            "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "allowed_ips": ["192.0.2.2/32"],
+        })
+    # SB_CORP_MTU=1380 — MTU туннелей «по списку».
+    if os.environ.get("SB_CORP_MTU"):
+        ep["mtu"] = as_int(os.environ["SB_CORP_MTU"], ep["tag"], "SB_CORP_MTU")
+
+
+def dns_section(by_tunnel, public_detour):
+    """Серверы и правила DNS: домены туннеля — в его DNS, остальное — 8.8.8.8.
+
+    by_tunnel — [(id, адрес DNS, домены)] туннелей «по списку» с DNS в .conf.
+    DNS туннеля спрашиваем по TCP. По UDP sing-box держит к нему один сокет
+    через туннель; ответы на нём терялись (больше половины запросов шли
     3–10 с), и новый сокет sing-box открывал только по таймауту — клиент
     Windows к этому времени уже отвечал «хост не найден». У TCP потеря
     пакета — повтор через доли секунды, а не таймаут всего запроса.
     """
-    # Публичный DNS идёт тем же выходом, что и трафик: упал личный туннель —
-    # переключатель OUT_TAG уводит в direct и его. Иначе без личного не
-    # резолвилось бы ни одно имя, и запасной выход был бы бесполезен.
-    servers = [{
-        "type": "udp", "tag": "dns-personal",
-        "server": "8.8.8.8", "detour": OUT_TAG,
-    }]
-    rules = []
-    if corp_dns:
-        servers.insert(0, {
-            "type": "tcp", "tag": "dns-corp",
-            "server": corp_dns[0], "detour": CORP_SOCKS_TAG,
-        })
-    # Пустой domain_suffix sing-box считает совпадением со всем: без корп-
-    # доменов любое имя уходило бы в корп-DNS.
-    if corp_dns and domains:
-        rules.append({"domain_suffix": domains, "server": "dns-corp"})
+    servers, rules = [], []
+    for tid, server, domains in by_tunnel:
+        servers.append({"type": "tcp", "tag": dns_tag(tid),
+                        "server": server, "detour": socks_tag(tid)})
+        # Пустой domain_suffix sing-box считает совпадением со всем: без
+        # доменов любое имя уходило бы в DNS туннеля.
+        if domains:
+            rules.append({"domain_suffix": domains, "server": dns_tag(tid)})
+    # Публичный DNS идёт тем же выходом, что и трафик: упал основной туннель —
+    # переключатель OUT_TAG уводит в direct и его. Иначе без основного не
+    # резолвилось бы ни одно имя, и запасной выход был бы бесполезен. Без
+    # основного туннеля — напрямую: detour на пустой direct sing-box отвергает.
+    public = {"type": "udp", "tag": PUBLIC_DNS_TAG, "server": "8.8.8.8"}
+    if public_detour:
+        public["detour"] = public_detour
+    servers.append(public)
     return servers, rules
 
 
-# Частные диапазоны: всё, что не отдано корпу, ходит напрямую.
+# Частные диапазоны: всё, что не отдано туннелям «по списку», ходит напрямую.
 LOCAL_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
               "169.254.0.0/16", "224.0.0.0/4"]
 
-# Корп и личный живут в отдельных процессах sing-box (боковые: state/corp.json,
-# state/personal.json): сторож перезапускает упавший один, не трогая tun,
-# маршруты и второй туннель. Основной процесс ходит в каждый через свой socks
-# на loopback.
-PERSONAL_TAG = "awg-personal"
-CORP_TAG = "wg-corp"
-CORP_SOCKS_TAG = "corp-socks"
-PERSONAL_SOCKS_TAG = "personal-socks"
-# Боковой процесс → (тег его endpoint, тег socks-выхода в основном).
-SIDES = {"corp": (CORP_TAG, CORP_SOCKS_TAG),
-         "personal": (PERSONAL_TAG, PERSONAL_SOCKS_TAG)}
-# Выход для всего, что не корп и не локальная сеть: личный туннель, а пока
-# он мёртв — напрямую. Переключает служба через clash_api, без перезапуска.
+# Каждый туннель живёт в своём процессе sing-box (боковой: state/tunnel-<id>.json):
+# сторож перезапускает упавший один, не трогая tun, маршруты и другие туннели.
+# Основной процесс ходит в каждый через свой socks на loopback.
+#
+# Теги туннеля строятся из его id. id — только [a-z0-9-] (tunnels.check_id),
+# поэтому тег туннеля не совпадёт с постоянными: у тех нет префикса с дефисом.
+def ep_tag(tid):
+    return f"wg-{tid}"
+
+
+def socks_tag(tid):
+    return f"socks-{tid}"
+
+
+def dns_tag(tid):
+    return f"dns-{tid}"
+
+
+# Выход для всего, что не забрали туннели «по списку» и не локальная сеть:
+# основной туннель, а пока он мёртв — напрямую. Переключает служба через
+# clash_api, без перезапуска.
 OUT_TAG = "out"
 DIRECT_TAG = "direct"
+PUBLIC_DNS_TAG = "dns"
+
+# Служба пока знает ровно два боковых процесса — corp и personal; их туннели —
+# work и home (tunnels.LEGACY).
+SIDE_IDS = {kind: tid for kind, (tid, _, _) in tunnels.LEGACY.items()}
+PERSONAL_TAG = ep_tag(SIDE_IDS["personal"])
+PERSONAL_SOCKS_TAG = socks_tag(SIDE_IDS["personal"])
 
 
 def _free_port():
@@ -540,15 +645,16 @@ def write_json(path, data):
     os.chmod(path, 0o600)
 
 
-def side_json(kind):
-    """Путь к конфигу бокового процесса: 'corp' или 'personal'."""
-    return paths.CORP_JSON if kind == "corp" else paths.PERSONAL_JSON
+def side_json(tid):
+    """Путь к конфигу бокового процесса туннеля. С префиксом: id «config»
+    или «status» иначе затёр бы config.json или status.json рядом."""
+    return os.path.join(paths.STATE, f"tunnel-{tid}.json")
 
 
-def side_config(ep, link):
+def side_config(ep, link, level="info"):
     """Конфиг бокового процесса: socks-вход на loopback и один endpoint."""
     return {
-        "log": {"level": log_level(), "timestamp": True},
+        "log": {"level": level, "timestamp": True},
         "inbounds": [{
             "type": "socks", "tag": "socks-in",
             "listen": "127.0.0.1", "listen_port": link["port"],
@@ -566,14 +672,57 @@ def side_config(ep, link):
     }
 
 
-def side_link(main_cfg, kind):
+def side_link(main_cfg, tid):
     """Порт и логин socks бокового процесса из основного конфига, иначе None."""
     for ob in main_cfg.get("outbounds", []):
-        if ob.get("tag") == SIDES[kind][1]:
+        if ob.get("tag") == socks_tag(tid):
             return {"port": ob.get("server_port"),
                     "username": ob.get("username"),
                     "password": ob.get("password")}
     return None
+
+
+def side_ids(main_cfg):
+    """id туннелей, чьи боковые процессы ждёт основной конфиг, по порядку."""
+    prefix = socks_tag("")
+    return [ob["tag"][len(prefix):] for ob in main_cfg.get("outbounds", [])
+            if ob.get("type") == "socks"
+            and ob.get("tag", "").startswith(prefix)]
+
+
+def ep_of_socks(tag):
+    """Тег endpoint туннеля по тегу его socks-выхода; чужой тег — как есть."""
+    prefix = socks_tag("")
+    if tag.startswith(prefix) and len(tag) > len(prefix):
+        return ep_tag(tag[len(prefix):])
+    return tag
+
+
+def tunnel_dns(main_cfg):
+    """{id: адрес DNS туннеля} из основного конфига, по порядку туннелей."""
+    prefix = dns_tag("")
+    return {s["tag"][len(prefix):]: s.get("server", "")
+            for s in main_cfg.get("dns", {}).get("servers", [])
+            if s.get("tag", "").startswith(prefix)}
+
+
+def tunnel_domains(main_cfg):
+    """Домены, которые основной конфиг отдаёт DNS туннелей, — для NRPT."""
+    prefix = dns_tag("")
+    names = []
+    for rule in main_cfg.get("dns", {}).get("rules", []):
+        if rule.get("server", "").startswith(prefix):
+            names += rule.get("domain_suffix", [])
+    return names
+
+
+def tunnel_nets(main_cfg, tid):
+    """Подсети, которые основной конфиг пускает в туннель (без исключений)."""
+    for rule in main_cfg.get("route", {}).get("rules", []):
+        if rule.get("outbound") == socks_tag(tid):
+            match = rule["rules"][0] if rule.get("type") == "logical" else rule
+            return match.get("ip_cidr", [])
+    return []
 
 
 def api_of(main_cfg):
@@ -606,9 +755,241 @@ def log_level():
     return level if level in LOG_LEVELS else "info"
 
 
+def legacy_sources():
+    """Пара «рабочий/личный» до переезда в tunnels.json: конфиги из conf\\corp
+    и conf\\personal, правила — из site.env через окружение.
+
+    Это те же туннели, что дал бы tunnels.migrate, поэтому сборка до
+    переезда и после него одинакова.
+    """
+    work, home = tunnels.LEGACY["corp"], tunnels.LEGACY["personal"]
+
+    def rules(key):
+        entries, rejected = routelist.parse(os.environ.get(key, ""))
+        if rejected:
+            print(f"{key}: не понял {', '.join(rejected)} — пропускаю",
+                  file=sys.stderr)
+        return entries
+
+    data = tunnels.validate({"log_level": log_level(), "tunnels": [
+        {"id": work[0], "name": work[1], "mode": work[2],
+         "include": rules("CORP_DOMAINS"), "exclude": rules("SB_CORP_EXCLUDE")},
+        {"id": home[0], "name": home[1], "mode": home[2]},
+    ]})
+    return data, {work[0]: pick_corp(), home[0]: pick_personal()}
+
+
+def sources():
+    """(туннели, {id: путь к активному .conf}) для сборки."""
+    if not os.path.exists(paths.TUNNELS_JSON):
+        return legacy_sources()
+    try:
+        data = tunnels.load()
+        return data, {t["id"]: tunnels.active_conf(t) for t in data["tunnels"]}
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+
+def _unique(items):
+    return list(dict.fromkeys(items))
+
+
+def _summary(t, ep, nets, domains, dns):
+    peer = ep["peers"][0]
+    awg = "да" if any(k in ep for k in AWG_INT) else "нет"
+    lines = [f"  [{t['id']}] {t['name']}: "
+             f"{'весь остальной трафик' if t['mode'] == 'all' else 'по списку'}, "
+             f"{peer['address']}:{peer['port']}  mtu {ep['mtu']}  awg={awg}"]
+    if nets or domains:
+        lines.append(f"      пускаю: {', '.join(nets + domains)}")
+    if t["exclude"]:
+        lines.append(f"      мимо  : {', '.join(t['exclude'])}")
+    if dns:
+        lines.append(f"      DNS   : {dns[1]} для {', '.join(dns[2]) or '(доменов нет)'}")
+    return lines
+
+
+def build(data, confs, out_path, side_path=None, log=print):
+    """Основной конфиг и по боковому на туннель. Возвращает id собранных.
+
+    data — tunnels.validate(); confs — {id: путь к активному .conf}. Туннель
+    без конфига пропускается: пустой слот не держит остальные.
+    """
+    side_path = side_path or side_json
+    level = data["log_level"]
+    built = []                       # (туннель, разобранный .conf, endpoint)
+    for t in data["tunnels"]:
+        path = confs.get(t["id"])
+        if not path:
+            log(f"  [{t['id']}] «{t['name']}»: конфига нет, туннель пропускаю")
+            continue
+        conf = parse_conf(path)
+        # Значение по умолчанию — только когда в конфиге нет строки MTU.
+        #
+        # 1280, а не 1420: клиент WireGuard на macOS в этом случае берёт именно
+        # 1280, и конфиги от провайдеров рассчитаны на это. С 1420 у сервера
+        # nl-1 рукопожатие проходило, а данные не пролезали — туннель выглядел
+        # поднятым, но интернета не было. Конфиги со своим MTU это не
+        # затрагивает: там значение берётся из файла.
+        built.append((t, conf, endpoint(conf, ep_tag(t["id"]), 1280, log)))
+    if not built:
+        sys.exit("ни у одного туннеля нет конфига — добавь .conf")
+    main = next((b for b in built if b[0]["mode"] == "all"), None)
+
+    # IPv6 включаем ТОЛЬКО если сервер основного туннеля выдал нам v6-адрес в
+    # [Interface] Address. Наличия ::/0 в AllowedIPs недостаточно: конфиги
+    # его пишут по привычке.
+    #
+    # Почему это важно. Если дать tun v6-адрес, не имея v6 на самом туннеле,
+    # приложения видят «IPv6 есть» и по Happy Eyeballs идут сначала по нему.
+    # Трафик заходит в туннель и умирает там с
+    #     "missing IPv6 local address",
+    # причём не молча — соединение получает отказ, и браузер рвёт страницу
+    # (это и был ERR_CONNECTION_CLOSED). Без v6-адреса на tun приложения
+    # просто не пытаются использовать v6 и сразу работают по IPv4.
+    v6 = main is not None and any(
+        ipaddress.ip_network(a, strict=False).version == 6
+        for a in split_list(main[1]["interface"].get("address", ""))
+        if _is_cidr(a))
+    tun_address = ["172.19.0.1/30"]
+    if v6:
+        tun_address.append("fdfe:dcba:9876::1/126")
+
+    # Переключатели для диагностики, без правки файлов:
+    #   SB_STACK=system|gvisor|mixed   сетевой стек tun
+    #   SB_TUN_MTU=1380                MTU самого tun
+    #   SB_CORP_*                      туннелям «по списку», см. corp_diagnostics
+    stack = os.environ.get("SB_STACK", "gvisor")
+
+    rules, dns_tunnels, report = [], [], []
+    for t, conf, ep in built:
+        # Какой трафик пустить в туннель, решает основной процесс. С AllowedIPs
+        # из файла endpoint отбрасывал бы домены и адреса из «пускать»,
+        # которых в AllowedIPs нет.
+        ep["peers"][0]["allowed_ips"] = ["0.0.0.0/0"] + (["::/0"] if v6 else [])
+        nets, domains, dns = [], [], None
+        if t["mode"] == "list":
+            corp_diagnostics(ep)
+            inc_nets, domains = split_entries(t["include"], v6)
+            nets = _unique(allowed_nets(conf, v6) + inc_nets)
+            ex_nets, ex_domains = split_entries(t["exclude"], v6)
+            rule = tunnel_rule(nets, domains, ex_nets, ex_domains,
+                               socks_tag(t["id"]))
+            if rule:
+                rules.append(rule)
+            else:
+                log(f"  [{t['id']}] «{t['name']}»: пускать нечего — ни подсетей "
+                    f"в AllowedIPs, ни записей в списке")
+            # DNS туннеля: из [Interface] DNS его .conf, иначе не поднимаем.
+            servers = [d for d in split_list(conf["interface"].get("dns", ""))
+                       if re.match(r"^[\d.]+$", d)]
+            if servers:
+                host = conf["peer"]["endpoint"].rpartition(":")[0]
+                dns = (t["id"], servers[0], off_endpoint(domains, host))
+                dns_tunnels.append(dns)
+        report += _summary(t, ep, nets, domains, dns)
+
+    # Локальная сеть — напрямую, не в туннель. Без этого запросы к соседним
+    # устройствам (NAS, принтер, роутер) уходили в личный туннель и висли там
+    # по 15 секунд. Правило стоит ПОСЛЕ туннелей «по списку»: порядок решает,
+    # и свои подсети из этих же диапазонов они уже забрали выше.
+    rules.append({"ip_cidr": LOCAL_NETS, "outbound": DIRECT_TAG})
+    if main:
+        bypass = _match(*split_entries(main[0]["exclude"], v6))
+        if bypass:
+            rules.append({**bypass, "outbound": DIRECT_TAG})
+
+    links = {t["id"]: new_link() for t, _, _ in built}
+    api = new_api()
+    outbounds = [{"type": "direct", "tag": DIRECT_TAG}]
+    outbounds += [{"type": "socks", "tag": socks_tag(tid), "version": "5",
+                   "server": "127.0.0.1", "server_port": link["port"],
+                   "username": link["username"], "password": link["password"]}
+                  for tid, link in links.items()]
+    if main:
+        # Рвать соединения при смене выхода: открытые через мёртвый основной
+        # туннель иначе висят до своих таймаутов.
+        outbounds.append({"type": "selector", "tag": OUT_TAG,
+                          "outbounds": [socks_tag(main[0]["id"]), DIRECT_TAG],
+                          "default": socks_tag(main[0]["id"]),
+                          "interrupt_exist_connections": True})
+    dns_servers, dns_rules = dns_section(dns_tunnels, OUT_TAG if main else None)
+    mtu = main[2]["mtu"] if main else min(ep["mtu"] for _, _, ep in built)
+
+    config = {
+        "log": {"level": level, "timestamp": True},
+        "dns": {
+            "servers": dns_servers,
+            "rules": dns_rules,
+            "final": PUBLIC_DNS_TAG,
+            "strategy": "ipv4_only",
+        },
+        "inbounds": [{
+            "type": "tun", "tag": "tun-in",
+            "mtu": int(os.environ.get("SB_TUN_MTU", mtu)),
+            "address": tun_address,
+            "auto_route": True,
+            # Windows шлёт DNS-запрос во все адаптеры сразу и берёт первый
+            # ответ — обычно от DNS провайдера, и корп-домены резолвились
+            # мимо корп-DNS. strict_route закрывает DNS на остальных
+            # адаптерах правилами брандмауэра. Выключить: SB_STRICT_ROUTE=0.
+            "strict_route": os.environ.get("SB_STRICT_ROUTE") != "0",
+            "stack": stack,
+        }],
+        "outbounds": outbounds,
+        "experimental": {"clash_api": {
+            "external_controller": f"127.0.0.1:{api['port']}",
+            "secret": api["secret"],
+        }},
+        "route": {
+            "rules": [
+                {"action": "sniff"},
+                {"protocol": "dns", "action": "hijack-dns"},
+                *rules,
+            ],
+            # Нет туннеля на «весь остальной трафик» — остальное напрямую.
+            "final": OUT_TAG if main else DIRECT_TAG,
+            # SB_NO_AUTODETECT=1 — не перепривязывать сокеты к интерфейсу.
+            # Наш скрипт меняет маршруты сразу после старта, и при включённом
+            # автоопределении sing-box может перепривязать UDP-сокет туннеля
+            # к tun: пакеты тогда уходят через en0, а ответы на en0 до сокета
+            # не доходят.
+            "auto_detect_interface":
+                os.environ.get("SB_NO_AUTODETECT") != "1",
+            "default_domain_resolver": PUBLIC_DNS_TAG,
+        },
+    }
+
+    write_json(out_path, config)
+    for t, _, ep in built:
+        write_json(side_path(t["id"]), side_config(ep, links[t["id"]], level))
+
+    print(f"собрано: {out_path}")
+    for line in report:
+        print(line)
+    return [t["id"] for t, _, _ in built]
+
+
+def _drop_stale_sides(keep):
+    """Боковые конфиги туннелей, которых больше нет, — с диска: в них
+    приватные ключи. corp.json и personal.json — их имена до 0.4."""
+    try:
+        names = os.listdir(paths.STATE)
+    except OSError:
+        return
+    for f in names:
+        tid = f[len("tunnel-"):-len(".json")] if (
+            f.startswith("tunnel-") and f.endswith(".json")) else None
+        if f in ("corp.json", "personal.json") or (tid and tid not in keep):
+            try:
+                os.remove(os.path.join(paths.STATE, f))
+            except OSError:
+                pass
+
+
 def main(log=print):
-    os.makedirs(STATE, exist_ok=True)
-    out_path = os.path.join(STATE, "config.json")
+    os.makedirs(paths.STATE, exist_ok=True)
+    out_path = paths.CONFIG_JSON
 
     # Перезаписывать конфиг под работающим процессом нельзя: адрес пира может
     # смениться, и sing-box падает на «sendmsg: socket is already connected»,
@@ -619,216 +1000,16 @@ def main(log=print):
         sys.exit(f"sing-box уже работает (pid {pid}) — конфиг не трогаю.\n"
                  f"Останови его (`vpn stop`) или пересобери в другой файл:\n"
                  f"  python3 {os.path.relpath(__file__, BASE)} --out /tmp/test.json")
-    corp_path, personal_path = paths.CORP_JSON, paths.PERSONAL_JSON
+    side_path = None
     if "--out" in sys.argv:
         out_path = sys.argv[sys.argv.index("--out") + 1]
-        corp_path = os.path.splitext(out_path)[0] + ".corp.json"
-        personal_path = os.path.splitext(out_path)[0] + ".personal.json"
+        stem = os.path.splitext(out_path)[0]
+        side_path = lambda tid: f"{stem}.{tid}.json"
 
-    p_path = pick_personal()
-    c_path = pick_corp()
-
-    personal = parse_conf(p_path)
-    corp = parse_conf(c_path)
-
-    # Значение по умолчанию — только когда в конфиге нет строки MTU.
-    #
-    # 1280, а не 1420: клиент WireGuard на macOS в этом случае берёт именно
-    # 1280, и конфиги от провайдеров рассчитаны на это. С 1420 у сервера
-    # nl-1 рукопожатие проходило, а данные не пролезали — туннель выглядел
-    # поднятым, но интернета не было. Конфиги со своим MTU (personal.conf)
-    # это не затрагивает: там значение берётся из файла.
-    ep_personal = endpoint(personal, PERSONAL_TAG, 1280, log)
-    ep_corp = endpoint(corp, CORP_TAG, 1280, log)
-
-    # Переключатели для диагностики, без правки файлов:
-    #   SB_STACK=system|gvisor|mixed   сетевой стек tun
-    #   SB_CORP_MTU=1380               MTU корп-туннеля
-    #   SB_TUN_MTU=1380                MTU самого tun
-    stack = os.environ.get("SB_STACK", "gvisor")
-
-    # SB_CORP_SYSTEM=1 — поднимать корп-туннель системным интерфейсом.
-    # Оставлено запасным выходом от macOS-версии. Там для эндпоинта с одним
-    # пиром sing-box открывал connected UDP-сокет, отправка с явным адресом
-    # получателя давала EISCONN, ломалась переустановка ключей раз в ~2 минуты
-    # и туннель тихо умирал. На Windows этот путь другой, и дефект не
-    # воспроизводится — но если туннель начнёт отваливаться по тому же
-    # расписанию, проверять стоит отсюда.
-    if os.environ.get("SB_CORP_SYSTEM") == "1":
-        ep_corp["system"] = True
-
-    # SB_CORP_AWG=1 — пустить корп через AWG-код форка с нейтральными
-    # параметрами. При Jc=0, S1=S2=0 и H1..H4 = 1,2,3,4 пакеты AmneziaWG
-    # побайтово совпадают с ванильным WireGuard (это штатные номера типов
-    # сообщений), поэтому обычный сервер принимает их как есть.
-    # Смысл: личный туннель на этом же коде работает без ошибок, а обычный
-    # WireGuard-путь форка отбивался EISCONN при рукопожатии (см. выше).
-    if os.environ.get("SB_CORP_AWG") == "1":
-        ep_corp.update({"jc": 0, "jmin": 0, "jmax": 0, "s1": 0, "s2": 0,
-                        "h1": 1, "h2": 2, "h3": 3, "h4": 4})
-
-    # SB_CORP_2PEERS=1 — добавить корпу фиктивного второго пира.
-    # sing-box открывает connected UDP-сокет ТОЛЬКО когда пир один; при двух и
-    # более он использует ListenPacket, где отправка с явным адресом легальна
-    # и EISCONN не возникает. Пир-пустышка ведёт в TEST-NET-1 (RFC 5737),
-    # трафика туда нет, на маршрутизацию он не влияет.
-    if os.environ.get("SB_CORP_2PEERS") == "1":
-        ep_corp["peers"].append({
-            "address": "192.0.2.1",
-            "port": 51820,
-            "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "allowed_ips": ["192.0.2.2/32"],
-        })
-    if os.environ.get("SB_CORP_MTU"):
-        ep_corp["mtu"] = int(os.environ["SB_CORP_MTU"])
-
-    routes = corp_routes(corp)
-
-    # SB_CORP_EXCLUDE="198.51.100.7/32 ..." — не гнать эти адреса в корп-туннель.
-    # Нужно, когда какой-то адрес из AllowedIPs недоступен со стороны корп-сети:
-    # без исключения соединение с ним висит 15с и тормозит браузер.
-    excl = os.environ.get("SB_CORP_EXCLUDE", "").replace(",", " ").split()
-    if excl:
-        drop = [ipaddress.ip_network(x, strict=False) for x in excl if _is_cidr(x)]
-        routes = [r for r in routes
-                  if not any(ipaddress.ip_network(r, strict=False).subnet_of(d)
-                             for d in drop)]
-        for ep in (ep_corp,):
-            ep["peers"][0]["allowed_ips"] = [
-                c for c in ep["peers"][0]["allowed_ips"]
-                if not (_is_cidr(c) and any(
-                    ipaddress.ip_network(c, strict=False).subnet_of(d) for d in drop))
-            ]
-        print(f"  исключено из корпа: {' '.join(excl)}")
-
-    # IPv6 включаем ТОЛЬКО если сервер выдал нам v6-адрес в [Interface] Address.
-    # Наличия ::/0 в AllowedIPs недостаточно: конфиги его пишут по привычке.
-    #
-    # Почему это важно. Если дать tun v6-адрес, не имея v6 на самом туннеле,
-    # приложения видят «IPv6 есть» и по Happy Eyeballs идут сначала по нему.
-    # Трафик заходит в туннель и умирает там с
-    #     "missing IPv6 local address",
-    # причём не молча — соединение получает отказ, и браузер рвёт страницу
-    # (это и был ERR_CONNECTION_CLOSED). Без v6-адреса на tun приложения
-    # просто не пытаются использовать v6 и сразу работают по IPv4.
-    personal_v6 = any(
-        ipaddress.ip_network(a, strict=False).version == 6
-        for a in split_list(personal["interface"].get("address", ""))
-        if _is_cidr(a)
-    )
-    tun_address = ["172.19.0.1/30"]
-    if personal_v6:
-        tun_address.append("fdfe:dcba:9876::1/126")
-    else:
-        # Раз v6 наружу нести нечем — не заявляем, что умеем его маршрутизировать.
-        for ep in (ep_personal, ep_corp):
-            allowed = ep["peers"][0]["allowed_ips"]
-            ep["peers"][0]["allowed_ips"] = [
-                c for c in allowed
-                if not (_is_cidr(c)
-                        and ipaddress.ip_network(c, strict=False).version == 6)
-            ]
-
-    # Корп-DNS: из [Interface] DNS корп-конфига, иначе не поднимаем.
-    corp_dns = split_list(corp["interface"].get("dns", ""))
-    corp_dns = [d for d in corp_dns if re.match(r"^[\d.]+$", d)]
-
-    # Домены, которые резолвятся через корп-DNS. На Windows это и есть весь
-    # split-DNS: запросы идут через tun, и правила sing-box до них доходят —
-    # отдельных системных правил (NRPT) не нужно.
-    # Домены рабочей сети берём из настроек: у каждого они свои.
-    extra = {d for d in os.environ.get("CORP_DOMAINS", "").split() if d}
-
-    # ВАЖНО: домен корп-endpoint сюда попадать не должен. Иначе имя сервера
-    # придётся резолвить через корп-DNS, который доступен только когда
-    # туннель уже поднят — замкнутый круг. Его резолвим публично.
-    endpoint_host = corp["peer"]["endpoint"].rpartition(":")[0].lower()
-    domains = sorted(
-        d for d in (dns_domains(corp) | extra)
-        if not endpoint_host.endswith(d.lower())
-    )
-
-    dns_servers, dns_rules = dns_section(corp_dns, domains)
-
-    links = {kind: new_link() for kind in SIDES}
-    api = new_api()
-
-    config = {
-        "log": {"level": log_level(), "timestamp": True},
-        "dns": {
-            "servers": dns_servers,
-            "rules": dns_rules,
-            "final": "dns-personal",
-            "strategy": "ipv4_only",
-        },
-        "inbounds": [{
-            "type": "tun", "tag": "tun-in",
-            "mtu": int(os.environ.get("SB_TUN_MTU", ep_personal["mtu"])),
-            "address": tun_address,
-            "auto_route": True,
-            # Windows шлёт DNS-запрос во все адаптеры сразу и берёт первый
-            # ответ — обычно от DNS провайдера, и корп-домены резолвились
-            # мимо корп-DNS. strict_route закрывает DNS на остальных
-            # адаптерах правилами брандмауэра. Выключить: SB_STRICT_ROUTE=0.
-            "strict_route": os.environ.get("SB_STRICT_ROUTE") != "0",
-            "stack": stack,
-        }],
-        "outbounds": [
-            {"type": "direct", "tag": DIRECT_TAG},
-            *({"type": "socks", "tag": socks, "version": "5",
-               "server": "127.0.0.1", "server_port": links[kind]["port"],
-               "username": links[kind]["username"],
-               "password": links[kind]["password"]}
-              for kind, (_, socks) in SIDES.items()),
-            # Рвать соединения при смене выхода: открытые через мёртвый
-            # личный туннель иначе висят до своих таймаутов.
-            {"type": "selector", "tag": OUT_TAG,
-             "outbounds": [PERSONAL_SOCKS_TAG, DIRECT_TAG],
-             "default": PERSONAL_SOCKS_TAG,
-             "interrupt_exist_connections": True},
-        ],
-        "experimental": {"clash_api": {
-            "external_controller": f"127.0.0.1:{api['port']}",
-            "secret": api["secret"],
-        }},
-        "route": {
-            "rules": [
-                {"action": "sniff"},
-                {"protocol": "dns", "action": "hijack-dns"},
-                {"ip_cidr": routes, "outbound": CORP_SOCKS_TAG},
-                # Локальная сеть — напрямую, не в туннель. Без этого запросы
-                # к соседним устройствам (NAS, принтер, роутер) уходили в
-                # личный туннель и висли там по 15 секунд.
-                # Правило стоит ПОСЛЕ корпоративного: порядок решает, и корп
-                # свои подсети из этих же диапазонов уже забрал выше.
-                {"ip_cidr": LOCAL_NETS, "outbound": "direct"},
-            ],
-            "final": OUT_TAG,
-            # SB_NO_AUTODETECT=1 — не перепривязывать сокеты к интерфейсу.
-            # Наш скрипт меняет маршруты сразу после старта, и при включённом
-            # автоопределении sing-box может перепривязать UDP-сокет туннеля
-            # к tun: пакеты тогда уходят через en0, а ответы на en0 до сокета
-            # не доходят.
-            "auto_detect_interface":
-                os.environ.get("SB_NO_AUTODETECT") != "1",
-            "default_domain_resolver": "dns-personal",
-        },
-    }
-
-    write_json(out_path, config)
-    write_json(corp_path, side_config(ep_corp, links["corp"]))
-    write_json(personal_path, side_config(ep_personal, links["personal"]))
-
-    print(f"собрано: {out_path}")
-    print(f"  из     : {os.path.basename(p_path)} + {os.path.basename(c_path)}")
-    print(f"  личный : {ep_personal['peers'][0]['address']}:"
-          f"{ep_personal['peers'][0]['port']}  mtu {ep_personal['mtu']}"
-          f"  awg={'да' if any(k in ep_personal for k in AWG_INT) else 'нет'}")
-    print(f"  корп   : {ep_corp['peers'][0]['address']}:"
-          f"{ep_corp['peers'][0]['port']}  mtu {ep_corp['mtu']}")
-    print(f"  в корп : {', '.join(routes)}")
-    print(f"  корп-DNS: {corp_dns[0] if corp_dns else 'нет'}"
-          f"  для {', '.join(domains)}")
+    data, confs = sources()
+    ids = build(data, confs, out_path, side_path, log)
+    if side_path is None:
+        _drop_stale_sides(ids)
 
 
 if __name__ == "__main__":
