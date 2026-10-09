@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from . import buildconfig, instance, ipc, paths
+from . import buildconfig, instance, ipc, paths, tunnels
 
 POLL_EVERY = 2.0
 # Сколько ждём отчёта страницы о готовности. Не дождались — WebView2 не
@@ -346,7 +346,6 @@ class Api:
 
     @staticmethod
     def _howto(st):
-        site = paths.site_env()
         endpoints = []
         # Туннели живут в своих процессах (buildconfig.side_json), основной
         # отдаёт рабочему подсети правилом на его socks-выход.
@@ -355,7 +354,11 @@ class Api:
                 main_cfg = json.load(fh)
         except (OSError, ValueError):
             main_cfg = {}
-        nets = buildconfig.tunnel_nets(main_cfg, buildconfig.SIDE_IDS["corp"])
+        # Рабочий — первый не основной: пока окно знает один туннель «по списку».
+        main_id = buildconfig.main_id(main_cfg)
+        work = next((tid for tid in buildconfig.side_ids(main_cfg)
+                     if tid != main_id), None)
+        nets = buildconfig.tunnel_nets(main_cfg, work) if work else []
         for tid in buildconfig.side_ids(main_cfg):
             try:
                 with open(buildconfig.side_json(tid), encoding="utf-8") as fh:
@@ -374,7 +377,7 @@ class Api:
         return {
             "endpoints": endpoints,
             "corp_nets": nets,
-            "corp_domains": (site.get("CORP_DOMAINS") or "").split(),
+            "corp_domains": buildconfig.tunnel_domains(main_cfg),
             "corp_dns": st.get("corp_dns", ""),
             "final": "личный туннель",
         }
@@ -409,12 +412,15 @@ class Api:
         if name not in [c["name"] for c in confs]:
             self.js("failed", f"нет конфига «{name}»")
             return
-        folder = paths.CONF_CORP if kind == "corp" else paths.CONF_PERSONAL
+        tunnel = tunnels.by_kind(st.get("tunnels", []), kind)
+        if tunnel is None:
+            self.js("failed", f"нет туннеля для конфига «{name}»")
+            return
         # Полный путь: с правами запускается то, что найдётся по имени, а
         # PATH и текущий каталог пишет и обычный пользователь.
         notepad = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
                                "System32", "notepad.exe")
-        _run_elevated(notepad, [os.path.join(folder, f"{name}.conf")], show=True)
+        _run_elevated(notepad, [tunnels.conf_path(tunnel["id"], name)], show=True)
         self.refresh(full=True)
 
     def _add_config(self, kind):

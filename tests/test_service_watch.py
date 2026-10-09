@@ -14,6 +14,8 @@ from dualvpn import buildconfig, probe, service, tunnel
 
 OFFICE = (12, "192.168.19.1")
 HOME = (7, "192.168.0.1")
+# Выход через основной туннель home.
+HOME_SOCKS = buildconfig.socks_tag("home")
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +47,10 @@ class _Alive:
 
 
 class _Tunnel:
+    # Как у настоящего: основной — по main_id, «по списку» — первый прочий.
+    main = tunnel.Tunnel.main
+    first_list = tunnel.Tunnel.first_list
+
     def __init__(self, prober):
         self.prober = prober
         self.uplink = OFFICE
@@ -52,16 +58,17 @@ class _Tunnel:
         self.log_start = None
         self.fail = False
         self.starts = 0
-        self.corp = tunnel.Side("corp", "корп")
-        self.personal = tunnel.Side("personal", "личный")
-        self.sides = (self.corp, self.personal)
+        self.work = tunnel.Side("work", "Работа")
+        self.home = tunnel.Side("home", "Личный")
+        self.sides = [self.work, self.home]
+        self.main_id = "home"
         for side in self.sides:
             side.proc = _Alive()
-        self.out = buildconfig.PERSONAL_SOCKS_TAG
+        self.out = HOME_SOCKS
         self.outs = []           # переключения выхода по порядку
-        self.restarts = []       # kind перезапущенных процессов
+        self.restarts = []       # id перезапущенных туннелей
         self.side_fail = ""
-        self.delay_ms = None     # что ответит проверка через личный
+        self.delay_ms = None     # что ответит проверка через основной
         self.mends = 0           # сверок маршрутов к пирам
 
     def start(self, _profile):
@@ -76,7 +83,7 @@ class _Tunnel:
         self.uplink = None
 
     def restart_side(self, side):
-        self.restarts.append(side.kind)
+        self.restarts.append(side.tid)
         if self.side_fail:
             side.proc = None
             return self.side_fail
@@ -126,10 +133,10 @@ def _sing_log(core, tmp_path, old=""):
     return path
 
 
-def _side_log(core, tmp_path, kind="personal", old=""):
+def _side_log(core, tmp_path, tid="home", old=""):
     """Журнал процесса туннеля: таймауты туннеля теперь там."""
-    side = getattr(core.tunnel, kind)
-    path = tmp_path / f"{kind}.log"
+    side = next(s for s in core.tunnel.sides if s.tid == tid)
+    path = tmp_path / f"{tid}.log"
     path.write_bytes(old.encode())
     side.log_start = (str(path), len(old.encode()))
     return path
@@ -393,7 +400,7 @@ def test_таймауты_личного_уводят_выход_и_переза
     _append(log, _timeout("160.79.104.10:443"))
     _rounds(core, 1, state)
 
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
     assert core.tunnel.outs == [buildconfig.DIRECT_TAG]
     assert core.tunnel.starts == 0
     assert core.busy == ""
@@ -430,13 +437,13 @@ def test_таймауты_к_одному_адресу_без_задержки_�
 
     _rounds(core, 1)
 
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
     assert core.tunnel.outs == [buildconfig.DIRECT_TAG]
 
 
 def test_таймауты_разных_туннелей_не_складываются(monkeypatch, tmp_path):
     core = _core(monkeypatch)
-    _append(_side_log(core, tmp_path, "corp"), _timeout("10.10.0.5:443", "wg-work"))
+    _append(_side_log(core, tmp_path, "work"), _timeout("10.10.0.5:443", "wg-work"))
     _append(_side_log(core, tmp_path), _timeout("34.117.59.81:443"),
             _timeout("172.217.23.238:443"))
 
@@ -450,13 +457,13 @@ def test_повтор_раньше_паузы_не_перезапускает(mo
     log = _side_log(core, tmp_path)
     _append(log, *_three_dead())
     state = _rounds(core, 1)
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
 
-    core.tunnel.out = buildconfig.PERSONAL_SOCKS_TAG
+    core.tunnel.out = HOME_SOCKS
     _append(log, *_three_dead())
     _rounds(core, 3, state)
 
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
     # Выход уводим и внутри паузы: интернет перезапуска не ждёт.
     assert core.tunnel.out == buildconfig.DIRECT_TAG
 
@@ -482,47 +489,47 @@ def test_недописанная_строка_дочитывается_на_с�
     _append(log, line[40:])
     _rounds(core, 1, state)
 
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
 
 
 def test_упавший_корп_перезапускается_один(monkeypatch):
     core = _core(monkeypatch)
-    core.tunnel.corp.proc = _Proc()
+    core.tunnel.work.proc = _Proc()
 
     _rounds(core, 1)
 
-    assert core.tunnel.restarts == ["corp"]
+    assert core.tunnel.restarts == ["work"]
     assert core.tunnel.outs == [] and core.tunnel.starts == 0
-    [line] = _said(core, "перезапускаю корп процесс")
+    [line] = _said(core, "перезапускаю процесс «Работа»")
     assert "код 1" in line
     assert core.prober._remeasure.is_set()
 
 
 def test_упавший_личный_выход_напрямую_и_перезапуск(monkeypatch):
     core = _core(monkeypatch)
-    core.tunnel.personal.proc = _Proc()
+    core.tunnel.home.proc = _Proc()
 
     _rounds(core, 1)
 
     assert core.tunnel.outs == [buildconfig.DIRECT_TAG]
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
     assert core.prober.snapshot()["out"] == buildconfig.DIRECT_TAG
 
 
 def test_мёртвый_конфиг_перезапускается_раз_в_паузу(monkeypatch):
     """Человек выбрал: без предела попыток, но не чаще DEAD_GAP."""
     core = _core(monkeypatch)
-    core.tunnel.side_fail = "личный процесс упал на старте: bad config"
-    core.tunnel.personal.proc = _Proc()
+    core.tunnel.side_fail = "процесс «Личный» упал на старте: bad config"
+    core.tunnel.home.proc = _Proc()
     state = _rounds(core, 5)
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
     assert _said(core, "bad config")
     assert len(_said(core, "жду")) == 1
 
-    core._side_after["personal"] = 0.0          # пауза прошла
+    core._side_after["home"] = 0.0              # пауза прошла
     _rounds(core, 1, state)
 
-    assert core.tunnel.restarts == ["personal", "personal"]
+    assert core.tunnel.restarts == ["home", "home"]
     assert core.tunnel.starts == 0
 
 
@@ -533,10 +540,10 @@ def test_ожил_личный_выход_возвращается_на_него
 
     _rounds(core, 1)
 
-    assert core.tunnel.outs == [buildconfig.PERSONAL_SOCKS_TAG]
+    assert core.tunnel.outs == [HOME_SOCKS]
     assert core.tunnel.restarts == []
-    assert _said(core, "120 мс")
-    assert core.prober.snapshot()["out"] == buildconfig.PERSONAL_SOCKS_TAG
+    assert _said(core, "«Личный» везёт (проверка за 120 мс)")
+    assert core.prober.snapshot()["out"] == HOME_SOCKS
 
 
 def test_уведённый_выход_не_мечется_обратно_раньше_паузы(monkeypatch, tmp_path):
@@ -555,7 +562,7 @@ def test_уведённый_выход_не_мечется_обратно_ран
     core._back_at = 0.0                          # пауза прошла
     _rounds(core, 1, state)
 
-    assert core.tunnel.outs == [buildconfig.DIRECT_TAG, buildconfig.PERSONAL_SOCKS_TAG]
+    assert core.tunnel.outs == [buildconfig.DIRECT_TAG, HOME_SOCKS]
 
 
 def test_живой_но_не_везущий_личный_перезапускается(monkeypatch):
@@ -564,17 +571,17 @@ def test_живой_но_не_везущий_личный_перезапуска
     core.tunnel.out = buildconfig.DIRECT_TAG
 
     state = _rounds(core, 1)
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
     assert core.tunnel.outs == []
 
-    core._side_after["personal"] = 0.0
+    core._side_after["home"] = 0.0
     _rounds(core, 3, state)                     # проверка не чаще BACK_EVERY
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
 
 
 def test_выключение_посреди_круга_перезапуск_не_делает(monkeypatch):
     core = _core(monkeypatch)
-    core.tunnel.corp.proc = _Proc()
+    core.tunnel.work.proc = _Proc()
     core.lock.acquire()                          # идёт «Выключить»
 
     _rounds(core, 1)
@@ -614,7 +621,7 @@ def _corp_says(monkeypatch, core, ip):
 def test_таймауты_корпа_при_живом_корпе_не_перезапускают(monkeypatch, tmp_path):
     """6 октября в 12:03 таймауты корпа перезапустили sing-box, хотя корп работал."""
     core = _core(monkeypatch)
-    log = _side_log(core, tmp_path, "corp")
+    log = _side_log(core, tmp_path, "work")
     asked = _corp_says(monkeypatch, core, "10.20.0.4")
     _append(log, *_corp_dead())
 
@@ -629,13 +636,13 @@ def test_таймауты_корпа_при_живом_корпе_не_пере�
 
 def test_таймауты_корпа_при_молчащем_корпе_перезапускают_только_его(monkeypatch, tmp_path):
     core = _core(monkeypatch)
-    log = _side_log(core, tmp_path, "corp")
+    log = _side_log(core, tmp_path, "work")
     asked = _corp_says(monkeypatch, core, "")
     _append(log, *_corp_dead())
 
     _rounds(core, 1)
 
-    assert core.tunnel.restarts == ["corp"]
+    assert core.tunnel.restarts == ["work"]
     assert core.tunnel.outs == [] and core.tunnel.starts == 0
     assert asked == [1]
     assert not _said(core, "корп отвечает")
@@ -649,13 +656,13 @@ def test_мёртвый_личный_корп_не_спрашивает(monkeypa
 
     _rounds(core, 1)
 
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
     assert asked == []
 
 
 def test_живой_корп_не_сбивает_счёт_новой_сети(monkeypatch, tmp_path):
     core = _core(monkeypatch)
-    log = _side_log(core, tmp_path, "corp")
+    log = _side_log(core, tmp_path, "work")
     _corp_says(monkeypatch, core, "10.20.0.4")
     _net(core, HOME)
     state = _rounds(core, service.UPLINK_SETTLE - 1)
@@ -665,6 +672,41 @@ def test_живой_корп_не_сбивает_счёт_новой_сети(mo
 
     assert core.tunnel.starts == 1
     assert core.tunnel.uplink == HOME
+
+
+def test_без_основного_упавший_по_списку_перезапускается_выход_не_трогаем(monkeypatch):
+    """Нет туннеля «всё остальное»: selector out нет, выход уводить некуда."""
+    core = _core(monkeypatch)
+    core.tunnel.sides = [core.tunnel.work]
+    core.tunnel.main_id = None
+    core.tunnel.out = ""
+    core.tunnel.delay_ms = 120
+    core.tunnel.work.proc = _Proc()
+
+    _rounds(core, 1)
+
+    assert core.tunnel.restarts == ["work"]
+    assert core.tunnel.outs == []
+    assert core.prober._remeasure.is_set()
+
+
+def test_пауза_перезапуска_у_каждого_туннеля_своя(monkeypatch):
+    """Два туннеля «по списку»: пауза одного не держит другой."""
+    core = _core(monkeypatch)
+    second = tunnel.Side("work-2", "Склад")
+    core.tunnel.sides.insert(1, second)
+    core.tunnel.side_fail = "не поднялся"
+    core.tunnel.work.proc = _Proc()
+    second.proc = _Proc()
+    state = _rounds(core, 1)
+    assert core.tunnel.restarts == ["work", "work-2"]
+
+    core._side_after["work-2"] = 0.0            # пауза прошла только у второго
+    _rounds(core, 1, state)
+
+    assert core.tunnel.restarts == ["work", "work-2", "work-2"]
+    [line] = _said(core, "жду")
+    assert "«Работа»" in line
 
 
 # ------------------------------------------------------------ журнал сторожа
@@ -685,7 +727,7 @@ def test_мёртвый_туннель_в_журнале_с_тегом_числ�
 
     _rounds(core, 1)
 
-    [line] = _said(core, "перезапускаю личный процесс")
+    [line] = _said(core, "перезапускаю процесс «Личный»")
     assert "wg-home" in line
     assert "таймаутов 3" in line
     assert "172.217.23.238, 34.117.59.81" in line
@@ -709,7 +751,7 @@ def test_в_паузе_мёртвого_смена_сети_переподклю
     log = _side_log(core, tmp_path)
     _append(log, *_three_dead())
     state = _rounds(core, 1)
-    assert core.tunnel.restarts == ["personal"] and core.tunnel.starts == 0
+    assert core.tunnel.restarts == ["home"] and core.tunnel.starts == 0
 
     _net(core, HOME)
     for _ in range(service.UPLINK_SETTLE):
@@ -740,18 +782,18 @@ def test_таймауты_старой_сети_новому_туннелю_не
 def test_пауза_перезапуска_со_старой_сети_новую_не_держит(monkeypatch, tmp_path):
     """Личный перезапускали на кабеле; на Wi-Fi он упал — поднимать сразу, не ждать DEAD_GAP."""
     core = _core(monkeypatch)
-    core.tunnel.personal.proc = _Proc()
+    core.tunnel.home.proc = _Proc()
     state = _rounds(core, 1)
-    assert core.tunnel.restarts == ["personal"]
+    assert core.tunnel.restarts == ["home"]
     _net(core, HOME)
     state = _rounds(core, service.UPLINK_SETTLE, state)
     assert core.tunnel.starts == 1
 
-    core.tunnel.personal.proc = _Proc()
+    core.tunnel.home.proc = _Proc()
     waits = len(_said(core, "перезапуска нет"))
     _rounds(core, 1, state)
 
-    assert core.tunnel.restarts == ["personal", "personal"]
+    assert core.tunnel.restarts == ["home", "home"]
     assert len(_said(core, "перезапуска нет")) == waits
 
 
@@ -762,7 +804,7 @@ def test_без_шлюза_мёртвый_не_перезапускает(monkey
     log = _side_log(core, tmp_path)
     _net(core, (None, ""))
     _append(log, *_three_dead())
-    core.tunnel.corp.proc = _Proc()
+    core.tunnel.work.proc = _Proc()
 
     _rounds(core, 3)
 
@@ -788,7 +830,7 @@ def test_таймауты_без_шлюза_не_копятся(monkeypatch, tmp
 def test_выключенный_туннель_выход_в_статусе_пуст(monkeypatch):
     core = _core(monkeypatch)
     _rounds(core, 1)
-    assert core.prober.snapshot()["out"] == buildconfig.PERSONAL_SOCKS_TAG
+    assert core.prober.snapshot()["out"] == HOME_SOCKS
 
     core.tunnel.uplink = None
     _rounds(core, 1)
@@ -796,21 +838,24 @@ def test_выключенный_туннель_выход_в_статусе_пу
     assert core.prober.snapshot()["out"] == ""
 
 
-def test_команда_log_сводит_три_журнала_по_времени(monkeypatch, tmp_path):
+def test_команда_log_сводит_журналы_по_времени(monkeypatch, tmp_path):
+    """Строки туннелей помечены именами тех, что подняли при включении."""
+    core = _core(monkeypatch)
     monkeypatch.setattr(service.paths, "LOGS", str(tmp_path))
     (tmp_path / "vpn-2026-10-06_090000.log").write_text(
         "+0300 2026-10-06 09:00:01 INFO a\n+0300 2026-10-06 09:00:05 INFO c\n",
         encoding="utf-8")
-    (tmp_path / "corp-2026-10-06_090000.log").write_text(
+    (tmp_path / "tunnel-work-2026-10-06_090000.log").write_text(
         "+0300 2026-10-06 09:00:03 ERROR b\n  трассировка\n", encoding="utf-8")
-    (tmp_path / "personal-2026-10-06_090000.log").write_text(
+    (tmp_path / "tunnel-home-2026-10-06_090000.log").write_text(
         "+0300 2026-10-06 09:00:09 WARN d\n", encoding="utf-8")
 
-    lines = service.Core._tail_log(4)
+    lines = core._tail_log(4)
 
-    assert lines == ["[корп] +0300 2026-10-06 09:00:03 ERROR b", "[корп]   трассировка",
+    assert lines == ["[Работа] +0300 2026-10-06 09:00:03 ERROR b",
+                     "[Работа]   трассировка",
                      "+0300 2026-10-06 09:00:05 INFO c",
-                     "[личный] +0300 2026-10-06 09:00:09 WARN d"]
+                     "[Личный] +0300 2026-10-06 09:00:09 WARN d"]
 
 
 def test_повторы_пишутся_с_номером(monkeypatch):

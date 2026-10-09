@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 
-from . import buildconfig, ipc, paths, probe, tunnel, winnet
+from . import buildconfig, ipc, paths, probe, tunnel, tunnels, winnet
 
 AUTOSTART_FILE = os.path.join(paths.STATE, "autostart")
 SERVICE_LOG = os.path.join(paths.LOGS, "service.log")
@@ -242,24 +242,47 @@ class Core:
                                       < st.get("check_seq", 0))
         st["last_error"] = self.last_error
         st["autostart"] = self.autostart_enabled()
-        # Раздельное туннелирование включено, когда настройки рабочей сети
-        # загружены: в site.env есть хоть одно значение. Нет файла или он
-        # пустой — кнопка в окне говорит «выключено».
-        st["split"] = any(v.strip() for v in paths.site_env().values())
+        data = self._tunnels()
+        # Туннели без списков правил: окно читать conf\\ не может (права), а
+        # имена конфигов и так уходят в profiles и corp.
+        st["tunnels"] = [{"id": t["id"], "name": t["name"], "mode": t["mode"],
+                          "active": t["active"],
+                          "confs": tunnels.list_confs(t["id"])}
+                         for t in data["tunnels"]]
+        # Раздельное туннелирование включено, когда у рабочего туннеля
+        # есть правила; иначе кнопка в окне говорит «выключено».
+        work = self._kind_tunnel("corp", data)
+        st["split"] = bool(work and (work["include"] or work["exclude"]))
         st["version"] = paths.version()
         st["singbox"] = self._singbox_version()
-        st["profiles"] = self._profiles()
-        st["corp"] = self._corp()
+        st["profiles"] = self._profiles(data)
+        st["corp"] = self._corp(data)
         st["last"] = self._last_results()
         return st
 
     @staticmethod
-    def _conf_stamp(kind, name):
+    def _conf_stamp(tid, name):
         """Отпечаток файла конфига: заменили файл — прошлый итог не про него."""
         try:
-            return os.stat(buildconfig.conf_path(kind, name)).st_mtime_ns
+            return os.stat(tunnels.conf_path(tid, name)).st_mtime_ns
         except (OSError, ValueError):
             return None
+
+    def _in_use(self):
+        """{'corp': (id, имя), 'personal': (id, имя)} конфигов, с которыми
+        соберётся включение; имя '' — не выбран. Как tunnels.active_conf:
+        без выбора единственный конфиг и есть активный."""
+        data = self._tunnels()
+        out = {}
+        for kind in tunnels.LEGACY:
+            t = self._kind_tunnel(kind, data)
+            if t is None:
+                out[kind] = (None, "")
+                continue
+            confs = tunnels.list_confs(t["id"])
+            name = t["active"] or (confs[0] if len(confs) == 1 else "")
+            out[kind] = (t["id"], name)
+        return out
 
     def _last_results(self):
         """{'corp': 'up'|'error'|'', 'personal': …} для файлов, что лежат сейчас."""
@@ -268,21 +291,18 @@ class Core:
                 saved = json.load(fh)
         except (OSError, ValueError):
             saved = {}
-        cur = {"corp": (self._corp() or [""])[0],
-               "personal": probe.Prober.current_profile()}
         out = {}
-        for kind, name in cur.items():
+        for kind, (tid, name) in self._in_use().items():
             rec = saved.get(kind) or {}
             fresh = (name and rec.get("name") == name
-                     and rec.get("stamp") == self._conf_stamp(kind, name))
+                     and rec.get("stamp") == self._conf_stamp(tid, name))
             out[kind] = rec.get("result", "") if fresh else ""
         return out
 
     def _remember_check(self, st, corp_probe):
         """Запоминает итог проверки при поднятом туннеле — по тем же правилам,
         что красит кружки трей."""
-        cur = {"corp": (self._corp() or [""])[0],
-               "personal": probe.Prober.current_profile()}
+        cur = self._in_use()
         result = {
             # Запасной выход напрямую — личный не работает, хоть интернет и есть.
             "personal": ("up" if st.get("exit_ip")
@@ -291,8 +311,8 @@ class Core:
             "corp": ("up" if st.get("corp_ip") or st.get("corp_http")
                      else "error" if corp_probe else ""),
         }
-        data = {k: {"name": n, "stamp": self._conf_stamp(k, n),
-                    "result": result[k]} for k, n in cur.items() if n}
+        data = {k: {"name": n, "stamp": self._conf_stamp(tid, n),
+                    "result": result[k]} for k, (tid, n) in cur.items() if n}
         try:
             paths.ensure_dirs()
             with open(LAST_CHECK_FILE, "w", encoding="utf-8") as fh:
@@ -310,7 +330,7 @@ class Core:
         st = self.prober.snapshot()
         if st.get("tun") and st.get("r_low") and not self.busy:
             self.prober.check_now()
-        corp_probe = bool(paths.site_env().get("CORP_PROBE"))
+        corp_probe = bool(probe.Prober.corp_probe())
         st = self._status()
         if st["up"] and not self.busy:
             self._remember_check(st, corp_probe)
@@ -362,8 +382,6 @@ class Core:
             if reconnect:
                 self._flush_paths()
                 self.tunnel.stop()
-            if not profile:
-                profile = probe.Prober.current_profile()
             began = time.monotonic()
             err = self.tunnel.start(profile)
             took = time.monotonic() - began
@@ -554,29 +572,29 @@ class Core:
 
     def _mind_sides(self, lines):
         """Упавший или мёртвый туннель — перезапуск только его процесса, не чаще
-        DEAD_GAP. Пока личный не везёт, выход наружу напрямую: главное — чтобы
+        DEAD_GAP. Пока основной не везёт, выход наружу напрямую: главное — чтобы
         интернет работал; везёт снова — выход обратно через него."""
         dead = self._dead_tunnels(lines)
-        personal = self.tunnel.personal
+        main = self.tunnel.main
         out, carries = self.tunnel.out_now(), None
-        if out == buildconfig.DIRECT_TAG and personal.alive():
-            out, carries = self._try_back()
+        if main and out == buildconfig.DIRECT_TAG and main.alive():
+            out, carries = self._try_back(main)
         self.prober.set(out=out)
         for side in self.tunnel.sides:
             hits = dead.get(side.tag)
-            # Живой личный, через который проверка не дошла: трафика через него
-            # нет, и таймаутов в журнале не будет.
-            stuck = side is personal and carries is False
+            # Живой основной, через который проверка не дошла: трафика через
+            # него нет, и таймаутов в журнале не будет.
+            stuck = side is main and carries is False
             if side.alive() and not hits and not stuck:
                 continue
-            if (side is personal and hits and not stuck and side.alive()
+            if (side is main and hits and not stuck and side.alive()
                     and out != buildconfig.DIRECT_TAG
-                    and self.tunnel.delay(buildconfig.PERSONAL_SOCKS_TAG) is not None):
+                    and self.tunnel.delay(buildconfig.socks_tag(side.tid)) is not None):
                 # Лежит чужой адрес, а не туннель: выход не трогаем.
                 self._dead_hits = tuple(h for h in self._dead_hits
                                         if h[1] != side.tag)
                 continue
-            if side is personal and out != buildconfig.DIRECT_TAG:
+            if side is main and out != buildconfig.DIRECT_TAG:
                 # Выход уводим сразу, без паузы: интернет не должен ждать перезапуска.
                 if self.tunnel.set_out(buildconfig.DIRECT_TAG):
                     out = buildconfig.DIRECT_TAG
@@ -587,34 +605,35 @@ class Core:
                     self.prober.set(out=out)
                     self.prober.remeasure()
             now = time.monotonic()
-            after = self._side_after.get(side.kind, 0.0)
+            after = self._side_after.get(side.tid, 0.0)
             if now < after:
-                if self._side_noted.get(side.kind) != after:
-                    self._side_noted[side.kind] = after
-                    self.log(f"!! {side.title} туннель не работает, но с прошлого "
+                if self._side_noted.get(side.tid) != after:
+                    self._side_noted[side.tid] = after
+                    self.log(f"!! туннель «{side.title}» не работает, но с прошлого "
                              f"перезапуска нет {DEAD_GAP:.0f} с, жду")
                 continue
             # Таймауты того туннеля разобраны: чем бы ни кончилось, счёт заново.
             self._dead_hits = tuple(h for h in self._dead_hits if h[1] != side.tag)
             why = self._side_down(side, hits)
             if why:
-                self._side_after[side.kind] = now + DEAD_GAP
-                self.log(f"!! {why} — перезапускаю {side.title} процесс")
+                self._side_after[side.tid] = now + DEAD_GAP
+                self.log(f"!! {why} — перезапускаю процесс «{side.title}»")
                 self._restart_side(side)
 
     def _side_down(self, side, hits):
         """Что с туннелем, для журнала, или '' — корп всё-таки отвечает."""
         if not side.alive():
             if side.proc is None:
-                return f"{side.title} процесс не запущен"
-            return f"{side.title} процесс завершился сам (код {side.proc.returncode})"
+                return f"процесс «{side.title}» не запущен"
+            return (f"процесс «{side.title}» завершился сам "
+                    f"(код {side.proc.returncode})")
         if not hits:
             return f"через {side.tag} не дошла проверка выхода"
         now = time.monotonic()
         what = (f"через {side.tag} соединения не открываются: таймаутов "
                 f"{len(hits)} за {now - hits[0][0]:.0f} с, "
                 f"адреса: {', '.join(sorted({h[2] for h in hits}))}")
-        if side is self.tunnel.corp:
+        if side is self.tunnel.first_list:
             ip = self.prober.corp_answer()
             if ip:
                 self.log(f"!! {what} — но корп отвечает (DNS {ip} за "
@@ -622,22 +641,23 @@ class Core:
                 return ""
         return what
 
-    def _try_back(self):
-        """Выход напрямую, личный процесс жив: если задержка через него
-        дошла — вернуть выход на него. (выход, везёт ли): None — не проверяли,
-        рано по BACK_EVERY."""
+    def _try_back(self, main):
+        """Выход напрямую, процесс основного main жив: если задержка
+        через него дошла — вернуть выход на него. (выход, везёт ли): None —
+        не проверяли, рано по BACK_EVERY."""
         now = time.monotonic()
         if now < self._back_at:
             return buildconfig.DIRECT_TAG, None
         self._back_at = now + BACK_EVERY
-        ms = self.tunnel.delay(buildconfig.PERSONAL_SOCKS_TAG)
+        tag = buildconfig.socks_tag(main.tid)
+        ms = self.tunnel.delay(tag)
         if ms is None:
             return buildconfig.DIRECT_TAG, False
-        if not self.tunnel.set_out(buildconfig.PERSONAL_SOCKS_TAG):
+        if not self.tunnel.set_out(tag):
             return buildconfig.DIRECT_TAG, True
-        self.log(f"→ личный везёт (проверка за {ms} мс) — выход снова через него")
+        self.log(f"→ «{main.title}» везёт (проверка за {ms} мс) — выход снова через него")
         self.prober.remeasure()
-        return buildconfig.PERSONAL_SOCKS_TAG, True
+        return tag, True
 
     def _restart_side(self, side):
         """Перезапуск процесса одного туннеля — под замком start/stop: «Выключить»
@@ -648,11 +668,11 @@ class Core:
             if (self.tunnel.uplink is None or self.prober.stop_event.is_set()
                     or self._round_human != self._human):
                 return
-            self.busy = f"перезапускаю {side.title} туннель"
+            self.busy = f"перезапускаю туннель «{side.title}»"
             err = self.tunnel.restart_side(side)
             if err:
                 self.log(f"!! {err}")
-            elif side is self.tunnel.corp:
+            elif side is self.tunnel.first_list:
                 self.prober.remeasure()
         finally:
             self.busy = ""
@@ -760,19 +780,40 @@ class Core:
     # -------------------------------------------------------------- конфиги
 
     @staticmethod
-    def _profiles():
-        """Личные конфиги — из них выбирают профиль."""
-        return buildconfig.list_confs("personal")
+    def _tunnels():
+        """tunnels.json для чтения. Испорченный — пустой: статус не должен
+        падать, причину скажет «Включить». Пишущим командам нужен
+        tunnels.load: пустой поверх испорченного стёр бы туннели."""
+        try:
+            return tunnels.load()
+        except ValueError:
+            return tunnels.empty()
 
     @staticmethod
-    def _corp():
-        """Рабочие конфиги. Больше одного бывает только после переезда
-        старой установки — сборка тогда попросит оставить один."""
-        return buildconfig.list_confs("corp")
+    def _kind_tunnel(kind, data=None):
+        """Туннель старого типа corp|personal (tunnels.by_kind), иначе None."""
+        data = data if data is not None else Core._tunnels()
+        return tunnels.by_kind(data["tunnels"], kind)
+
+    @staticmethod
+    def _kind_confs(kind, data=None):
+        t = Core._kind_tunnel(kind, data)
+        return tunnels.list_confs(t["id"]) if t else []
+
+    @staticmethod
+    def _profiles(data=None):
+        """Конфиги основного туннеля — из них выбирают профиль."""
+        return Core._kind_confs("personal", data)
+
+    @staticmethod
+    def _corp(data=None):
+        """Конфиги первого туннеля «по списку» — бывшего рабочего."""
+        return Core._kind_confs("corp", data)
 
     def _migrate(self):
-        """Конфиги из плоского conf\\ — по папкам типов, один раз после
-        обновления. Профиль, если он был пуст, — тот, что сборка брала сама."""
+        """Старая установка — в туннели, один раз после обновления: плоский
+        conf\\ (до 0.3) — по папкам типов, папки типов и site.env (до 0.4) — в
+        tunnels.json. Именно в таком порядке: второй шаг берёт то, что разложил первый."""
         try:
             moved = buildconfig.migrate_flat()
         except OSError as exc:
@@ -780,10 +821,21 @@ class Core:
             return
         for name, kind in moved:
             self.log(f"→ {name}.conf перенесён в conf\\{kind}")
-        cur = probe.Prober.current_profile()
-        personal = self._profiles()
-        if moved and cur not in personal:
-            self._set_profile(buildconfig.legacy_default_personal(personal))
+        try:
+            tunnels.migrate(log=self.log)
+        except (OSError, ValueError) as exc:
+            self.log(f"!! не перенести настройки в tunnels.json: {exc}")
+
+    @staticmethod
+    def _load_kind(kind):
+        """(tunnels.json, туннель типа kind) для правки или ValueError с причиной."""
+        if kind not in tunnels.LEGACY:
+            raise ValueError(f"неизвестный тип конфига: {kind!r}")
+        data = tunnels.load()
+        t = tunnels.by_kind(data["tunnels"], kind)
+        if t is None:
+            raise ValueError(f"нет туннеля для конфига типа {kind}")
+        return data, t
 
     def _add_config(self, name, text, kind):
         """Кладёт конфиг в conf\\.
@@ -793,8 +845,10 @@ class Core:
         недопустимых знаков (buildconfig.safe_name), а не отклонённым из-за них.
         Рабочий заменяет прежний, личный ложится рядом с другими и выбирается.
         """
-        if kind not in buildconfig.KINDS:
-            return {"ok": False, "error": f"неизвестный тип конфига: {kind!r}"}
+        try:
+            data, t = self._load_kind(kind)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         # BOM от Блокнота: с ним «[Interface]» в первой строке не узнаётся.
         text = (text or "").lstrip("\ufeff")
         bad = buildconfig.check_conf_text(text)
@@ -802,28 +856,33 @@ class Core:
             return {"ok": False, "error": bad}
         name = buildconfig.safe_name(name)
         paths.ensure_dirs()
-        path = buildconfig.conf_path(kind, name)
+        os.makedirs(tunnels.conf_dir(t["id"]), exist_ok=True)
+        path = tunnels.conf_path(t["id"], name)
         # Через временный файл: оборванная запись не оставит полконфига.
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
         os.replace(tmp, path)
-        self.log(f"→ добавлен {kind} конфиг {name}.conf")
+        self.log(f"→ в туннель «{t['name']}» добавлен конфиг {name}.conf")
 
         if kind == "corp":
-            # Рабочий может быть только один: при двух сборка не пройдёт.
-            for old in self._corp():
+            # У рабочего конфиг один: новый заменяет прежний, как до туннелей.
+            for old in tunnels.list_confs(t["id"]):
                 if old == name:
                     continue
                 try:
-                    os.remove(buildconfig.conf_path("corp", old))
-                    self.log(f"→ удалён прежний рабочий конфиг {old}.conf")
+                    os.remove(tunnels.conf_path(t["id"], old))
+                    self.log(f"→ удалён прежний конфиг {old}.conf")
                 except OSError as exc:
                     self.log(f"→ не удалить {old}.conf: {exc}")
-        else:
-            self._set_profile(name)
-        return {"ok": True, "name": name, "profiles": self._profiles(),
-                "corp": self._corp()}
+        # Добавленный — сразу активный: его и добавляли, чтобы включить.
+        t["active"] = name
+        try:
+            data = tunnels.save(data)
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": f"конфиг лёг, но не выбран: {exc}"}
+        return {"ok": True, "name": name, "profiles": self._profiles(data),
+                "corp": self._corp(data)}
 
     def _read_config(self, name, kind):
         """Отдаёт конфиг целиком, вместе с ключами.
@@ -832,8 +891,11 @@ class Core:
         может только служба. Права проверяет ipc.Server: команды нет ни в
         READ_OPS, ни в USER_OPS, значит нужен администратор.
         """
+        t = self._kind_tunnel(kind) if kind in tunnels.LEGACY else None
+        if t is None:
+            return {"ok": False, "error": f"нет туннеля для конфига типа {kind!r}"}
         try:
-            with open(buildconfig.conf_path(kind, name),
+            with open(tunnels.conf_path(t["id"], name),
                       encoding="utf-8", errors="replace") as fh:
                 return {"ok": True, "text": fh.read()}
         except OSError as exc:
@@ -841,24 +903,39 @@ class Core:
 
     def _remove_config(self, name, kind):
         try:
-            os.remove(buildconfig.conf_path(kind, name))
+            data, t = self._load_kind(kind)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            os.remove(tunnels.conf_path(t["id"], name))
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
-        self.log(f"→ удалён {kind} конфиг {name}.conf")
-        if kind == "personal" and name == probe.Prober.current_profile():
-            # Выбранный профиль указывал бы на удалённый файл, и следующее
-            # «Включить» падало бы с «нет профиля». Берём другой личный, а без
-            # него — пусто: сборка тогда попросит добавить личный.
-            rest = self._profiles()
-            self._set_profile(rest[0] if rest else "")
-        return {"ok": True, "profiles": self._profiles(), "corp": self._corp()}
+        self.log(f"→ из туннеля «{t['name']}» удалён конфиг {name}.conf")
+        if t["active"] == name:
+            # Активный указывал бы на удалённый файл, и следующее «Включить»
+            # падало бы с «нет конфига». Берём другой, а без него — пусто:
+            # сборка тогда пропустит пустой туннель.
+            rest = tunnels.list_confs(t["id"])
+            t["active"] = rest[0] if rest else ""
+            try:
+                data = tunnels.save(data)
+            except (OSError, ValueError) as exc:
+                return {"ok": False, "error": f"конфиг удалён, но выбор не записать: {exc}"}
+        return {"ok": True, "profiles": self._profiles(data), "corp": self._corp(data)}
 
     def _set_profile(self, name):
-        if name and name not in self._profiles():
-            return {"ok": False, "error": f"нет личного конфига {name}.conf"}
-        paths.ensure_dirs()
-        with open(paths.PROFILE_FILE, "w", encoding="utf-8") as fh:
-            fh.write(name)
+        """Делает name активным конфигом основного туннеля."""
+        try:
+            data, t = self._load_kind("personal")
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        if name and name not in tunnels.list_confs(t["id"]):
+            return {"ok": False, "error": f"нет конфига {name}.conf в туннеле «{t['name']}»"}
+        t["active"] = name
+        try:
+            tunnels.save(data)
+        except (OSError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
         return {"ok": True, "profile": name}
 
     @staticmethod
@@ -878,13 +955,16 @@ class Core:
         self.log("→ обновлены настройки рабочей сети")
         return {"ok": True}
 
-    @staticmethod
-    def _tail_log(lines):
-        """Последние строки журналов sing-box — основного и обоих туннелей,
-        по времени. Их показывает окно; строки туннеля помечены его именем."""
+    def _tail_log(self, lines):
+        """Последние строки журналов sing-box — основного и туннелей, по
+        времени. Их показывает окно; строки туннеля помечены его именем.
+        Туннели — те, что подняли при включении, а до него — из tunnels.json."""
+        sides = [(s.log_prefix, f"[{s.title}] ") for s in self.tunnel.sides]
+        if not sides:
+            sides = [(tunnel.log_prefix(t["id"]), f"[{t['name']}] ")
+                     for t in self._tunnels()["tunnels"]]
         out = []
-        for prefix, mark in (("vpn", ""), ("corp", "[корп] "),
-                             ("personal", "[личный] ")):
+        for prefix, mark in (("vpn", ""), *sides):
             stamp = ""
             for line in _tail_file(prefix):
                 m = STAMP_RE.search(line[:40])
@@ -902,12 +982,11 @@ def _tail_file(prefix):
     до мегабайт, а окно спрашивает его раз в две секунды — целиком это
     было бы чтение и разбор всего файла на каждый опрос.
     """
+    files = paths.log_files(prefix)
+    if not files:
+        return []
     try:
-        files = sorted(f for f in os.listdir(paths.LOGS)
-                       if f.startswith(f"{prefix}-") and f.endswith(".log"))
-        if not files:
-            return []
-        with open(os.path.join(paths.LOGS, files[-1]), "rb") as fh:
+        with open(files[-1], "rb") as fh:
             size = fh.seek(0, os.SEEK_END)
             fh.seek(max(0, size - LOG_TAIL_BYTES))
             data = fh.read()

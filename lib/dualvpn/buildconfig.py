@@ -11,11 +11,6 @@ state/tunnel-<id>.json — по процессу на туннель, кажды
 loopback. Сбой туннеля чинится перезапуском одного его процесса: tun не
 падает, а трафик упавшего основного до его возвращения идёт напрямую.
 
-Пока tunnels.json нет, туннелей два, как до 0.4: рабочий из conf/corp и
-личный из conf/personal, нужный личный выбирает профиль:
-    set SB_PERSONAL=nl-1 && python -m dualvpn.buildconfig
-    python -m dualvpn.buildconfig --personal nl-1
-
 Подсети туннеля берутся ИЗ AllowedIPs его конфига, поэтому при ротации
 достаточно положить новый файл — правки скрипта не нужны.
 
@@ -32,14 +27,11 @@ import sys
 import threading
 
 # Раскладку знает paths.py — здесь только имена.
-from . import paths, routelist, tunnels, winnet
-from .tunnels import LOG_LEVELS, NAME_MAX, check_name, safe_name
+from . import paths, tunnels, winnet
+from .tunnels import NAME_MAX, check_name, safe_name  # их зовут и через buildconfig
 
 BASE = paths.BASE
 CONF = paths.CONF
-CONF_CORP = paths.CONF_CORP
-CONF_PERSONAL = paths.CONF_PERSONAL
-KINDS = ("corp", "personal")
 
 # Поля [Interface], которые sing-box ждёт как AWG-параметры (в нижнем регистре).
 AWG_INT = ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4")
@@ -67,27 +59,10 @@ AWG_MTU_MAX = 1280
 
 
 # Раньше тип туннеля решало имя файла в плоском conf\. Эти шаблоны остались
-# только для переезда старых установок в conf\corp и conf\personal.
+# только для переезда старых установок: сначала в conf\corp и conf\personal,
+# оттуда tunnels.migrate переносит их в туннели.
 _LEGACY_CORP_PAT = (r"^corp\.conf$", r"^wg[-_0-9].*\.conf$", r"^wg\.conf$")
 _LEGACY_PERSONAL_PAT = (r"^personal\.conf$", r"^(awg|amnezia).*\.conf$")
-
-def conf_dir(kind):
-    if kind not in KINDS:
-        raise ValueError(f"неизвестный тип конфига: {kind!r}")
-    return CONF_CORP if kind == "corp" else CONF_PERSONAL
-
-
-def list_confs(kind):
-    """Имена конфигов этого типа, без .conf."""
-    try:
-        return sorted(f[:-5] for f in os.listdir(conf_dir(kind))
-                      if f.lower().endswith(".conf"))
-    except OSError:
-        return []
-
-
-def conf_path(kind, name):
-    return os.path.join(conf_dir(kind), f"{check_name(name)}.conf")
 
 
 def migrate_flat():
@@ -95,7 +70,8 @@ def migrate_flat():
 
     Тип берём по старым правилам имени — ровно так, как их понимала прежняя
     сборка, — поэтому после обновления включается то же, что и до него.
-    Возвращает [(имя, тип)] перенесённых.
+    Профиль, если он не указывал на перенесённый личный, — тот, что сборка
+    брала сама. Возвращает [(имя, тип)] перенесённых.
     """
     moved = []
     try:
@@ -109,16 +85,30 @@ def migrate_flat():
         kind = ("corp" if any(re.match(p, f, re.IGNORECASE)
                               for p in _LEGACY_CORP_PAT) else "personal")
         name = safe_name(f)
-        os.makedirs(conf_dir(kind), exist_ok=True)
-        os.replace(src, os.path.join(conf_dir(kind), f"{name}.conf"))
+        folder = os.path.join(CONF, kind)
+        os.makedirs(folder, exist_ok=True)
+        os.replace(src, os.path.join(folder, f"{name}.conf"))
         moved.append((name, kind))
+    personal = [n for n, kind in moved if kind == "personal"]
+    if personal and _legacy_profile() not in personal:
+        with open(paths.PROFILE_FILE, "w", encoding="utf-8") as fh:
+            fh.write(legacy_default_personal(personal))
     return moved
+
+
+def _legacy_profile():
+    try:
+        with open(paths.PROFILE_FILE, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
 
 
 def legacy_default_personal(names):
     """Какой личный сборка брала без профиля до 0.3: personal.conf, потом awg*."""
     for pat in _LEGACY_PERSONAL_PAT:
-        found = [n for n in names if re.match(pat, f"{n}.conf", re.IGNORECASE)]
+        found = [n for n in sorted(names)
+                 if re.match(pat, f"{n}.conf", re.IGNORECASE)]
         if found:
             return found[0]
     return ""
@@ -134,37 +124,6 @@ def check_conf_text(text):
     if "[interface]" not in sections or "[peer]" not in sections:
         return "это не конфиг WireGuard: нет секции [Interface] или [Peer]"
     return None
-
-
-def pick_corp():
-    """Единственный рабочий конфиг."""
-    have = list_confs("corp")
-    if not have:
-        sys.exit("рабочий конфиг не добавлен")
-    if len(have) > 1:
-        sys.exit(f"рабочих конфигов несколько: {', '.join(have)}\n"
-                 f"оставь в {CONF_CORP} только один")
-    return conf_path("corp", have[0])
-
-
-def pick_personal():
-    """Личный по профилю (SB_PERSONAL=nl-1 или --personal nl-1), а без
-    профиля — единственный."""
-    name = os.environ.get("SB_PERSONAL", "")
-    if "--personal" in sys.argv:
-        name = sys.argv[sys.argv.index("--personal") + 1]
-    name = name.strip()
-    have = list_confs("personal")
-    if name:
-        if name not in have:
-            sys.exit(f"нет личного конфига «{name}»\n"
-                     f"есть: {', '.join(have) if have else '(пусто)'}")
-        return conf_path("personal", name)
-    if not have:
-        sys.exit("личный конфиг не добавлен")
-    if len(have) > 1:
-        sys.exit(f"личных конфигов несколько: {', '.join(have)} — выбери один")
-    return conf_path("personal", have[0])
 
 
 def parse_conf(path):
@@ -602,12 +561,6 @@ OUT_TAG = "out"
 DIRECT_TAG = "direct"
 PUBLIC_DNS_TAG = "dns"
 
-# Служба пока знает ровно два боковых процесса — corp и personal; их туннели —
-# work и home (tunnels.LEGACY).
-SIDE_IDS = {kind: tid for kind, (tid, _, _) in tunnels.LEGACY.items()}
-PERSONAL_TAG = ep_tag(SIDE_IDS["personal"])
-PERSONAL_SOCKS_TAG = socks_tag(SIDE_IDS["personal"])
-
 
 def _free_port():
     """Свободный порт на loopback. Его могут занять между проверкой и
@@ -690,6 +643,16 @@ def side_ids(main_cfg):
             and ob.get("tag", "").startswith(prefix)]
 
 
+def main_id(main_cfg):
+    """id основного туннеля — того, что за selector out, — иначе None."""
+    prefix = socks_tag("")
+    for ob in main_cfg.get("outbounds", []):
+        if ob.get("tag") == OUT_TAG:
+            tag = ob.get("default") or ""
+            return tag[len(prefix):] if tag.startswith(prefix) else None
+    return None
+
+
 def ep_of_socks(tag):
     """Тег endpoint туннеля по тегу его socks-выхода; чужой тег — как есть."""
     prefix = socks_tag("")
@@ -742,47 +705,9 @@ def running_pid():
         return ""
 
 
-# Чужое слово в site.env не должно ронять запуск: sing-box check отверг бы
-# весь конфиг из-за опечатки в диагностическом ключе.
-def log_level():
-    """SB_LOG_LEVEL из site.env: debug — когда ищем причину сбоя, иначе info.
-    Статистика адресов и сторож службы читают строки info и error — выше
-    warn их не будет."""
-    level = os.environ.get("SB_LOG_LEVEL", "").strip().lower()
-    if level and level not in LOG_LEVELS:
-        print(f"SB_LOG_LEVEL={level}: такого уровня нет, беру info",
-              file=sys.stderr)
-    return level if level in LOG_LEVELS else "info"
-
-
-def legacy_sources():
-    """Пара «рабочий/личный» до переезда в tunnels.json: конфиги из conf\\corp
-    и conf\\personal, правила — из site.env через окружение.
-
-    Это те же туннели, что дал бы tunnels.migrate, поэтому сборка до
-    переезда и после него одинакова.
-    """
-    work, home = tunnels.LEGACY["corp"], tunnels.LEGACY["personal"]
-
-    def rules(key):
-        entries, rejected = routelist.parse(os.environ.get(key, ""))
-        if rejected:
-            print(f"{key}: не понял {', '.join(rejected)} — пропускаю",
-                  file=sys.stderr)
-        return entries
-
-    data = tunnels.validate({"log_level": log_level(), "tunnels": [
-        {"id": work[0], "name": work[1], "mode": work[2],
-         "include": rules("CORP_DOMAINS"), "exclude": rules("SB_CORP_EXCLUDE")},
-        {"id": home[0], "name": home[1], "mode": home[2]},
-    ]})
-    return data, {work[0]: pick_corp(), home[0]: pick_personal()}
-
-
 def sources():
-    """(туннели, {id: путь к активному .conf}) для сборки."""
-    if not os.path.exists(paths.TUNNELS_JSON):
-        return legacy_sources()
+    """(туннели, {id: путь к активному .conf}) для сборки из tunnels.json.
+    Испорченный файл или неоднозначный активный конфиг — sys.exit с причиной."""
     try:
         data = tunnels.load()
         return data, {t["id"]: tunnels.active_conf(t) for t in data["tunnels"]}
@@ -810,7 +735,8 @@ def _summary(t, ep, nets, domains, dns):
 
 
 def build(data, confs, out_path, side_path=None, log=print):
-    """Основной конфиг и по боковому на туннель. Возвращает id собранных.
+    """Основной конфиг и по боковому на туннель. Возвращает [(id, имя)]
+    собранных по порядку файла.
 
     data — tunnels.validate(); confs — {id: путь к активному .conf}. Туннель
     без конфига пропускается: пустой слот не держит остальные.
@@ -967,7 +893,7 @@ def build(data, confs, out_path, side_path=None, log=print):
     print(f"собрано: {out_path}")
     for line in report:
         print(line)
-    return [t["id"] for t, _, _ in built]
+    return [(t["id"], t["name"]) for t, _, _ in built]
 
 
 def _drop_stale_sides(keep):
@@ -988,6 +914,7 @@ def _drop_stale_sides(keep):
 
 
 def main(log=print):
+    """Собирает state\\config.json и боковые. [(id, имя)] собранных туннелей."""
     os.makedirs(paths.STATE, exist_ok=True)
     out_path = paths.CONFIG_JSON
 
@@ -1007,9 +934,10 @@ def main(log=print):
         side_path = lambda tid: f"{stem}.{tid}.json"
 
     data, confs = sources()
-    ids = build(data, confs, out_path, side_path, log)
+    built = build(data, confs, out_path, side_path, log)
     if side_path is None:
-        _drop_stale_sides(ids)
+        _drop_stale_sides([tid for tid, _ in built])
+    return built
 
 
 if __name__ == "__main__":

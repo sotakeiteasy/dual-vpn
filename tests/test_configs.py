@@ -1,48 +1,82 @@
-"""Конфиги: куда и под каким именем ложится файл, что убирается и что берёт сборка.
+"""Конфиги: куда и под каким именем ложится файл, что убирается и что выбрано.
 
-Тип туннеля задаёт папка (conf\\corp, conf\\personal), а папку — пункт, через
-который конфиг добавили. Ошибка здесь не падает сразу: второй рабочий или
-не тот личный ломают сборку только при следующем включении, когда человек
-уже не помнит, что менял.
+Конфиг лежит в папке своего туннеля (conf\\tunnels\\<id>), а туннель — тот,
+через чей пункт конфиг добавили: «рабочий» — первый туннель «по списку»,
+«личный» — основной. Ошибка здесь не падает сразу: второй рабочий или не тот
+личный ломают сборку только при следующем включении, когда человек уже не
+помнит, что менял.
 """
 
 import os
-import sys
+import shutil
 
 import pytest
 
-from dualvpn import buildconfig, paths
+from dualvpn import buildconfig, paths, tunnels
 from dualvpn.service import Core
 
 WG = "[Interface]\nPrivateKey = x\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = y\n"
 
+WORK = {"id": "work", "name": "Работа", "mode": "list"}
+HOME = {"id": "home", "name": "Личный", "mode": "all"}
+
+
+def _clean():
+    for d in (paths.CONF_TUNNELS, paths.CONF_CORP, paths.CONF_PERSONAL):
+        shutil.rmtree(d, ignore_errors=True)
+    for f in os.listdir(paths.CONF):
+        if os.path.isfile(os.path.join(paths.CONF, f)):
+            os.remove(os.path.join(paths.CONF, f))
+    if os.path.exists(paths.PROFILE_FILE):
+        os.remove(paths.PROFILE_FILE)
+
+
+def _core():
+    # Без __init__: туннель и пробер здесь не нужны, нужна только работа с conf\.
+    core = Core.__new__(Core)
+    core.logged = []
+    core.log = core.logged.append
+    return core
+
 
 @pytest.fixture
 def core():
-    paths.ensure_dirs()
-    for d in (paths.CONF, paths.CONF_CORP, paths.CONF_PERSONAL):
-        for f in os.listdir(d):
-            if os.path.isfile(os.path.join(d, f)):
-                os.remove(os.path.join(d, f))
-    if os.path.exists(paths.PROFILE_FILE):
-        os.remove(paths.PROFILE_FILE)
-    # Без __init__: туннель и пробер здесь не нужны, нужна только работа с conf\.
-    return Core.__new__(Core)
+    """Установка 0.4: tunnels.json с рабочим и личным, конфигов нет."""
+    _clean()
+    tunnels.save({"tunnels": [WORK, HOME]})
+    yield _core()
+    _clean()
 
 
-def _files(kind):
-    return sorted(os.listdir(buildconfig.conf_dir(kind)))
+@pytest.fixture
+def old():
+    """Установка до 0.4: tunnels.json ещё нет."""
+    _clean()
+    yield _core()
+    _clean()
 
 
-def _put(kind, name):
-    with open(os.path.join(buildconfig.conf_dir(kind), name), "w",
-              encoding="utf-8") as fh:
+def _files(tid):
+    try:
+        return sorted(os.listdir(tunnels.conf_dir(tid)))
+    except FileNotFoundError:
+        return []
+
+
+def _put(tid, name):
+    os.makedirs(tunnels.conf_dir(tid), exist_ok=True)
+    with open(os.path.join(tunnels.conf_dir(tid), name), "w", encoding="utf-8") as fh:
         fh.write(WG)
 
 
-def _put_flat(name):
-    with open(os.path.join(paths.CONF, name), "w", encoding="utf-8") as fh:
+def _put_in(folder, name):
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, name), "w", encoding="utf-8") as fh:
         fh.write(WG)
+
+
+def _active(tid):
+    return tunnels.find(tunnels.load(), tid)["active"]
 
 
 @pytest.mark.parametrize("given, expected", [
@@ -67,71 +101,112 @@ def test_имя_чистится_а_не_отклоняется(given, expected)
 
 
 def test_замена_рабочего_убирает_прежние(core):
-    _put("corp", "wg0-old.conf")
-    _put("corp", "wg.conf")
-    _put("personal", "nl-1.conf")
+    _put("work", "wg0-old.conf")
+    _put("work", "wg.conf")
+    _put("home", "nl-1.conf")
+
     r = core._add_config("Офис Иванов", WG, kind="corp")
+
     assert r["ok"] and r["name"] == "Офис Иванов"
-    # Рабочий ровно один и со своим именем, личные не тронуты.
-    assert _files("corp") == ["Офис Иванов.conf"]
-    assert _files("personal") == ["nl-1.conf"]
+    assert r["corp"] == ["Офис Иванов"] and r["profiles"] == ["nl-1"]
+    # Рабочий ровно один, со своим именем и выбран; личные не тронуты.
+    assert _files("work") == ["Офис Иванов.conf"]
+    assert _active("work") == "Офис Иванов"
+    assert _files("home") == ["nl-1.conf"]
 
 
 def test_тип_задаёт_пункт_а_не_имя(core):
     """wg-home раньше стал бы рабочим по имени; теперь он личный, раз его
     добавили как личный, и имя своё сохраняет."""
-    _put("corp", "corp.conf")
+    _put("work", "corp.conf")
+
     r = core._add_config("wg-home", WG, kind="personal")
+
     assert r["ok"] and r["name"] == "wg-home"
-    assert _files("personal") == ["wg-home.conf"]
-    assert _files("corp") == ["corp.conf"]
-    assert _profile() == "wg-home"
+    assert _files("home") == ["wg-home.conf"]
+    assert _files("work") == ["corp.conf"]
+    assert _active("home") == "wg-home"
+
+
+def test_добавленный_личный_ложится_рядом_и_выбирается(core):
+    _put("home", "nl-1.conf")
+
+    core._add_config("nl-2", WG, kind="personal")
+
+    assert _files("home") == ["nl-1.conf", "nl-2.conf"]
+    assert _active("home") == "nl-2"
+    # Профиль больше не в state\profile, а в tunnels.json.
+    assert not os.path.exists(paths.PROFILE_FILE)
 
 
 def test_недопустимые_знаки_не_ломают_добавление(core):
     r = core._add_config("my:vpn?", WG, kind="personal")
     assert r["ok"] and r["name"] == "my_vpn_"
-    assert _files("personal") == ["my_vpn_.conf"]
+    assert _files("home") == ["my_vpn_.conf"]
 
 
-def test_неизвестный_тип_не_ложится(core):
-    r = core._add_config("nl-1", WG, kind="")
+@pytest.mark.parametrize("kind", ["", "home", "../corp"])
+def test_неизвестный_тип_не_ложится(core, kind):
+    r = core._add_config("nl-1", WG, kind=kind)
     assert not r["ok"]
-    assert _files("corp") == [] and _files("personal") == []
+    assert _files("work") == [] and _files("home") == []
+
+
+def test_без_туннеля_этого_типа_конфиг_не_ложится(core):
+    tunnels.save({"tunnels": [HOME]})
+
+    r = core._add_config("corp", WG, kind="corp")
+
+    assert not r["ok"] and "нет туннеля" in r["error"]
+    assert _files("work") == []
+
+
+def test_испорченный_tunnels_json_не_затирается(core):
+    with open(paths.TUNNELS_JSON, "w", encoding="utf-8") as fh:
+        fh.write("{не json")
+
+    for r in (core._add_config("nl-1", WG, kind="personal"),
+              core._remove_config("nl-1", "personal"),
+              core._set_profile("nl-1")):
+        assert not r["ok"] and "tunnels.json" in r["error"]
+
+    with open(paths.TUNNELS_JSON, encoding="utf-8") as fh:
+        assert fh.read() == "{не json"
+    assert _files("home") == []
 
 
 def test_личный_с_тем_же_именем_перезаписывается(core):
     core._add_config("nl-1", WG, kind="personal")
     core._add_config("nl-1", WG.replace("x", "z"), kind="personal")
-    assert _files("personal") == ["nl-1.conf"]
+    assert _files("home") == ["nl-1.conf"]
     r = core._read_config("nl-1", "personal")
     assert r["ok"] and "PrivateKey = z" in r["text"]
 
 
-def _profile():
-    with open(paths.PROFILE_FILE, encoding="utf-8") as fh:
-        return fh.read()
+def test_чтение_конфига_неизвестного_типа_отказывает(core):
+    _put("home", "nl-1.conf")
+    assert not core._read_config("nl-1", "home")["ok"]
 
 
 def test_удаление_выбранного_личного_переключает_на_другой(core):
-    _put("corp", "corp.conf")
+    _put("work", "corp.conf")
     core._add_config("nl-2", WG, kind="personal")
     core._add_config("nl-1", WG, kind="personal")
 
     r = core._remove_config("nl-1", "personal")
 
-    assert r["ok"]
+    assert r["ok"] and r["profiles"] == ["nl-2"]
     # Не corp: рабочий личным туннелем не бывает.
-    assert _profile() == "nl-2"
+    assert _active("home") == "nl-2"
 
 
 def test_удаление_последнего_личного_сбрасывает_выбор(core):
-    _put("corp", "corp.conf")
+    _put("work", "corp.conf")
     core._add_config("nl-1", WG, kind="personal")
 
     core._remove_config("nl-1", "personal")
 
-    assert _profile() == ""
+    assert _active("home") == ""
 
 
 def test_удаление_невыбранного_выбор_не_трогает(core):
@@ -140,106 +215,122 @@ def test_удаление_невыбранного_выбор_не_трогае�
 
     core._remove_config("nl-2", "personal")
 
-    assert _profile() == "nl-1"
+    assert _active("home") == "nl-1"
 
 
 def test_удаление_рабочего_профиль_не_трогает(core):
     """Имя рабочего может совпасть с выбранным личным — папки разные."""
-    _put("corp", "nl-1.conf")
+    _put("work", "nl-1.conf")
     core._add_config("nl-1", WG, kind="personal")
 
     core._remove_config("nl-1", "corp")
 
-    assert _files("corp") == [] and _files("personal") == ["nl-1.conf"]
-    assert _profile() == "nl-1"
+    assert _files("work") == [] and _files("home") == ["nl-1.conf"]
+    assert _active("home") == "nl-1"
+
+
+def test_удаление_несуществующего_ничего_не_меняет(core):
+    core._add_config("nl-1", WG, kind="personal")
+
+    r = core._remove_config("nl-2", "personal")
+
+    assert not r["ok"]
+    assert _active("home") == "nl-1"
+
+
+def test_профиль_это_активный_конфиг_основного(core):
+    _put("home", "nl-1.conf")
+    _put("home", "nl-2.conf")
+
+    assert core._set_profile("nl-2") == {"ok": True, "profile": "nl-2"}
+    assert _active("home") == "nl-2"
+
+    r = core._set_profile("nl-3")
+    assert not r["ok"] and "nl-3" in r["error"]
+    assert _active("home") == "nl-2"
+    assert not os.path.exists(paths.PROFILE_FILE)
 
 
 def test_bom_от_блокнота_не_мешает(core):
-    r = core._add_config("nl-1", "\ufeff" + WG, kind="personal")
+    r = core._add_config("nl-1", "﻿" + WG, kind="personal")
     assert r["ok"]
     assert core._read_config("nl-1", "personal")["text"].startswith("[Interface]")
 
 
 @pytest.mark.parametrize("text", ["", "CORP_DOMAINS=\"x.local\"\n", "[Interface]\n"])
 def test_не_конфиг_не_ложится_и_ничего_не_удаляет(core, text):
-    _put("corp", "wg0-old.conf")
+    _put("work", "wg0-old.conf")
     r = core._add_config("corp", text, kind="corp")
     assert not r["ok"]
-    assert _files("corp") == ["wg0-old.conf"]
+    assert _files("work") == ["wg0-old.conf"]
+    assert _active("work") == ""
 
 
 # ------------------------------------------------- переезд старой установки
 
-def test_плоский_conf_разкладывается_по_старым_правилам(core):
+def test_плоский_conf_переезжает_в_туннели(old):
     for f in ("corp.conf", "wg0-ivanov.conf", "personal.conf", "awg-home.conf",
               "nl-1.conf"):
-        _put_flat(f)
+        _put_in(paths.CONF, f)
     with open(os.path.join(paths.CONF, "site.env"), "w", encoding="utf-8") as fh:
-        fh.write("CORP_PROBE=x\n")
+        fh.write("CORP_DOMAINS=corp.example\n")
 
-    core._migrate()
+    old._migrate()
 
-    assert _files("corp") == ["corp.conf", "wg0-ivanov.conf"]
-    assert _files("personal") == ["awg-home.conf", "nl-1.conf", "personal.conf"]
-    # site.env остаётся на месте, в корне — только он и папки.
-    assert sorted(os.listdir(paths.CONF)) == ["corp", "personal", "site.env"]
+    assert _files("work") == ["corp.conf", "wg0-ivanov.conf"]
+    assert _files("home") == ["awg-home.conf", "nl-1.conf", "personal.conf"]
+    # site.env остаётся рядом копией, старых папок типов нет.
+    assert sorted(os.listdir(paths.CONF)) == ["site.env.bak", "tunnels", "tunnels.json"]
+    data = tunnels.load()
     # Профиль был пуст — берём тот, что сборка до 0.3 взяла бы сама.
-    assert _profile() == "personal"
+    assert tunnels.find(data, "home")["active"] == "personal"
+    assert tunnels.find(data, "work")["include"] == ["corp.example"]
 
 
-def test_переезд_не_меняет_выбранный_профиль(core):
-    _put_flat("personal.conf")
-    _put_flat("nl-1.conf")
+def test_переезд_не_меняет_выбранный_профиль(old):
+    _put_in(paths.CONF, "personal.conf")
+    _put_in(paths.CONF, "nl-1.conf")
     with open(paths.PROFILE_FILE, "w", encoding="utf-8") as fh:
         fh.write("nl-1")
 
+    old._migrate()
+
+    assert _active("home") == "nl-1"
+
+
+def test_папки_типов_переезжают_в_туннели(old):
+    """Установка 0.3: конфиги уже по папкам corp и personal."""
+    _put_in(paths.CONF_CORP, "corp.conf")
+    _put_in(paths.CONF_PERSONAL, "nl-1.conf")
+    _put_in(paths.CONF_PERSONAL, "nl-2.conf")
+    with open(paths.PROFILE_FILE, "w", encoding="utf-8") as fh:
+        fh.write("nl-2")
+
+    old._migrate()
+
+    assert _files("work") == ["corp.conf"] and _files("home") == ["nl-1.conf", "nl-2.conf"]
+    assert _active("work") == "corp" and _active("home") == "nl-2"
+    assert not os.path.exists(paths.CONF_CORP) and not os.path.exists(paths.CONF_PERSONAL)
+
+
+def test_повторный_переезд_ничего_не_трогает(core):
+    _put("home", "nl-1.conf")
+    _put_in(paths.CONF_PERSONAL, "nl-2.conf")
+    before = tunnels.load()
+
     core._migrate()
 
-    assert _profile() == "nl-1"
-
-
-def test_без_старых_файлов_переезда_нет(core):
-    _put("personal", "nl-1.conf")
-    core._migrate()
-    assert _files("personal") == ["nl-1.conf"]
+    assert tunnels.load() == before
+    assert _files("home") == ["nl-1.conf"]
+    assert os.listdir(paths.CONF_PERSONAL) == ["nl-2.conf"]
     assert not os.path.exists(paths.PROFILE_FILE)
 
 
-# ------------------------------------------------------ что берёт сборка
+def test_сбой_переезда_в_журнале_а_не_падением(old, monkeypatch):
+    def broken(log=print):
+        raise ValueError("туннелей 9, больше 8 нельзя")
+    monkeypatch.setattr(tunnels, "migrate", broken)
 
-@pytest.fixture
-def no_profile(monkeypatch):
-    monkeypatch.delenv("SB_PERSONAL", raising=False)
-    monkeypatch.setattr(sys, "argv", ["buildconfig"])
+    old._migrate()
 
-
-def test_без_профиля_берётся_единственный_личный(core, no_profile):
-    _put("personal", "nl-1.conf")
-    assert buildconfig.pick_personal() == buildconfig.conf_path("personal", "nl-1")
-
-
-def test_несколько_личных_без_выбора_ошибка(core, no_profile):
-    _put("personal", "nl-1.conf")
-    _put("personal", "nl-2.conf")
-    with pytest.raises(SystemExit, match="выбери один"):
-        buildconfig.pick_personal()
-
-
-def test_профиль_выбирает_личный(core, no_profile, monkeypatch):
-    _put("personal", "nl-1.conf")
-    _put("personal", "nl-2.conf")
-    monkeypatch.setenv("SB_PERSONAL", "nl-2")
-    assert buildconfig.pick_personal() == buildconfig.conf_path("personal", "nl-2")
-    monkeypatch.setenv("SB_PERSONAL", "nl-3")
-    with pytest.raises(SystemExit, match="нет личного"):
-        buildconfig.pick_personal()
-
-
-def test_рабочий_должен_быть_ровно_один(core):
-    with pytest.raises(SystemExit, match="не добавлен"):
-        buildconfig.pick_corp()
-    _put("corp", "a.conf")
-    assert buildconfig.pick_corp() == buildconfig.conf_path("corp", "a")
-    _put("corp", "b.conf")
-    with pytest.raises(SystemExit, match="несколько"):
-        buildconfig.pick_corp()
+    assert any("не перенести" in line and "больше 8" in line for line in old.logged)

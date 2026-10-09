@@ -25,13 +25,9 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from . import buildconfig, paths, winnet
+from . import buildconfig, paths, tunnels, winnet
 
 KEEP_LOGS = 10
-
-# Ключи conf\site.env, которые читает buildconfig.
-SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE",
-             "SB_LOG_LEVEL")
 
 # Обе половины адресного пространства. Пишем именно так, а не 0.0.0.0/0:
 # более специфичный префикс выигрывает у маршрута по умолчанию, не удаляя его,
@@ -58,17 +54,21 @@ _ES_CONTINUOUS = 0x80000000
 _ES_SYSTEM_REQUIRED = 0x00000001
 
 
-class Side:
-    """Боковой процесс sing-box — корп или личный туннель за socks на loopback.
+def log_prefix(tid):
+    """Префикс журнала бокового процесса туннеля tid."""
+    return f"tunnel-{tid}"
 
-    У каждого свой журнал <kind>-<дата>.log: сторож читает оттуда таймауты
-    туннеля и перезапускает процесс один, не трогая tun.
+
+class Side:
+    """Боковой процесс sing-box — один туннель за socks на loopback.
+
+    У каждого свой журнал tunnel-<id>-<дата>.log: сторож читает оттуда
+    таймауты туннеля и перезапускает процесс один, не трогая tun.
     """
 
-    def __init__(self, kind, title):
-        self.kind = kind          # 'corp' | 'personal'
-        self.tid = buildconfig.SIDE_IDS[kind]   # id туннеля: work, home
-        self.title = title        # для журнала службы
+    def __init__(self, tid, title):
+        self.tid = tid            # id туннеля из tunnels.json
+        self.title = title        # имя туннеля — для журнала службы
         self.proc = None
         self.logfile = None
         # (путь, смещение) начала текущего запуска в его журнале.
@@ -76,8 +76,12 @@ class Side:
 
     @property
     def tag(self):
-        """Тег endpoint туннеля: wg-work, wg-home."""
+        """Тег endpoint туннеля: wg-<id>."""
         return buildconfig.ep_tag(self.tid)
+
+    @property
+    def log_prefix(self):
+        return log_prefix(self.tid)
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -94,10 +98,13 @@ class Tunnel:
         # (путь, смещение) начала текущего запуска в журнале sing-box: сторож
         # службы читает оттуда соединения. None — туннель не запущен.
         self.log_start = None
-        # Туннели — в своих процессах: их перезапускают по одному.
-        self.corp = Side("corp", "корп")
-        self.personal = Side("personal", "личный")
-        self.sides = (self.corp, self.personal)
+        # Туннели — в своих процессах: их перезапускают по одному. Список
+        # строит start из собранного конфига; до первого включения он пуст.
+        self.sides = []
+        # id основного туннеля (за selector out) и его активный конфиг, с
+        # которым собран запуск. None — ещё не собирали.
+        self.main_id = None
+        self.profile = None
         # Индекс нашего tun, каким мы его запомнили. Нужен уборке после того,
         # как интерфейс исчез, а журнал уже удалён.
         self._tun_hint = None
@@ -105,6 +112,17 @@ class Tunnel:
         # завязаны host-маршруты пиров и адрес корп-сервера: служба сверяет
         # их с текущим аплинком и при смене сети переподключается.
         self.uplink = None
+
+    @property
+    def main(self):
+        """Боковой процесс основного туннеля, иначе None."""
+        return next((s for s in self.sides if s.tid == self.main_id), None)
+
+    @property
+    def first_list(self):
+        """Первый туннель «по списку», иначе None. Пока сторож и проверка
+        знают один рабочий туннель, это он."""
+        return next((s for s in self.sides if s.tid != self.main_id), None)
 
     # ------------------------------------------------------ журнал владения
 
@@ -215,14 +233,11 @@ class Tunnel:
         продолжаем, а не заводим ещё один.
         """
         paths.ensure_dirs()
-        existing = sorted(
-            (os.path.join(paths.LOGS, f) for f in os.listdir(paths.LOGS)
-             if f.startswith(f"{prefix}-") and f.endswith(".log")),
-        )
+        existing = paths.log_files(prefix)
         if existing and time.time() - os.path.getmtime(existing[-1]) < 60:
             path = existing[-1]
         else:
-            stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            stamp = datetime.datetime.now().strftime(paths.LOG_STAMP)
             path = os.path.join(paths.LOGS, f"{prefix}-{stamp}.log")
             existing.append(path)
         # Имя — это дата, поэтому сортировка по имени хронологическая.
@@ -240,25 +255,44 @@ class Tunnel:
     # -------------------------------------------------------------- старт
 
     def start(self, profile=""):
-        """Поднимает туннель. Возвращает '' или текст ошибки."""
+        """Поднимает туннель. Возвращает '' или текст ошибки.
+
+        profile — конфиг основного туннеля: становится его active в
+        tunnels.json. Пустой — тот, что там уже выбран.
+        """
         paths.ensure_dirs()
+        try:
+            data = tunnels.load()
+        except ValueError as exc:
+            return str(exc)
+        main = tunnels.main_tunnel(data)
+        if profile:
+            # Имя приходит через канал — сравниваем со списком, а не склеиваем
+            # в путь: «..\\» здесь вывел бы за пределы conf\. Проверяем до
+            # остановки: опечатка в имени не должна ронять живой туннель.
+            if main is None:
+                return (f"нет туннеля для всего остального трафика — "
+                        f"профиль «{profile}» некуда поставить")
+            if profile not in tunnels.list_confs(main["id"]):
+                return f"нет профиля «{profile}» у туннеля «{main['name']}»"
+        want = profile or (main["active"] if main else "")
 
         # Уже работает: второе «Включить» (двойной клик по значку, окно и
         # трей разом) раньше принимало свой же живой туннель за следы
         # прошлого запуска, сносило его и поднимало заново.
         if (self.proc is not None and self.proc.poll() is None
-                and profile == os.environ.get("SB_PERSONAL", "")
+                and want == self.profile
                 and winnet.tun_index(paths.TUN_IP) is not None):
             self.log("→ уже работает")
             # Основной жив, а туннель упал: поднимаем только его, иначе
             # «Включить» отвечало бы «работает» при мёртвом туннеле.
             for side in self.sides:
                 if not side.alive():
-                    self.log(f"→ {side.title} процесс не работает, поднимаю")
+                    self.log(f"→ процесс «{side.title}» не работает, поднимаю")
                     err = self._start_side(side)
                     self._report_side(side, err)
-                    if side is self.personal and not err:
-                        self.set_out(buildconfig.PERSONAL_SOCKS_TAG)
+                    if side is self.main and not err:
+                        self.set_out(buildconfig.socks_tag(side.tid))
             return ""
 
         # Уборка за прошлым запуском — до того, как поднимем свой. Прошлый мог
@@ -270,28 +304,13 @@ class Tunnel:
             self.log("")
 
         if profile:
-            # Имя приходит через канал — сравниваем со списком, а не склеиваем
-            # в путь: «..\\» здесь вывел бы за пределы conf\.
-            if profile not in buildconfig.list_confs("personal"):
-                return (f"нет профиля «{profile}»: не найден в "
-                        f"{paths.CONF_PERSONAL}")
-            os.environ["SB_PERSONAL"] = profile
-            self.log(f"→ личный профиль: {profile}")
-        else:
-            # Окружение у службы одно на всю жизнь: без этого после
-            # «nl-1» возврат к personal собирал всё равно nl-1.
-            os.environ.pop("SB_PERSONAL", None)
-
-        # Настройки рабочей сети — в окружение: buildconfig читает их оттуда.
-        # Перезаписываем каждый раз, а не setdefault: окружение живёт, пока
-        # жива служба, и правка в окне «Раздельное туннелирование» иначе
-        # не действовала до её перезапуска.
-        site = paths.site_env()
-        for k in SITE_KEYS:
-            if site.get(k):
-                os.environ[k] = site[k]
-            else:
-                os.environ.pop(k, None)
+            if main["active"] != profile:
+                main["active"] = profile
+                try:
+                    tunnels.save(data)
+                except (OSError, ValueError) as exc:
+                    return f"профиль не записать: {exc}"
+            self.log(f"→ профиль «{main['name']}»: {profile}")
 
         if not os.path.isfile(paths.SINGBOX):
             return f"нет {paths.SINGBOX} — переустанови приложение"
@@ -309,10 +328,13 @@ class Tunnel:
 
         self.log("→ собираю конфиг из conf\\…")
         try:
-            buildconfig.main(log=self.log)
+            built = buildconfig.main(log=self.log)
         except SystemExit as exc:
             # buildconfig сообщает об ошибках через sys.exit с текстом.
             return str(exc) or "не удалось собрать конфиг — правь conf\\*.conf"
+        self.profile = want
+        self.main_id = buildconfig.main_id(_load_json(paths.CONFIG_JSON))
+        self.sides = [Side(tid, name) for tid, name in built]
 
         # Отдельной строкой: сборка и проверка шли под одной, и по журналу
         # нельзя было сказать, кто из них ест до 11 с включения.
@@ -380,16 +402,16 @@ class Tunnel:
         self._save_real_ip(real_ip[0] if real_ip else "")
 
         # Туннели — до основного: тот сразу начнёт отдавать им трафик
-        # и DNS в socks. Упал туннель — включение идёт дальше: без корпа работает
-        # интернет, без личного — выход напрямую, а упавший поднимет сторож.
-        # Оба сразу: каждый ждёт свой socks ~0.8 с, по очереди ожидания
-        # складывались. Журналы у них разные, общего состояния нет; map
-        # пробрасывает исключение потока сюда, как и при запуске по очереди.
-        with ThreadPoolExecutor(len(self.sides)) as pool:
-            side_err = dict(zip([side.kind for side in self.sides],
+        # и DNS в socks. Упал туннель — включение идёт дальше: без туннеля
+        # «по списку» работает интернет, без основного — выход напрямую, а упавший
+        # поднимет сторож. Все сразу: каждый ждёт свой socks ~0.8 с, по очереди
+        # ожидания складывались. Журналы у них разные, общего состояния
+        # нет; map пробрасывает исключение потока сюда, как и при запуске по очереди.
+        with ThreadPoolExecutor(max(1, len(self.sides))) as pool:
+            side_err = dict(zip([side.tid for side in self.sides],
                                 pool.map(self._start_side, self.sides)))
         for side in self.sides:
-            self._report_side(side, side_err[side.kind])
+            self._report_side(side, side_err[side.tid])
 
         self.logfile = self.open_log()
         log_path = self.logfile.name
@@ -447,9 +469,9 @@ class Tunnel:
             self.log("!! правило NRPT не встало: несуществующие корп-имена "
                      "будут отвечать по 12 с")
 
-        # Личный не поднялся — выход напрямую сразу, не дожидаясь сторожа:
+        # Основной не поднялся — выход напрямую сразу, не дожидаясь сторожа:
         # socks без процесса за ним отказывал бы каждому соединению.
-        if side_err["personal"]:
+        if self.main and side_err[self.main.tid]:
             self.set_out(buildconfig.DIRECT_TAG)
 
         self._keep_awake(True)
@@ -482,15 +504,19 @@ class Tunnel:
             pass
 
     def _peer_ips(self):
-        """Адреса пиров из обоих собранных конфигов, имена резолвим сейчас.
+        """Адреса пиров из всех собранных конфигов, имена резолвим сейчас.
 
         Пока DNS ещё системный: после подъёма туннеля он уйдёт внутрь, и имя
         сервера станет нерезолвимым ровно тогда, когда оно нужнее всего.
+        Боковые — по основному конфигу, а не по self.sides: после перезапуска
+        службы список пуст, а stop без журнала чистит именно по ним.
         """
         out = []
         endpoints = []
+        main_cfg = _load_json(paths.CONFIG_JSON)
         for cfg_path in (paths.CONFIG_JSON,
-                         *(buildconfig.side_json(s.tid) for s in self.sides)):
+                         *(buildconfig.side_json(tid)
+                           for tid in buildconfig.side_ids(main_cfg))):
             endpoints += _load_json(cfg_path).get("endpoints", [])
         for ep in endpoints:
             for peer in ep.get("peers", []):
@@ -522,10 +548,10 @@ class Tunnel:
         if not link or not link.get("port"):
             return f"в собранном конфиге нет связи с процессом {side.tag}"
         self._stop_side(side)
-        side.logfile = self.open_log(side.kind)
+        side.logfile = self.open_log(side.log_prefix)
         log_path = side.logfile.name
         side.log_start = (log_path, side.logfile.tell())
-        self.log(f"→ запускаю {side.title} процесс, журнал: {log_path}")
+        self.log(f"→ запускаю процесс «{side.title}», журнал: {log_path}")
         side.proc = subprocess.Popen(
             [paths.SINGBOX, "run", "-c", buildconfig.side_json(side.tid),
              "--disable-color"],
@@ -536,17 +562,17 @@ class Tunnel:
         deadline = time.time() + SIDE_WAIT
         while time.time() < deadline:
             if side.proc.poll() is not None:
-                return f"{side.title} процесс упал на старте: {_fatal_line(log_path)}"
+                return f"процесс «{side.title}» упал на старте: {_fatal_line(log_path)}"
             if _port_open(link["port"]):
                 return ""
             time.sleep(0.25)
         self._stop_side(side)
-        return f"{side.title} процесс не открыл socks за {SIDE_WAIT}с"
+        return f"процесс «{side.title}» не открыл socks за {SIDE_WAIT}с"
 
     def _report_side(self, side, err):
         if err:
-            what = ("рабочая сеть недоступна" if side.kind == "corp"
-                    else "выход напрямую")
+            what = ("выход напрямую" if side is self.main
+                    else f"туннель «{side.title}» недоступен")
             self.log(f"!! {err} — {what}, интернет работает")
 
     def _stop_side(self, side):
@@ -577,7 +603,7 @@ class Tunnel:
         self._stop_side(side)
         err = self._start_side(side)
         if not err:
-            self.log(f"→ {side.title} процесс перезапущен")
+            self.log(f"→ процесс «{side.title}» перезапущен")
         return err
 
     def mend_peer_routes(self, uplink=None):

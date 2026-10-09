@@ -203,6 +203,16 @@ def main_tunnel(data):
     return next((t for t in data["tunnels"] if t["mode"] == "all"), None)
 
 
+def by_kind(items, kind):
+    """Туннель старого типа: corp — первый «по списку», personal — основной.
+
+    items — список туннелей: data["tunnels"] или st["tunnels"] статуса.
+    Окно и трей до шага окна знают только эти два типа. Иначе None.
+    """
+    mode = {"corp": "list", "personal": "all"}.get(kind)
+    return next((t for t in items if mode and t.get("mode") == mode), None)
+
+
 def active_conf(tunnel):
     """Путь к активному конфигу туннеля; None — конфигов у него нет.
 

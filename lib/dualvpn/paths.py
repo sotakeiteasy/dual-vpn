@@ -15,6 +15,7 @@ status.json и логи.
 """
 
 import os
+import re
 import sys
 
 # BASE — где лежит сам exe (или корень репозитория при запуске из исходников).
@@ -39,8 +40,7 @@ DATA = os.environ.get("DUALVPN_DATA") or os.path.join(
 )
 
 CONF = os.path.join(DATA, "conf")
-# Тип туннеля задаёт папка, а не имя файла: человек сам выбирает, рабочий
-# это конфиг или личный, и файл сохраняет своё имя каким пришёл.
+# До 0.4 тип туннеля задавала папка. Нужны только для переезда в туннели.
 CONF_CORP = os.path.join(CONF, "corp")
 CONF_PERSONAL = os.path.join(CONF, "personal")
 # Туннели — слоты с правилами (tunnels.py): список в tunnels.json, конфиги
@@ -49,6 +49,8 @@ TUNNELS_JSON = os.path.join(CONF, "tunnels.json")
 CONF_TUNNELS = os.path.join(CONF, "tunnels")
 STATE = os.path.join(DATA, "state")
 LOGS = os.path.join(STATE, "logs")
+# Журналы процессов — <префикс>-<дата>.log, дата в таком виде.
+LOG_STAMP = "%Y-%m-%d_%H%M%S"
 
 # Бинарники. У установленной версии build.ps1 кладёт их рядом с exe (BASE),
 # а BUNDLE у onedir-сборки PyInstaller 6 — это _internal\: искали там и
@@ -95,8 +97,22 @@ PIPE_NAME = r"\\.\pipe\DualVPN"
 
 def ensure_dirs():
     """Создаёт каталоги данных. Зовётся и службой, и установщиком."""
-    for d in (DATA, CONF, CONF_CORP, CONF_PERSONAL, STATE, LOGS):
+    for d in (DATA, CONF, CONF_TUNNELS, STATE, LOGS):
         os.makedirs(d, exist_ok=True)
+
+
+def log_files(prefix):
+    """Журналы процесса prefix в LOGS по возрастанию даты.
+
+    Имя сверяется с шаблоном целиком: иначе журналы tunnel-work попали бы
+    и в выборку tunnel-work-2.
+    """
+    pat = re.compile(rf"^{re.escape(prefix)}-\d{{4}}-\d{{2}}-\d{{2}}_\d{{6}}\.log$")
+    try:
+        names = os.listdir(LOGS)
+    except OSError:
+        return []
+    return [os.path.join(LOGS, n) for n in sorted(names) if pat.match(n)]
 
 
 def version():

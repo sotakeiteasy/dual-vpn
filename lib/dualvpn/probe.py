@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import buildconfig, paths, winnet
+from . import buildconfig, paths, tunnels, winnet
 
 # Быстрый опрос — несколько WMI-запросов по 10–20 мс (см. winnet). Пока они
 # шли через запуск PowerShell, цикл стоил секунды и приходилось реже.
@@ -131,11 +131,34 @@ class Prober:
 
     @staticmethod
     def current_profile():
+        """Активный конфиг основного туннеля из tunnels.json; '' — не выбран."""
         try:
-            with open(paths.PROFILE_FILE, encoding="utf-8") as fh:
-                return fh.read().strip()
-        except OSError:
+            main = tunnels.main_tunnel(tunnels.load())
+        except ValueError:
             return ""
+        return main["active"] if main else ""
+
+    @staticmethod
+    def corp_probe():
+        """Чем проверять рабочую сеть: первый домен из «пускать» первого
+        туннеля «по списку» — не подсеть и не *.домен. '' — проверить нечем."""
+        try:
+            data = tunnels.load()
+        except ValueError:
+            return ""
+        work = tunnels.by_kind(data["tunnels"], "corp")
+        return next((e for e in (work["include"] if work else [])
+                     if "/" not in e and not e.startswith("*.")), "")
+
+    @staticmethod
+    def main_tag():
+        """Тег endpoint основного туннеля из собранного конфига, иначе ''."""
+        try:
+            with open(paths.CONFIG_JSON, encoding="utf-8") as fh:
+                tid = buildconfig.main_id(json.load(fh))
+        except Exception:
+            return ""
+        return buildconfig.ep_tag(tid) if tid else ""
 
     # ------------------------------------------------------------ сетевые
 
@@ -258,11 +281,11 @@ class Prober:
         out = (f"выход {s.get('exit_ip') or 'не узнал'}"
                f"{f' ({where})' if where else ''}, {s.get('exit_state') or 'unknown'}, "
                f"{sec('exit')}")
-        if paths.site_env().get("CORP_PROBE"):
+        if self.corp_probe():
             corp = (f"корп DNS {s.get('corp_ip') or 'молчит'}, {sec('dns')}; "
                     f"корп HTTPS {s.get('corp_http') or 'молчит'}, {sec('http')}")
         else:
-            corp = "корп не проверял (CORP_PROBE не задан)"
+            corp = "корп не проверял (в «пускать» нет домена)"
         v6 = (f"утечка IPv6 {s['v6_leak']}" if s.get("v6_leak")
               else "IPv6 без утечки")
         return (f"→ проверка сети за {total:.1f} с: {out}; {corp}; "
@@ -270,6 +293,7 @@ class Prober:
 
     def _slow_exit(self):
         peers = self.peer_addrs()
+        main_tag = self.main_tag()
         try:
             info = self._exit_info()
             ip = info.get("ip", "")
@@ -287,7 +311,7 @@ class Prober:
                 # Личный не работает, служба сама увела выход напрямую: адрес
                 # провайдера тут ожидаем, это не утечка.
                 state = "direct"
-            elif ip == peers.get(buildconfig.PERSONAL_TAG):
+            elif main_tag and ip == peers.get(main_tag):
                 state = "tunnel"          # одноногий сервер, адреса совпали
             elif real and ip == real:
                 state = "leak"            # нас видно тем же адресом, что и без VPN
@@ -309,9 +333,9 @@ class Prober:
         self.set(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
 
     def corp_answer(self):
-        """Адрес CORP_PROBE от корп-DNS через туннель; "" — молчит или
-        спрашивать нечего (нет CORP_PROBE или корп-DNS в конфиге)."""
-        probe_host = paths.site_env().get("CORP_PROBE", "")
+        """Адрес corp_probe() от корп-DNS через туннель; "" — молчит или
+        спрашивать нечего (нет домена или корп-DNS в конфиге)."""
+        probe_host = self.corp_probe()
         dns = self.corp_dns()
         return self._dns_ask(dns, probe_host) if dns and probe_host else ""
 
@@ -319,7 +343,7 @@ class Prober:
         self.set(corp_dns=self.corp_dns(), corp_ip=self.corp_answer())
 
     def _slow_corp_http(self):
-        probe_host = paths.site_env().get("CORP_PROBE", "")
+        probe_host = self.corp_probe()
         if probe_host:
             self.set(corp_http=self._http_code(f"https://{probe_host}"))
         else:

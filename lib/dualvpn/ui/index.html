@@ -393,8 +393,8 @@ function render(s) {
   // предложение её поставить — иначе человек нажимает «Включить» и ничего
   // не происходит.
   const noDaemon = s.daemon === false;
-  // Без любого из конфигов служба туннель не соберёт (buildconfig.py:pick_corp,
-  // pick_personal). Говорим заранее, а не «Не запускается» после нажатия.
+  // Туннель без конфига сборка пропускает, без всех — не соберёт
+  // (buildconfig.py:build). Говорим заранее, а не «Не запускается» после нажатия.
   const noConf = k => !!CONFS && !(CONFS[k] || []).length;
   const missing = !up && (noConf('corp') || noConf('personal'));
 

@@ -9,6 +9,11 @@ import os
 
 from dualvpn import ipc, paths, window
 
+WORK = {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
+        "confs": ["corp"]}
+HOME = {"id": "home", "name": "Личный", "mode": "all", "active": "nl-1",
+        "confs": ["nl-1"]}
+
 
 class _SyncThread:
     """Поток, который выполняет цель сразу: тесту нечего ждать."""
@@ -32,26 +37,39 @@ def _setup(monkeypatch, status):
 
 
 def test_личный_конфиг_открывается_в_блокноте_с_правами(monkeypatch):
-    api, runs, _ = _setup(monkeypatch, {"profiles": ["nl-1"], "corp": ["corp"]})
+    api, runs, _ = _setup(monkeypatch, {"profiles": ["nl-1"], "corp": ["corp"],
+                                        "tunnels": [WORK, HOME]})
 
     api.send("edit_config", {"name": "nl-1", "kind": "personal"})
 
     exe, args, show = runs[0]
     # Путь Windows: на Linux-раннере os.path его не разберёт.
     assert ntpath.isabs(exe) and ntpath.normpath(exe).lower().endswith("system32\\notepad.exe")
-    assert args == [os.path.join(paths.CONF_PERSONAL, "nl-1.conf")] and show
+    assert args == [os.path.join(paths.CONF_TUNNELS, "home", "nl-1.conf")] and show
 
 
-def test_рабочий_конфиг_берётся_из_своей_папки(monkeypatch):
-    api, runs, _ = _setup(monkeypatch, {"profiles": [], "corp": ["corp"]})
+def test_рабочий_конфиг_берётся_из_папки_своего_туннеля(monkeypatch):
+    api, runs, _ = _setup(monkeypatch, {"profiles": [], "corp": ["corp"],
+                                        "tunnels": [WORK, HOME]})
 
     api.send("edit_config", {"name": "corp", "kind": "corp"})
 
-    assert runs[0][1] == [os.path.join(paths.CONF_CORP, "corp.conf")]
+    assert runs[0][1] == [os.path.join(paths.CONF_TUNNELS, "work", "corp.conf")]
+
+
+def test_без_туннеля_этого_типа_не_открывается(monkeypatch):
+    api, runs, shown = _setup(monkeypatch, {"profiles": [], "corp": ["corp"],
+                                            "tunnels": [HOME]})
+
+    api.send("edit_config", {"name": "corp", "kind": "corp"})
+
+    assert runs == []
+    assert shown[0][0] == "failed"
 
 
 def test_имя_не_из_статуса_не_открывается(monkeypatch):
-    api, runs, shown = _setup(monkeypatch, {"profiles": ["nl-1"], "corp": []})
+    api, runs, shown = _setup(monkeypatch, {"profiles": ["nl-1"], "corp": [],
+                                            "tunnels": [WORK, HOME]})
 
     api.send("edit_config", {"name": "..\\..\\Windows\\win", "kind": "personal"})
 

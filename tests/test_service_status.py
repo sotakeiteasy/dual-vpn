@@ -4,7 +4,7 @@
 import threading
 import types
 
-from dualvpn import probe, service
+from dualvpn import probe, service, tunnels
 
 
 class _Tunnel:
@@ -52,11 +52,21 @@ def test_после_выключения_снимок_уже_без_туннел
     assert core.busy == ""
 
 
-def test_статус_по_сторонам_личный_проверен_корп_ещё_нет(monkeypatch):
-    core = _core(monkeypatch, up=True)
+def _quiet(monkeypatch, core):
+    """Поля статуса, которые читают систему и conf\\, — пустые."""
     for name, value in (("autostart_enabled", False), ("_singbox_version", ""),
                         ("_profiles", []), ("_corp", []), ("_last_results", {})):
-        monkeypatch.setattr(core, name, lambda value=value: value)
+        monkeypatch.setattr(core, name, lambda *_a, value=value: value)
+
+
+def _with_tunnels(monkeypatch, *items):
+    data = tunnels.validate({"tunnels": list(items)})
+    monkeypatch.setattr(service.Core, "_tunnels", staticmethod(lambda: data))
+
+
+def test_статус_по_сторонам_личный_проверен_корп_ещё_нет(monkeypatch):
+    core = _core(monkeypatch, up=True)
+    _quiet(monkeypatch, core)
     core.prober._take_slow()
     core.prober.set(personal_seq=core.prober.snapshot()["check_seq"])
 
@@ -68,21 +78,39 @@ def test_статус_по_сторонам_личный_проверен_кор
     assert not st["checking_corp"] and not st["checking_personal"]
 
 
-def test_раздельное_туннелирование_включено_когда_настройки_загружены(monkeypatch):
+def test_раздельное_туннелирование_включено_когда_у_рабочего_есть_правила(monkeypatch):
     core = _core(monkeypatch, up=False)
-    for name, value in (("autostart_enabled", False), ("_singbox_version", ""),
-                        ("_profiles", []), ("_corp", []), ("_last_results", {})):
-        monkeypatch.setattr(core, name, lambda value=value: value)
+    _quiet(monkeypatch, core)
+    home = {"id": "home", "name": "Личный", "mode": "all",
+            "exclude": ["203.0.113.9"]}
 
-    monkeypatch.setattr(service.paths, "site_env", lambda: {"CORP_DOMAINS": "corp.example.com"})
+    _with_tunnels(monkeypatch, {"id": "work", "name": "Работа", "mode": "list",
+                                "include": ["corp.example"]}, home)
     assert core._status()["split"] is True
 
-    monkeypatch.setattr(service.paths, "site_env", lambda: {"CORP_DOMAINS": "  ", "SB_LOG_LEVEL": ""})
+    _with_tunnels(monkeypatch, {"id": "work", "name": "Работа", "mode": "list",
+                                "exclude": ["198.51.100.7"]}, home)
+    assert core._status()["split"] is True
+
+    # «Мимо VPN» у основного — не раздельное туннелирование рабочей сети.
+    _with_tunnels(monkeypatch, {"id": "work", "name": "Работа", "mode": "list"}, home)
     assert core._status()["split"] is False
 
-    # Нет файла — site_env отдаёт пустой словарь.
-    monkeypatch.setattr(service.paths, "site_env", dict)
+    _with_tunnels(monkeypatch, home)
     assert core._status()["split"] is False
+
+
+def test_статус_отдаёт_туннели_без_их_правил(monkeypatch):
+    core = _core(monkeypatch, up=False)
+    _quiet(monkeypatch, core)
+    _with_tunnels(monkeypatch, {"id": "work", "name": "Работа", "mode": "list",
+                                "active": "corp", "include": ["corp.example"]})
+    monkeypatch.setattr(service.tunnels, "list_confs",
+                        lambda tid: ["corp", "old"] if tid == "work" else [])
+
+    assert core._status()["tunnels"] == [
+        {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
+         "confs": ["corp", "old"]}]
 
 
 def test_после_включения_снимок_уже_с_туннелем(monkeypatch):

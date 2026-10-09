@@ -412,12 +412,12 @@ def build(tmp_path, monkeypatch):
         data = tunnels.validate({"log_level": level, "tunnels": items})
         confs = {t["id"]: _write(tmp_path, f"{t['id']}.conf", texts[t["id"]])
                  for t in data["tunnels"]}
-        ids = buildconfig.build(data, confs, str(tmp_path / "config.json"),
-                                log=lambda line: None)
+        built = buildconfig.build(data, confs, str(tmp_path / "config.json"),
+                                  log=lambda line: None)
         main = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
         return main, {tid: json.loads(open(buildconfig.side_json(tid),
                                            encoding="utf-8").read())
-                      for tid in ids}
+                      for tid, _ in built}
     return run
 
 
@@ -431,6 +431,7 @@ def test_каждый_туннель_живёт_в_своём_конфиге(bui
 
     assert "endpoints" not in main
     assert list(sides) == ["work", "lab", "home"]
+    assert buildconfig.main_id(main) == "home"
     for tid, cfg in sides.items():
         assert [e["tag"] for e in cfg["endpoints"]] == [f"wg-{tid}"]
         assert cfg["route"]["final"] == f"wg-{tid}"
@@ -549,7 +550,7 @@ def test_туннель_без_конфига_пропускается(build, tm
     lines = []
 
     assert buildconfig.build(data, confs, str(tmp_path / "c.json"),
-                             log=lines.append) == ["home"]
+                             log=lines.append) == [("home", "Home")]
     assert any("«Work»: конфига нет" in line for line in lines)
 
 
@@ -584,37 +585,38 @@ def test_socks_выход_в_статистике_под_тегом_туннел
 
 @pytest.fixture
 def state(tmp_path, monkeypatch):
-    """conf\\ и state\\ во временной папке, sing-box не запущен."""
+    """conf\\ и state\\ во временной папке, sing-box не запущен: рабочий
+    «по списку» и личный основной, по конфигу у каждого."""
     state = tmp_path / "state"
-    for kind, text in (("corp", CORP), ("personal", PERSONAL_AWG)):
-        d = tmp_path / "conf" / kind
-        d.mkdir(parents=True)
-        (d / f"{kind}.conf").write_text(text, encoding="utf-8")
-    monkeypatch.setattr(buildconfig, "CONF_CORP", str(tmp_path / "conf" / "corp"))
-    monkeypatch.setattr(buildconfig, "CONF_PERSONAL",
-                        str(tmp_path / "conf" / "personal"))
     monkeypatch.setattr(paths, "STATE", str(state))
+    monkeypatch.setattr(paths, "CONF", str(tmp_path / "conf"))
     monkeypatch.setattr(paths, "CONFIG_JSON", str(state / "config.json"))
     monkeypatch.setattr(paths, "TUNNELS_JSON", str(tmp_path / "conf" / "tunnels.json"))
     monkeypatch.setattr(paths, "CONF_TUNNELS", str(tmp_path / "conf" / "tunnels"))
     monkeypatch.setattr(buildconfig, "running_pid", lambda: "")
     monkeypatch.setattr(buildconfig.sys, "argv", ["buildconfig"])
-    for key in ("SB_PERSONAL", "SB_CORP_EXCLUDE", "CORP_DOMAINS", "SB_LOG_LEVEL"):
-        monkeypatch.delenv(key, raising=False)
+    for tid, text in (("work", CORP), ("home", PERSONAL_AWG)):
+        _conf(tmp_path, tid, f"{tid}-1", text)
+    tunnels.save({"tunnels": [
+        _tunnel("work", "list", ["corp.example"], ["10.10.5.9"]),
+        _tunnel("home", "all")]})
     return state
+
+
+def _conf(tmp_path, tid, name, text):
+    d = tmp_path / "conf" / "tunnels" / tid
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.conf").write_text(text, encoding="utf-8")
 
 
 def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_без_tunnels_json_собирает_рабочий_и_личный_из_site_env(state, monkeypatch):
-    """До переезда правила из site.env дают ту же сборку, что дал бы migrate."""
-    monkeypatch.setenv("CORP_DOMAINS", "corp.example")
-    monkeypatch.setenv("SB_CORP_EXCLUDE", "10.10.5.9")
+def test_собирает_туннели_из_tunnels_json(state):
+    built = buildconfig.main(log=lambda line: None)
 
-    buildconfig.main(log=lambda line: None)
-
+    assert built == [("work", "Work"), ("home", "Home")]
     main = _load(state / "config.json")
     assert buildconfig.side_ids(main) == ["work", "home"]
     assert (state / "tunnel-work.json").exists()
@@ -622,25 +624,50 @@ def test_без_tunnels_json_собирает_рабочий_и_личный_и�
     rule = next(r for r in main["route"]["rules"] if r.get("outbound") == "socks-work")
     assert rule["rules"][0]["domain_suffix"] == ["corp.example"]
     assert rule["rules"][1] == {"ip_cidr": ["10.10.5.9/32"], "invert": True}
-    assert _by_tag(main["outbounds"], "out")["default"] == buildconfig.PERSONAL_SOCKS_TAG
+    assert _by_tag(main["outbounds"], "out")["default"] == "socks-home"
+    assert buildconfig.main_id(main) == "home"
 
 
-def test_без_рабочего_конфига_старая_сборка_отказывает(state, tmp_path):
-    """Окно до переезда тоже не даёт включить без рабочего конфига."""
-    (tmp_path / "conf" / "corp" / "corp.conf").unlink()
-    with pytest.raises(SystemExit, match="рабочий конфиг не добавлен"):
+def test_старые_папки_типов_сборка_не_читает(state, tmp_path):
+    """После переезда conf\\corp и conf\\personal не источник: без tunnels.json
+    туннелей нет, а не «рабочий и личный как раньше»."""
+    (tmp_path / "conf" / "tunnels.json").unlink()
+    for kind, text in (("corp", CORP), ("personal", PERSONAL_AWG)):
+        d = tmp_path / "conf" / kind
+        d.mkdir(parents=True)
+        (d / f"{kind}.conf").write_text(text, encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="ни у одного туннеля нет конфига"):
         buildconfig.main(log=lambda line: None)
 
 
-def test_с_tunnels_json_собирает_из_него(state, tmp_path):
-    d = tmp_path / "conf" / "tunnels" / "lab"
-    d.mkdir(parents=True)
-    (d / "lab-1.conf").write_text(LAB, encoding="utf-8")
-    tunnels.save({"tunnels": [_tunnel("lab", "list")]})
+def test_несколько_конфигов_без_выбора_это_внятная_ошибка(state, tmp_path):
+    _conf(tmp_path, "home", "home-2", PERSONAL_AWG)
+    with pytest.raises(SystemExit, match="выбери один"):
+        buildconfig.main(log=lambda line: None)
+
+
+def test_выбранный_конфиг_берётся_из_active(state, tmp_path):
+    _conf(tmp_path, "home", "home-2", PERSONAL_AWG.replace("203.0.113.5", "203.0.113.6"))
+    data = tunnels.load()
+    tunnels.find(data, "home")["active"] = "home-2"
+    tunnels.save(data)
 
     buildconfig.main(log=lambda line: None)
 
-    assert buildconfig.side_ids(_load(state / "config.json")) == ["lab"]
+    side = _load(state / "tunnel-home.json")
+    assert side["endpoints"][0]["peers"][0]["address"] == "203.0.113.6"
+
+
+def test_с_одним_туннелем_по_списку_собирает_только_его(state, tmp_path):
+    _conf(tmp_path, "lab", "lab-1", LAB)
+    tunnels.save({"tunnels": [_tunnel("lab", "list")]})
+
+    assert buildconfig.main(log=lambda line: None) == [("lab", "Lab")]
+
+    main = _load(state / "config.json")
+    assert buildconfig.side_ids(main) == ["lab"]
+    assert buildconfig.main_id(main) is None
 
 
 def test_испорченный_tunnels_json_это_внятная_ошибка(state, tmp_path):
@@ -659,20 +686,21 @@ def test_старые_и_лишние_боковые_конфиги_удаляю
 
     assert sorted(p.name for p in state.iterdir()) == [
         "config.json", "status.json", "tunnel-home.json", "tunnel-work.json"]
-# -------------------------------------------------------------- мелочи
 
-@pytest.mark.parametrize("value, level", [
-    (None, "info"), ("", "info"), ("debug", "debug"), (" DEBUG ", "debug"),
-    ("verbose", "info"),
+
+@pytest.mark.parametrize("cfg", [
+    {},
+    {"outbounds": [{"type": "direct", "tag": "direct"}]},
+    {"outbounds": [{"type": "selector", "tag": "out", "default": "direct"}]},
 ])
-def test_уровень_журнала_из_site_env(monkeypatch, value, level):
-    if value is None:
-        monkeypatch.delenv("SB_LOG_LEVEL", raising=False)
-    else:
-        monkeypatch.setenv("SB_LOG_LEVEL", value)
+def test_без_основного_туннеля_main_id_пуст(cfg):
+    assert buildconfig.main_id(cfg) is None
 
-    assert buildconfig.log_level() == level
 
+def test_личный_по_умолчанию_для_старой_установки_не_зависит_от_порядка():
+    assert buildconfig.legacy_default_personal(["awg-b", "nl-1", "awg-a"]) == "awg-a"
+    assert buildconfig.legacy_default_personal(["nl-1"]) == ""
+# -------------------------------------------------------------- мелочи
 
 def test_split_list_режет_по_запятой_и_чистит_пробелы():
     assert buildconfig.split_list(" a , b ,, c ") == ["a", "b", "c"]

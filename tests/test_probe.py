@@ -264,11 +264,29 @@ def _slow_parts(monkeypatch, up=True, **st):
                         lambda self: self.set(tun=45 if up else None, r_low=up))
 
 
+def _work(**over):
+    t = {"id": "work", "name": "Работа", "mode": "list", "include": []}
+    t.update(over)
+    return t
+
+
+def _home(**over):
+    t = {"id": "home", "name": "Личный", "mode": "all"}
+    t.update(over)
+    return t
+
+
+def _tunnels(monkeypatch, *items):
+    """tunnels.json с этими туннелями — без записи на диск."""
+    data = probe.tunnels.validate({"tunnels": list(items)})
+    monkeypatch.setattr(probe.tunnels, "load", lambda: data)
+
+
 def test_итог_проверки_сети_в_журнале(monkeypatch):
     _slow_parts(monkeypatch, exit_ip="185.1.2.3", exit_country="NL",
                 exit_state="tunnel", corp_ip="10.1.1.1", corp_http="",
                 v6_leak="2a00::1")
-    monkeypatch.setattr(probe.paths, "site_env", lambda: {"CORP_PROBE": "corp.example"})
+    _tunnels(monkeypatch, _work(include=["corp.example"]), _home())
     logged = []
 
     probe.Prober(logged.append).probe_slow()
@@ -284,7 +302,7 @@ def test_туннель_опустился_во_время_проверки_вы
     # 13:52 06.10: проверку начали при живом туннеле, кончили после его
     # остановки — адрес провайдера ушёл в журнал с меткой «tunnel».
     _slow_parts(monkeypatch, up=False, exit_ip="46.242.14.241", exit_state="tunnel")
-    monkeypatch.setattr(probe.paths, "site_env", lambda: {})
+    _tunnels(monkeypatch)
     logged = []
     p = probe.Prober(logged.append)
 
@@ -294,16 +312,16 @@ def test_туннель_опустился_во_время_проверки_вы
     assert "выход 46.242.14.241, unknown" in logged[0]
 
 
-def test_итог_без_хоста_корпа_так_и_пишет(monkeypatch):
+def test_итог_без_домена_в_пускать_так_и_пишет(monkeypatch):
     _slow_parts(monkeypatch)
-    monkeypatch.setattr(probe.paths, "site_env", lambda: {})
+    _tunnels(monkeypatch, _work(include=["198.51.100.0/24"]), _home())
     logged = []
 
     probe.Prober(logged.append).probe_slow()
 
     [line] = logged
     assert "выход не узнал" in line
-    assert "CORP_PROBE не задан" in line
+    assert "корп не проверял (в «пускать» нет домена)" in line
     assert "IPv6 без утечки" in line
 
 
@@ -369,20 +387,87 @@ def test_dns_ask_потерянный_пакет_повторяется(monkeypa
 
 def test_corp_answer_спрашивает_корп_dns_из_конфига(monkeypatch):
     asked = []
-    monkeypatch.setattr(probe.paths, "site_env", lambda: {"CORP_PROBE": "git.corp"})
+    _tunnels(monkeypatch, _work(include=["git.corp.example"]))
     monkeypatch.setattr(probe.Prober, "corp_dns", lambda self: "10.0.0.1")
     monkeypatch.setattr(probe.winnet, "resolve4_via",
                         lambda name, server, timeout: asked.append((name, server))
                         or "10.0.0.8")
 
     assert probe.Prober().corp_answer() == "10.0.0.8"
-    assert asked == [("git.corp", "10.0.0.1")]
+    assert asked == [("git.corp.example", "10.0.0.1")]
 
 
-def test_corp_answer_без_corp_probe_не_спрашивает(monkeypatch):
-    monkeypatch.setattr(probe.paths, "site_env", lambda: {})
+def test_corp_answer_без_домена_в_пускать_не_спрашивает(monkeypatch):
+    _tunnels(monkeypatch, _work(include=["198.51.100.0/24"]))
     monkeypatch.setattr(probe.Prober, "corp_dns", lambda self: "10.0.0.1")
     monkeypatch.setattr(probe.winnet, "resolve4_via",
-                        lambda *a, **kw: pytest.fail("спросил без CORP_PROBE"))
+                        lambda *a, **kw: pytest.fail("спросил без домена"))
 
     assert probe.Prober().corp_answer() == ""
+
+
+def test_corp_probe_первый_домен_первого_туннеля_по_списку(monkeypatch):
+    _tunnels(monkeypatch,
+             _work(include=["198.51.100.7", "*.corp.example", "git.corp.example",
+                            "wiki.corp.example"]),
+             _work(id="work-2", include=["other.example"]),
+             _home())
+
+    assert probe.Prober.corp_probe() == "git.corp.example"
+
+
+@pytest.mark.parametrize("items", [
+    [],
+    [{"id": "home", "name": "Личный", "mode": "all"}],
+    [{"id": "work", "name": "Работа", "mode": "list", "include": ["*.corp.example"]}],
+])
+def test_corp_probe_пусто_когда_проверять_нечем(monkeypatch, items):
+    _tunnels(monkeypatch, *items)
+
+    assert probe.Prober.corp_probe() == ""
+
+
+def test_испорченный_tunnels_json_проверку_не_роняет(monkeypatch):
+    def broken():
+        raise ValueError("tunnels.json не читается")
+    monkeypatch.setattr(probe.tunnels, "load", broken)
+
+    assert probe.Prober.corp_probe() == ""
+    assert probe.Prober.current_profile() == ""
+
+
+def test_профиль_это_активный_конфиг_основного_туннеля(monkeypatch):
+    _tunnels(monkeypatch, _work(active="corp"), _home(active="nl-1"))
+    assert probe.Prober.current_profile() == "nl-1"
+
+    _tunnels(monkeypatch, _work(active="corp"))
+    assert probe.Prober.current_profile() == ""
+
+
+def _exit(monkeypatch, tmp_path, ip, real, main_id):
+    """Проверка выхода: сервис отвечает ip, без VPN наш адрес real."""
+    real_file = tmp_path / "real_ip"
+    real_file.write_text(real, encoding="utf-8")
+    monkeypatch.setattr(probe.paths, "REAL_IP_FILE", str(real_file))
+    monkeypatch.setattr(probe.Prober, "_exit_info", lambda self: {"ip": ip})
+    monkeypatch.setattr(probe.Prober, "peer_addrs", lambda self: {
+        "wg-work": "198.51.100.7", "wg-home": "203.0.113.9"})
+    monkeypatch.setattr(probe.Prober, "main_tag",
+                        staticmethod(lambda: probe.buildconfig.ep_tag(main_id)
+                                     if main_id else ""))
+    p = probe.Prober()
+    p._slow_exit()
+    return p.snapshot()["exit_state"]
+
+
+def test_выход_адресом_сервера_основного_это_туннель(monkeypatch, tmp_path):
+    # Одноногий сервер: адрес выхода совпал с адресом пира основного туннеля.
+    assert _exit(monkeypatch, tmp_path, "203.0.113.9", "203.0.113.9", "home") == "tunnel"
+
+
+def test_адрес_сервера_не_основного_туннеля_выходом_не_считается(monkeypatch, tmp_path):
+    assert _exit(monkeypatch, tmp_path, "198.51.100.7", "198.51.100.7", "home") == "leak"
+
+
+def test_без_основного_туннеля_совпадение_с_пиром_не_в_счёт(monkeypatch, tmp_path):
+    assert _exit(monkeypatch, tmp_path, "203.0.113.9", "203.0.113.9", None) == "leak"
