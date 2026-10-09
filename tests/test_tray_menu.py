@@ -99,22 +99,22 @@ def _hooked(calls, monkeypatch):
     return app.icon._message_handlers[win32.WM_NOTIFY], win32
 
 
-def test_двойной_левый_клик_открывает_окно(monkeypatch):
-    calls = []
-    notify, _ = _hooked(calls, monkeypatch)
-
-    notify(0, tray.WM_LBUTTONDBLCLK)
-
-    assert calls == [("window", None)]
-
-
-def test_одиночный_левый_клик_окно_не_открывает(monkeypatch):
+def test_одиночный_левый_клик_открывает_окно(monkeypatch):
     calls = []
     notify, win32 = _hooked(calls, monkeypatch)
 
     notify(0, win32.WM_LBUTTONUP)
 
-    assert calls == [("orig", win32.WM_LBUTTONUP)]
+    assert calls == [("window", None)]
+
+
+def test_двойной_левый_клик_сам_окно_не_открывает(monkeypatch):
+    calls = []
+    notify, _ = _hooked(calls, monkeypatch)
+
+    notify(0, tray.WM_LBUTTONDBLCLK)
+
+    assert calls == []
 
 
 def test_длинное_имя_обрезается_а_пустое_зовёт_добавить():
