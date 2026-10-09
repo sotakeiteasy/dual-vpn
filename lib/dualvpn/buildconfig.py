@@ -32,6 +32,7 @@ import threading
 
 # Раскладку знает paths.py — здесь только имена.
 from . import paths, winnet
+from .tunnels import LOG_LEVELS, NAME_MAX, check_name, safe_name
 
 BASE = paths.BASE
 CONF = paths.CONF
@@ -70,47 +71,10 @@ AWG_MTU_MAX = 1280
 _LEGACY_CORP_PAT = (r"^corp\.conf$", r"^wg[-_0-9].*\.conf$", r"^wg\.conf$")
 _LEGACY_PERSONAL_PAT = (r"^personal\.conf$", r"^(awg|amnezia).*\.conf$")
 
-# Имя конфига — это имя файла. В Windows в нём запрещены эти знаки и
-# управляющие символы, а CON, NUL, COM1… — имена устройств: файл nul.conf
-# не создать вовсе. Длину режем, чтобы путь в ProgramData не упёрся в MAX_PATH.
-_BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_RESERVED = {"CON", "PRN", "AUX", "NUL",
-             *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
-NAME_MAX = 80
-
-
 def conf_dir(kind):
     if kind not in KINDS:
         raise ValueError(f"неизвестный тип конфига: {kind!r}")
     return CONF_CORP if kind == "corp" else CONF_PERSONAL
-
-
-def safe_name(name):
-    """Имя, под которым конфиг ляжет в conf\\<тип>\\, из имени файла человека.
-
-    Не отказывает никогда: недопустимые знаки становятся «_», пустое имя —
-    «config». Так добавление не ломается из-за имени, как у wg-quick, где
-    неподходящее имя файла — это ошибка.
-    """
-    stem = (name or "").strip()
-    if stem.lower().endswith(".conf"):
-        stem = stem[:-5]
-    stem = _BAD_CHARS.sub("_", stem)
-    # Точка и пробел в конце Windows молча отрезает: «nl.» и «nl» стали бы
-    # одним файлом, а ссылка в профиле — на несуществующий.
-    stem = stem[:NAME_MAX].strip(" .")
-    if stem.split(".")[0].upper() in _RESERVED:
-        stem = f"_{stem}"
-    return stem or "config"
-
-
-def check_name(name):
-    """Имя, пришедшее через канал, должно быть уже безопасным — то, что мы
-    сами отдали в списке. Иначе «..\\..\\Windows» стал бы записью с правами
-    системы."""
-    if not name or safe_name(name) != name:
-        raise ValueError(f"недопустимое имя конфига: {name!r}")
-    return name
 
 
 def list_confs(kind):
@@ -629,11 +593,8 @@ def running_pid():
         return ""
 
 
-# Уровни журнала sing-box. Чужое слово в site.env не должно ронять запуск:
-# sing-box check отверг бы весь конфиг из-за опечатки в диагностическом ключе.
-LOG_LEVELS = ("trace", "debug", "info", "warn", "error", "fatal", "panic")
-
-
+# Чужое слово в site.env не должно ронять запуск: sing-box check отверг бы
+# весь конфиг из-за опечатки в диагностическом ключе.
 def log_level():
     """SB_LOG_LEVEL из site.env: debug — когда ищем причину сбоя, иначе info.
     Статистика адресов и сторож службы читают строки info и error — выше

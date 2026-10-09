@@ -43,6 +43,10 @@ CONF = os.path.join(DATA, "conf")
 # это конфиг или личный, и файл сохраняет своё имя каким пришёл.
 CONF_CORP = os.path.join(CONF, "corp")
 CONF_PERSONAL = os.path.join(CONF, "personal")
+# Туннели — слоты с правилами (tunnels.py): список в tunnels.json, конфиги
+# каждого — в conf\tunnels\<id>\.
+TUNNELS_JSON = os.path.join(CONF, "tunnels.json")
+CONF_TUNNELS = os.path.join(CONF, "tunnels")
 STATE = os.path.join(DATA, "state")
 LOGS = os.path.join(STATE, "logs")
 
