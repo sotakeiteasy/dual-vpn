@@ -112,7 +112,15 @@ class Api:
         # отрисованным, — без него виден весь старт WebView2 с рывками.
         self.cold = False
         # Где окну встать при первом показе; до него оно за краем экрана.
-        self.home = None
+        # С подчёркиванием: публичные атрибуты js_api pywebview обходит, и .NET
+        # Point уводил его в рекурсию home.Empty.Empty… на каждой загрузке.
+        self._home = None
+        # Показ уже просили. Сигнал трея и запасной таймер бывают раньше
+        # before_show: 9 октября двойной клик сразу после входа застал форму
+        # несозданной, _unpark вернуть было нечего, а _park потом увёл окно за
+        # край — открыто, в панели задач есть, на экране нет.
+        self._show_wanted = False
+        self._park_lock = threading.Lock()
 
     # ------------------------------------------------------- приём из JS
 
@@ -517,25 +525,32 @@ def _park(window, api):
     оно не выходит: после UAC сначала мелькало белое пред-окно, потом само
     окно. За краем экрана этот показ никто не видит. Зовётся в before_show:
     оно идёт в потоке окна до этого Show. Место в центре рабочего стола
-    запоминаем — его вернёт _unpark.
+    запоминаем — его вернёт _unpark. Показ уже просили — не уводим: вернуть
+    окно было бы некому.
     """
-    try:
-        from System.Drawing import Point
-        from System.Windows.Forms import FormStartPosition, Screen
-        form = window.native
-        area = Screen.PrimaryScreen.WorkingArea
-        api.home = Point(area.X + max(0, area.Width - form.Width) // 2,
-                         area.Y + max(0, area.Height - form.Height) // 2)
-        form.StartPosition = FormStartPosition.Manual
-        form.Location = Point(-32000, -32000)
-    except Exception:
-        api.home = None
+    with api._park_lock:
+        if api._show_wanted:
+            return
+        try:
+            from System.Drawing import Point
+            from System.Windows.Forms import FormStartPosition, Screen
+            form = window.native
+            area = Screen.PrimaryScreen.WorkingArea
+            api._home = Point(area.X + max(0, area.Width - form.Width) // 2,
+                              area.Y + max(0, area.Height - form.Height) // 2)
+            form.StartPosition = FormStartPosition.Manual
+            form.Location = Point(-32000, -32000)
+        except Exception:
+            api._home = None
 
 
 def _unpark(window, api):
     """Перед первым показом — на место из _park. Дальше окно стоит там,
-    куда его передвинули."""
-    home, api.home = api.home, None
+    куда его передвинули. Замок — только на флаг и место: Invoke под ним
+    ждал бы поток окна, а тот может ждать замок в _park."""
+    with api._park_lock:
+        api._show_wanted = True
+        home, api._home = api._home, None
     if home is None:
         return
     try:

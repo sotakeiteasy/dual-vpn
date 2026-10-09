@@ -101,6 +101,8 @@ def test_спрятанное_окно_по_сигналу_обновляетс�
 
 class _Form:
     Location = (52, 52)
+    Width, Height = 1040, 720
+    StartPosition = None
 
     def Invoke(self, action):
         action()
@@ -119,7 +121,7 @@ def test_холодное_окно_встаёт_на_место_до_показ�
     api, _, shown = _api(monkeypatch)
     win = _parked(monkeypatch, shown)
     api.holder["window"] = win
-    api.cold, api.home = True, (440, 180)
+    api.cold, api._home = True, (440, 180)
     win.show = lambda: shown.append(("show", win.native.Location))
 
     api.reveal()
@@ -129,13 +131,59 @@ def test_холодное_окно_встаёт_на_место_до_показ�
 def test_место_возвращается_только_при_первом_показе(monkeypatch):
     api, _, shown = _api(monkeypatch)
     win = _parked(monkeypatch, shown)
-    api.home = (440, 180)
+    api._home = (440, 180)
 
     window._show(win, api)
     win.native.Location = (900, 300)          # пользователь передвинул окно
     api.hidden = True                         # и закрыл крестиком
     window._show(win, api)
     assert win.native.Location == (900, 300)
+
+
+def _forms(monkeypatch):
+    """Заглушки WinForms для _park: рабочий стол 2560×1400."""
+    monkeypatch.setitem(sys.modules, "System.Drawing",
+                        types.SimpleNamespace(Point=lambda x, y: (x, y)))
+    area = types.SimpleNamespace(X=0, Y=0, Width=2560, Height=1400)
+    monkeypatch.setitem(sys.modules, "System.Windows.Forms", types.SimpleNamespace(
+        FormStartPosition=types.SimpleNamespace(Manual="manual"),
+        Screen=types.SimpleNamespace(
+            PrimaryScreen=types.SimpleNamespace(WorkingArea=area))))
+
+
+def test_прогретое_окно_по_сигналу_встаёт_в_центр(monkeypatch):
+    api, _, shown = _api(monkeypatch)
+    win = _parked(monkeypatch, shown)
+    _forms(monkeypatch)
+    api.hidden = True
+
+    window._park(win, api)
+    assert win.native.Location == (-32000, -32000)
+    window._show(win, api)
+    assert win.native.Location == (760, 340)
+
+
+def test_показ_раньше_before_show_не_оставляет_окно_за_краем(monkeypatch):
+    """9 октября двойной клик сразу после входа пришёл раньше before_show:
+    _unpark было нечего вернуть, _park увёл форму за край, и окно в панели
+    задач есть, а на экране нет."""
+    api, _, shown = _api(monkeypatch)
+    win = _parked(monkeypatch, shown)
+    _forms(monkeypatch)
+    api.hidden = True
+
+    window._show(win, api)
+    window._park(win, api)
+
+    assert win.native.Location == (52, 52)
+
+
+def test_место_окна_мосту_pywebview_не_видно():
+    """Публичные атрибуты js_api pywebview обходит рекурсивно: .NET Point
+    давал home.Empty.Empty… до переполнения стека на каждой загрузке."""
+    api = window.Api({})
+
+    assert not [n for n in vars(api) if "home" in n and not n.startswith("_")]
 
 
 def test_включение_сразу_перерисовывает_статус(monkeypatch):
