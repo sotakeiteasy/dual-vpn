@@ -53,9 +53,8 @@ def test_показанное_окно_на_ready_проверяет_тунне�
     assert "check" in [op for op, _ in calls]
 
 
-def test_проверка_окна_переводит_туннели_в_стороны_страницы(monkeypatch):
-    """Страница до шага окна знает только corp/personal: второй «по списку»
-    в стороны не попадает."""
+def test_проверка_окна_отдаёт_странице_ждущие_id_туннелей(monkeypatch):
+    """Плитки — по id туннеля: каждый перекрашивается, как только проверен он сам."""
     api, _, _ = _api(monkeypatch)
     sent = []
     monkeypatch.setattr(api, "jsn", lambda fn, args: sent.append((fn, args[1])))
@@ -70,7 +69,7 @@ def test_проверка_окна_переводит_туннели_в_стор
 
     api._check()
 
-    assert sent == [("checkSides", ["personal"]), ("checkSides", ["corp"]),
+    assert sent == [("checkSides", ["home", "lab"]), ("checkSides", ["work"]),
                     ("checkSides", [])]
 
 

@@ -117,6 +117,15 @@ def test_статус_отдаёт_туннели_без_их_правил(monke
          "check": "", "answer": "", "seq": 0, "last": "", "checking": False}]
 
 
+def test_статус_отдаёт_уровень_журнала_для_галочки_окна(monkeypatch):
+    core = _core(monkeypatch, up=False)
+    _quiet(monkeypatch, core)
+    data = tunnels.validate({"log_level": "debug", "tunnels": []})
+    monkeypatch.setattr(service.Core, "_tunnels", staticmethod(lambda: data))
+
+    assert core._status()["log_level"] == "debug"
+
+
 def test_итог_проверки_по_туннелям_проверенный_уже_не_ждёт(monkeypatch):
     core = _core(monkeypatch, up=True)
     _quiet(monkeypatch, core)

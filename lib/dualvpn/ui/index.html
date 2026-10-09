@@ -35,55 +35,48 @@ html, body { height: 100%; margin: 0; background: var(--bg); }
 body {
   font: 14px/1.5 var(--sans);
   color: var(--text); background: var(--bg);
-  display: grid; grid-template-columns: 340px 1fr; height: 100vh;
+  display: grid; grid-template-rows: auto 1fr; height: 100vh;
   overflow: hidden;                    /* прокручивается содержимое, не окно */
   -webkit-user-select: none; user-select: none;
 }
-/* min-height:0 обязателен: без него flex-потомок не сжимается ниже своего
-   содержимого, прокрутка уезжает на всё окно и обе панели едут вместе. */
-#side, #logs, #lines, #how { min-height: 0; }
+/* min-height:0 обязателен: без него потомок сетки не сжимается ниже своего
+   содержимого, и прокрутка уезжает на всё окно. */
+.pane, #lines { min-height: 0; }
+.pane { overflow-y: auto; }
 
-/* ------------------------------------------------------------ левая часть */
-#side { display: flex; flex-direction: column; gap: 12px; padding: 14px; overflow-y: auto; }
+/* ---------------------------------------------------------------- вкладки */
+#tabs { display: flex; gap: 2px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.tab { flex: none; font-size: 13px; font-weight: 500; padding: 5px 12px;
+       border: none; background: none; color: var(--dim); border-radius: 6px; }
+.tab:hover { background: var(--hover); color: var(--text); }
+.tab.on { background: var(--pressed); color: var(--text); }
+
+/* ---------------------------------------------------------------- туннели */
+#pane-tunnels, #tiles-wrap { display: flex; flex-direction: column; gap: 12px; }
+#pane-tunnels { padding: 14px 18px 18px; }
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
 
 /* Главное состояние: крупно, одной фразой, чтобы читалось с расстояния. */
-#state { padding: 13px 14px; display: flex; gap: 11px; align-items: flex-start; }
-/* Разделитель вместо зазора: состояние и туннели — про одно и то же,
-   отдельными карточками они читались как два несвязанных блока. */
-#tunnels { border-top: 1px solid var(--line); }
-#dot { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; flex: none;
+#state { padding: 13px 14px; display: flex; gap: 11px; align-items: center; }
+#state-text { flex: 1; min-width: 0; }
+#dot { width: 11px; height: 11px; border-radius: 50%; flex: none;
        background: var(--off); box-shadow: 0 0 0 3px transparent; }
 #dot.ok   { background: var(--ok);   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 #dot.warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
 #dot.bad  { background: var(--bad);  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
 #state-title { font-size: 16px; font-weight: 600; letter-spacing: -0.1px; }
 #state-sub   { color: var(--dim); margin-top: 2px; }
-
-/* Туннели: две строки, каждая со своим состоянием — корп отдельно от личного. */
-.tun { display: flex; align-items: baseline; gap: 8px; padding: 9px 14px; }
-.tun + .tun { border-top: 1px solid var(--line); }
-.tun-name { width: 66px; color: var(--dim); flex: none; }
-.tun-val  { font-variant-numeric: tabular-nums; }
-.tun-val.dim { color: var(--dim); }
-.chip { font-size: 12px; padding: 1px 8px; border-radius: 20px; margin-left: auto; flex: none; }
-.chip.ok  { color: var(--ok);   background: color-mix(in srgb, var(--ok) 14%, transparent); }
-.chip.bad { color: var(--bad);  background: color-mix(in srgb, var(--bad) 14%, transparent); }
-.chip.off { color: var(--dim);  background: color-mix(in srgb, var(--off) 20%, transparent); }
-.chip.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
-#btn-check { flex: none; padding-inline: 9px; }
+#btn-check { padding-inline: 9px; }
 #btn-check svg { width: 14px; height: 14px; display: block; }
 #btn-check.spin svg { animation: check-spin .9s linear infinite; }
 @keyframes check-spin { to { transform: rotate(360deg); } }
 
-#actions { display: flex; gap: 7px; }
-/* flex:1 у button задумано для строк кнопок; прямой потомок колонки от него
-   растягивался на всю свободную высоту. Отрицательный отступ подтягивает
-   кнопку к своему списку: общий gap колонки в 12px здесь слишком велик и
-   кнопка выглядела отдельной от раздела, к которому относится. */
-#side > button, #confs-wrap > button { flex: none; margin-top: -5px; }
-#confs-wrap { display: flex; flex-direction: column; gap: 12px; }
+#actions { display: flex; gap: 7px; flex: none; }
+/* flex:1 у button задуман для строк кнопок; в строке состояния и в колонке
+   вкладки кнопка берёт ширину по своей подписи. */
+#state button, #pane-tunnels > button { flex: none; }
+#pane-tunnels > button { align-self: flex-start; }
 button {
   font: inherit; font-weight: 500; color: var(--text); flex: 1;
   padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line);
@@ -102,55 +95,36 @@ button.primary { background: var(--accent); border-color: transparent; color: va
                  font-weight: 600; }
 button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 85%, white); }
 
-/* При поднятом туннеле конфиги не трогаются: смена файла всё равно
-   подействует только после перезапуска, а полупроходной режим («поменял,
-   а работает старое») уже один раз всех запутал. Гасим весь блок целиком —
-   так понятнее, чем поштучно выключенные кнопки. */
-#confs-wrap.locked { opacity: 0.45; pointer-events: none; }
-#lockhint { color: var(--dim); padding: 2px 3px 0; }
-/* Автозапуск — настройка, а не действие: флажком под кнопками, без рамки,
-   чтобы не спорить с «Включить» за внимание. */
-#autostart-row { display: flex; gap: 7px; align-items: center; color: var(--dim);
-                 padding: 0 3px; margin-top: -4px; cursor: pointer; }
-#autostart-row input { margin: 0; accent-color: var(--accent); }
-/* Подвал колонки: версия нужна, когда просят «а какая у тебя», но внимания
-   к себе требовать не должна. */
-#version { color: var(--dim); font-size: 12px; padding: 2px 3px 4px;
-           margin-top: auto; }
 h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
-     letter-spacing: 0.5px; color: var(--dim); margin: 4px 0 -2px 3px;
-     display: flex; align-items: center; gap: 5px; }
-.info { width: 14px; height: 14px; border-radius: 50%; flex: none; cursor: pointer;
-        border: 1px solid var(--dim); color: var(--dim); font-size: 10px;
-        font-weight: 700; text-transform: none;
-        /* inline-flex вместо line-height: буква «i» узкая, и при центровании
-           текстом она уезжала влево от центра кружка. */
-        display: inline-flex; align-items: center; justify-content: center;
-        padding-left: 0.5px; }
-.info:hover { border-color: var(--accent); color: var(--accent); }
-.warnline { color: var(--warn); padding: 8px 12px; }
+     letter-spacing: 0.5px; color: var(--dim); margin: 4px 0 -4px 3px; }
 
-/* Конфиги: список с пометкой активного и кнопкой добавления. */
-.conf { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; }
-.conf + .conf { border-top: 1px solid var(--line); }
-.conf:hover { background: var(--hover); }
-.conf-radio { width: 13px; height: 13px; border-radius: 50%; flex: none;
-              border: 1.5px solid var(--dim); }
-.conf.active .conf-radio { border-color: var(--accent); background: var(--accent);
-                           box-shadow: inset 0 0 0 2.5px var(--panel); }
-/* У рабочего выбора нет: галочка вместо переключателя, чтобы не звало нажать.
-   .conf впереди нужен для специфичности: иначе .conf.active .conf-radio
-   красит под галочкой кружок акцентом. */
-.conf .conf-radio.fixed { border: none; background: none; box-shadow: none; color: var(--ok); }
-.conf.active .conf-radio.fixed::before { content: '✓'; font-size: 12px; }
-.conf[data-pick="0"] { cursor: default; }
-.conf[data-pick="0"]:hover { background: none; }
-.conf-name { flex: 1; }
-.conf-kind { font-size: 12px; color: var(--dim); }
-.conf-menu { flex: none; width: 24px; padding: 0; line-height: 18px; color: var(--dim);
+/* Плитки: до трёх в разделе — каждая во всю строку, чтобы имя конфига и
+   статус читались целиком; больше — сеткой. */
+.tiles { display: grid; gap: 8px; grid-template-columns: 1fr; }
+.tiles.many { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.tile { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; }
+.tile.pick { cursor: pointer; }
+.tile.pick:hover { background: var(--hover); }
+.tile-mark { width: 11px; height: 11px; border-radius: 50%; flex: none; margin-top: 5px;
+             background: var(--off); }
+.tile-mark.ok   { background: var(--ok); }
+.tile-mark.warn { background: var(--warn); }
+.tile-mark.bad  { background: var(--bad); }
+/* Запасной конфиг — пустой кружок переключателя: нажми, и он станет выбранным. */
+.tile-mark.spare { background: none; border: 1.5px solid var(--dim); }
+.tile-body { flex: 1; min-width: 0; }
+.tile-name { font-weight: 600; overflow-wrap: anywhere; }
+.tile-state { color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+.tile-state.ok   { color: var(--ok); }
+.tile-state.warn { color: var(--warn); }
+.tile-state.bad  { color: var(--bad); }
+.tile-add { flex: none; padding: 0; border: none; background: none; color: var(--accent);
+            font-size: 13px; }
+.tile-add:hover:not(:disabled) { background: none; text-decoration: underline; }
+.tile-menu { flex: none; width: 24px; padding: 0; line-height: 18px; color: var(--dim);
              background: none; border: none; border-radius: 5px; font-size: 15px; }
-.conf-menu:hover { background: var(--pressed); color: var(--text); }
-.emptyrow { padding: 11px 12px; color: var(--dim); }
+.tile-menu:hover { background: var(--pressed); color: var(--text); }
+.emptyrow { padding: 2px 3px; color: var(--dim); }
 
 #rowmenu { position: fixed; z-index: 20; background: var(--panel); padding: 4px;
            border: 1px solid var(--line); border-radius: 8px; min-width: 132px;
@@ -160,9 +134,8 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
 #rowmenu button:hover { background: var(--hover); }
 #rowmenu button.danger { color: var(--bad); }
 
-/* ------------------------------------------------------------ правая часть */
-#logs { display: flex; flex-direction: column; border-left: 1px solid var(--line);
-        background: var(--logbg); min-width: 0; overflow: hidden; }
+/* ---------------------------------------------------------------- журнал */
+#pane-log { display: flex; flex-direction: column; background: var(--logbg); overflow: hidden; }
 #logbar { display: flex; gap: 8px; align-items: center; padding: 9px 12px;
           border-bottom: 1px solid var(--line); }
 #search { flex: 1; font: inherit; padding: 4px 9px; border-radius: 6px;
@@ -186,14 +159,18 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
 .ln.head { color: var(--dim); }
 #empty { color: var(--dim); padding: 20px 14px; }
 
-#tabs { display: flex; gap: 2px; padding: 8px 10px 0; }
-.tab { flex: none; font-size: 13px; font-weight: 500; padding: 5px 12px;
-       border: none; background: none; color: var(--dim); border-radius: 6px; }
-.tab:hover { background: var(--hover); color: var(--text); }
-.tab.on { background: var(--pressed); color: var(--text); }
+/* -------------------------------------------------------------- настройки */
+#pane-settings { display: flex; flex-direction: column; gap: 10px; padding: 16px 22px 14px; }
+/* Настройки — флажками без рамки: это выбор, а не действие. */
+.check-row { display: flex; gap: 7px; align-items: center; cursor: pointer; }
+.check-row input { margin: 0; accent-color: var(--accent); }
+.check-hint { color: var(--dim); font-size: 12px; margin: -8px 0 0 20px; }
+/* Подвал: версия нужна, когда просят «а какая у тебя», но внимания к себе
+   требовать не должна. */
+#version { color: var(--dim); font-size: 12px; margin-top: auto; padding-top: 14px; }
 
-/* Раздел «как это работает»: читаемая колонка, не растягивается на всё окно. */
-#how { flex: 1; overflow-y: auto; padding: 4px 22px 28px; line-height: 1.6; }
+/* «Как подключиться» и «как это работает»: читаемая колонка, не на всё окно. */
+#how { line-height: 1.6; }
 #how > * { max-width: 660px; }
 #how h3 { font-size: 15px; margin: 22px 0 6px; letter-spacing: -0.1px; }
 #how h3:first-child { margin-top: 14px; }
@@ -213,7 +190,8 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
 #sheet { position: fixed; inset: 0; background: rgba(0, 0, 0, .6); display: none;
          align-items: center; justify-content: center; }
 #sheet.on { display: flex; }
-#sheet-box { background: var(--panel); border-radius: 12px; width: 480px;
+/* 640px — по подвалу «Туннелирования»: четыре кнопки в одну строку. */
+#sheet-box { background: var(--panel); border-radius: 12px; width: 640px;
              max-height: 74vh; display: flex; flex-direction: column;
              border: 1px solid var(--line); box-shadow: 0 12px 40px rgba(0, 0, 0, .6); }
 #sheet-head { padding: 13px 16px; border-bottom: 1px solid var(--line);
@@ -228,79 +206,79 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
               font: 13.5px/1.65 var(--sans);
               -webkit-user-select: text; user-select: text; }
 #sheet-foot { padding: 11px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; }
+#sheet-foot button { white-space: nowrap; }
 .field { display: block; margin-bottom: 14px; }
 .flabel { display: block; font-weight: 500; margin-bottom: 4px; }
-.field input { width: 100%; font: inherit; padding: 5px 9px; border-radius: 6px;
-               border: 1px solid var(--line); background: var(--bg); color: var(--text);
-               -webkit-user-select: text; user-select: text; }
-.field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.field textarea { width: 100%; min-height: 96px; resize: vertical; padding: 5px 9px;
+                  font: 12.5px/1.5 var(--mono); border-radius: 6px;
+                  border: 1px solid var(--line); background: var(--bg); color: var(--text);
+                  -webkit-user-select: text; user-select: text; }
+.field textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .fhint { display: block; color: var(--dim); font-size: 12px; margin-top: 3px; }
+.fnote { display: block; color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
+.fnote.warn { color: var(--warn); }
+#sheet-foot button.danger { color: var(--bad); }
 </style>
 
-<div id="side">
-  <div class="card">
-    <div id="state">
-      <div id="dot"></div>
-      <div>
-        <div id="state-title">соединяюсь…</div>
-        <div id="state-sub">&nbsp;</div>
-      </div>
-    </div>
-    <div id="tunnels"></div>
-  </div>
-
-  <button id="btn-install" class="primary" hidden>Установить службу…</button>
-
-  <div id="actions">
-    <button id="btn-toggle" class="primary">Включить</button>
-    <button id="btn-restart">Перезапустить</button>
-    <button id="btn-check" title="Проверить туннели сейчас" aria-label="Проверить туннели">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
-           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/>
-      </svg></button>
-  </div>
-  <label id="autostart-row"><input type="checkbox" id="autostart">
-    Включать VPN при запуске компьютера</label>
-
-  <div id="lockhint" hidden>выключи VPN, чтобы менять конфиги</div>
-  <div id="confs-wrap">
-  <h2>рабочий <span class="info" data-info="corp">i</span></h2>
-  <div class="card" id="confs-corp"></div>
-  <button data-add="corp" id="btn-corp">Добавить рабочий конфиг…</button>
-  <button id="btn-site">Раздельное туннелирование выключено</button>
-
-  <h2>личный <span class="info" data-info="personal">i</span></h2>
-  <div class="card" id="confs-personal"></div>
-  <button data-add="personal">Добавить личный конфиг…</button>
-  </div>
-  <div id="version"></div>
+<div id="tabs">
+  <button class="tab on" data-tab="tunnels">Туннели</button>
+  <button class="tab" data-tab="log">Журнал</button>
+  <button class="tab" data-tab="settings">Настройки</button>
 </div>
 
-<div id="logs">
-  <div id="tabs">
-    <button class="tab on" data-tab="log">Логи</button>
-    <button class="tab" data-tab="how">Как это работает</button>
+<div id="pane-tunnels" class="pane">
+  <div class="card" id="state">
+    <div id="dot"></div>
+    <div id="state-text">
+      <div id="state-title">соединяюсь…</div>
+      <div id="state-sub">&nbsp;</div>
+    </div>
+    <div id="actions">
+      <button id="btn-toggle" class="primary">Включить</button>
+      <button id="btn-restart">Перезапустить</button>
+      <button id="btn-check" title="Проверить туннели сейчас" aria-label="Проверить туннели">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/>
+        </svg></button>
+    </div>
+    <button id="btn-install" class="primary" hidden>Установить службу…</button>
   </div>
+
+  <div id="tiles-wrap">
+    <h2>Весь остальной трафик</h2>
+    <div class="tiles" id="tiles-all"></div>
+    <h2>По списку</h2>
+    <div class="tiles" id="tiles-list"></div>
+  </div>
+  <button id="btn-add">+ Добавить конфиг…</button>
+</div>
+
+<div id="pane-log" class="pane" hidden>
   <div id="logbar">
-    <input id="search" placeholder="поиск по логу" spellcheck="false">
+    <input id="search" placeholder="поиск по журналу" spellcheck="false">
     <label><input type="checkbox" id="only-err"> только ошибки</label>
     <span class="tzhint" title="время местное">UTC+3</span>
   </div>
-  <div id="lines"><div id="empty">лога пока нет</div></div>
-  <div id="how" hidden></div>
+  <div id="lines"><div id="empty">журнала пока нет</div></div>
+</div>
+
+<div id="pane-settings" class="pane" hidden>
+  <label class="check-row" id="autostart-row"><input type="checkbox" id="autostart">
+    Включать VPN при запуске компьютера</label>
+  <label class="check-row" id="verbose-row"><input type="checkbox" id="verbose">
+    Подробный журнал sing-box</label>
+  <div class="check-hint" id="verbose-hint">пока ищем причину сбоя, потом выключить:
+    журнал растёт в разы</div>
+  <div id="how"></div>
+  <div id="version"></div>
 </div>
 
 <div id="sheet">
   <div id="sheet-box">
     <div id="sheet-head"><span id="sheet-name"></span></div>
     <div id="sheet-body"></div>
-    <div id="sheet-foot">
-      <button id="sheet-del">Удалить</button>
-      <button id="sheet-load" hidden>Взять из файла…</button>
-      <button id="sheet-save" hidden>Сохранить</button>
-      <button id="sheet-close" class="primary">Закрыть</button>
-    </div>
+    <div id="sheet-foot"></div>
   </div>
 </div>
 
@@ -351,13 +329,17 @@ const esc = t => String(t).replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 let LAST = {};
-let CONFS = null;      // последний renderConfs: render по нему знает, каких конфигов нет
 let PENDING = null;    // команда отправлена, состояние ещё не догнало
 let AUTOSTART_PENDING = false;
+let VERBOSE_PENDING = false;
 let CHECKING = false;  // идёт проверка туннелей по кнопке или при открытии
-// Конфиги этой проверки, чей ответ ещё не пришёл: личный не ждёт корпа.
-const CHECK_SIDES = ['corp', 'personal'];
+// id туннелей этой проверки, чей ответ ещё не пришёл: быстрый не ждёт молчащего.
 let CHECK_LEFT = new Set();
+let RULES = null;      // туннель открытого листа «Туннелирование», списки — сохранённые
+
+// В окне туннель зовётся своим конфигом (решение #12), имя туннеля — запасное.
+const tname = t => t.active || t.name;
+const hasConf = t => !!(t.confs || []).length;
 
 // Рестарт нельзя ждать сравнением с желаемым состоянием: жмут его при поднятом
 // туннеле, и «уже как надо» получается сразу. Ждём полный цикл: упал и поднялся.
@@ -380,34 +362,34 @@ const tick = w => { if (!done[w]) { done[w] = 1; send('rendered', w); } };
 
 function render(s) {
   LAST = s;
-  // Корп жив, если ответил хоть кто-то: DNS или сайт. Трей и итог проверки
-  // считают так же — иначе окно показывало «молчит» при открытом сайте.
-  const up = s.up, corp = !!(s.corp_ip || s.corp_http), leak = s.v6_leak;
-  // Личный не работает, и служба увела выход напрямую: адрес провайдера тогда
-  // ожидаем, это не утечка.
-  const direct = s.out === 'direct' || s.exit_state === 'direct';
+  const up = s.up, leak = s.v6_leak;
+  const T = s.tunnels || [];
+  const main = T.find(t => t.mode === 'all');
+  // Пока идёт проверка — по кнопке, при открытии окна или сама после подъёма
+  // туннеля — прежний ответ устарел: «молчит» от прошлой проверки читалось
+  // бы как свежий результат. Каждый туннель по себе: молчащий не держит
+  // «проверяю» у остальных.
+  const checking = t => up && ((CHECKING && CHECK_LEFT.has(t.id)) || !!t.checking);
+  // Основной не работает, и служба увела выход напрямую: адрес провайдера
+  // тогда ожидаем, это не утечка. Без основного напрямую идёт всё — так задумано.
+  const direct = !!main && (s.out === 'direct' || s.exit_state === 'direct');
+  // «По списку» молчит, а остальное работает — отдельный случай, не «всё сломалось».
+  const silent = up ? T.filter(t => t.mode === 'list' && t.check === 'error' && !checking(t)) : [];
 
-  // Четыре состояния, а не два: «корп не отвечает» — отдельный случай,
-  // при котором личный туннель работает и интернет есть.
   // Первый запуск: без службы кнопки бессмысленны, поэтому вместо них
   // предложение её поставить — иначе человек нажимает «Включить» и ничего
   // не происходит.
   const noDaemon = s.daemon === false;
   // Туннель без конфига сборка пропускает, без всех — не соберёт
   // (buildconfig.py:build). Говорим заранее, а не «Не запускается» после нажатия.
-  const noConf = k => !!CONFS && !(CONFS[k] || []).length;
-  const missing = !up && (noConf('corp') || noConf('personal'));
+  const missing = !up && !!s.tunnels && !T.some(hasConf);
 
   let cls = 'off', title = 'Выключено', sub = 'туннели не подняты';
   if (noDaemon) { cls='warn'; title='Нужна установка';
                   sub='фоновая служба ещё не поставлена'; }
+  else if (missing) { cls='warn'; title='Добавь конфиг'; sub='без него VPN не включится'; }
   // Служба сама снимает и поднимает туннель: на это время up ложный, и без
   // этой ветки заголовок мигал бы «Выключено» или прошлой ошибкой.
-  else if (missing) { cls='warn';
-                  title = noConf('corp') && noConf('personal') ? 'Добавь конфиги'
-                        : noConf('corp') ? 'Нужен рабочий конфиг' : 'Нужен личный конфиг';
-                  sub = noConf('corp') && noConf('personal') ? 'без них VPN не включится'
-                      : 'без него VPN не включится'; }
   else if (s.busy === 'переподключаю') { cls='warn'; title='Переподключаю';
                   sub='сменилась сеть — поднимаю туннель заново'; }
   // Сторож перезапускает процесс одного туннеля: up при этом истинный, tun цел.
@@ -417,14 +399,17 @@ function render(s) {
   // Не поднялся и не просто выключен — показываем причину, а не пустоту.
   else if (!up && s.last_error) { cls='bad'; title='Не запускается'; sub = s.last_error; }
   else if (!up)  { cls='off';  title='Выключено';          sub='туннели не подняты'; }
-  // Заголовок обязан отражать все три строки ниже, иначе получается прямое
-  // противоречие: сверху «всё работает», а в личном — «мимо туннеля».
+  // Заголовок обязан отражать плитки ниже, иначе получается прямое
+  // противоречие: сверху «всё работает», а у основного — «мимо туннеля».
   else if (direct) { cls='warn'; title='Запасной выход';
-                     sub='личный не работает, интернет идёт напрямую'; }
+                     sub=`«${tname(main)}» не работает, интернет идёт напрямую`; }
   else if (s.exit_state === 'leak') { cls='bad'; title='Трафик мимо туннеля';
                                       sub='тебя видно адресом провайдера ' + (s.exit_ip || ''); }
-  else if (!corp){ cls='warn'; title='Корп не отвечает';   sub='личный туннель работает, интернет есть'; }
-  else           { cls='ok';   title='Всё работает';       sub='оба туннеля подняты'; }
+  else if (silent.length) { cls='warn';
+                  title = silent.length === 1 ? `«${tname(silent[0])}» не отвечает` : 'Туннели не отвечают';
+                  sub = silent.length < T.length ? 'остальные туннели работают' : 'туннели подняты, но молчат'; }
+  else           { cls='ok';   title='Всё работает';
+                   sub = T.length > 1 ? 'туннели подняты' : 'туннель поднят'; }
 
   document.getElementById('dot').className = cls;
   document.getElementById('state-title').textContent = title;
@@ -433,38 +418,7 @@ function render(s) {
   // сброса цвет оставался, и обычный текст показывался тревожным.
   if (!NOTICE) { subEl.textContent = sub; subEl.style.color = ''; }
 
-  const row = (name, val, state, label) =>
-    `<div class="tun"><span class="tun-name">${name}</span>
-       <span class="tun-val">${val}</span>
-       <span class="chip ${state}">${label}</span></div>`;
-
-  // Пока идёт проверка — по кнопке, при открытии окна или сама после подъёма
-  // туннеля — прежний ответ устарел: «молчит» от прошлой проверки читалось
-  // бы как свежий результат.
-  // Каждый конфиг по себе: молчащий корп не держит «проверяю» у личного.
-  const checking = k => up && ((CHECKING && CHECK_LEFT.has(k)) || s['checking_' + k]);
-  // Без VPN мерить нечем — показываем, как этот же файл конфига отработал в
-  // прошлый раз: сломанный заменяют до включения, а не после. Плашка при этом
-  // серая: зелёная «выключен · работал» читалась как «работает». Красной
-  // остаётся только «не работал».
-  const last = s.last || {};
-  const offChip = k => noConf(k) ? 'warn' : last[k] === 'error' ? 'bad' : 'off';
-  const offLabel = k => noConf(k) ? 'нет конфига' : 'выключен';
-  const offVal = k => noConf(k) ? '—'
-    : last[k] === 'up' ? '<span class="tun-val dim">раньше работал</span>'
-    : last[k] === 'error' ? '<span class="tun-val dim">раньше не работал</span>' : '—';
-  document.getElementById('tunnels').innerHTML =
-    row('личный', up ? (s.exit_ip || '—') : offVal('personal'),
-        !up ? offChip('personal') : direct ? 'bad' : checking('personal') ? 'warn' : s.exit_state === 'leak' ? 'bad'
-            : s.exit_state === 'tunnel' ? 'ok' : 'off',
-        !up ? offLabel('personal') : direct ? 'не работает · выход напрямую'
-            : checking('personal') ? 'проверяю…' : s.exit_state === 'leak' ? 'мимо туннеля'
-            : s.exit_state === 'tunnel' ? 'через туннель' : 'проверяю…') +
-    row('корп', up ? (s.corp_ip || (s.corp_http ? 'HTTP ' + s.corp_http : '—')) : offVal('corp'),
-        !up ? offChip('corp') : checking('corp') ? 'warn' : (corp ? 'ok' : 'bad'),
-        !up ? offLabel('corp') : checking('corp') ? 'проверяю…' : (corp ? 'отвечает' : 'молчит')) +
-    row('выход', up ? [s.exit_country, s.exit_city].filter(Boolean).join(' ') || '—' : '—',
-        'off', '—');
+  renderTiles(s, checking, direct);
 
   // Пока команда не отработала, состояние ещё старое. Без этого кнопка
   // выглядела мёртвой: нажал — ничего не изменилось, и хочется нажать снова.
@@ -503,81 +457,118 @@ function render(s) {
   c.classList.toggle('spin', CHECKING);
   document.getElementById('btn-install').hidden = !noDaemon;
   document.getElementById('actions').hidden = noDaemon;
-  document.getElementById('autostart-row').hidden = noDaemon || s.no_service;
+  const noSvc = noDaemon || !!s.no_service;
+  document.getElementById('tiles-wrap').hidden = !s.tunnels;
+  document.getElementById('btn-add').disabled = noSvc;
+  ['autostart-row', 'verbose-row', 'verbose-hint'].forEach(id => {
+    document.getElementById(id).hidden = noSvc;
+  });
   // Пока идёт запрос (там UAC), опрос не должен вернуть флажок назад —
   // иначе он мигает под рукой, пока человек жмёт «Да».
   const auto = document.getElementById('autostart');
   if (!AUTOSTART_PENDING) auto.checked = !!s.autostart;
   auto.disabled = AUTOSTART_PENDING;
-  // Как в AmneziaWG: кнопка говорит, включено ли раздельное туннелирование
-  // (загружены ли настройки рабочей сети), а не только ведёт в настройки.
-  document.getElementById('btn-site').textContent =
-    'Раздельное туннелирование ' + (s.split ? 'включено' : 'выключено');
-  document.getElementById('confs-wrap').classList.toggle('locked', up);
-  document.getElementById('lockhint').hidden = !up;
+  const verbose = document.getElementById('verbose');
+  if (!VERBOSE_PENDING) verbose.checked = s.log_level === 'debug';
+  verbose.disabled = VERBOSE_PENDING;
   tick('status');
 }
 
-function renderConfs(d) {
-  const sig = JSON.stringify(d);
-  if (sig === prev.confs) { tick('confs'); return; }
-  prev.confs = sig;
-  CONFS = d;
-  // Появился или пропал конфиг — заголовок и «Включить» зависят от этого.
-  if ('up' in LAST) render(LAST);
-  // Список перерисовывается — меню повисло бы с именем файла, которого может
-  // уже не быть, и «Удалить» ушло бы в никуда.
-  closeMenu();
-
-  const rows = (list, pick) => list.map(c => `
-    <div class="conf ${c.active ? 'active' : ''}" data-name="${esc(c.name)}"
-         data-pick="${pick ? 1 : 0}">
-      <div class="conf-radio ${pick ? '' : 'fixed'}"></div>
-      <span class="conf-name">${esc(c.name)}</span>
-      <button class="conf-menu" data-menu="${esc(c.name)}"
-              data-kind="${pick ? 'personal' : 'corp'}" title="Действия">⋯</button>
-    </div>`).join('');
-
-  document.getElementById('confs-corp').innerHTML =
-    (d.corp_ambiguous
-      ? '<div class="warnline">несколько рабочих конфигов — сборка не пройдёт, оставь один</div>'
-      : '') +
-    (rows(d.corp || [], false) ||
-      '<div class="emptyrow">рабочего конфига нет</div>');
-
-  // «Заменить» при пустом списке звучит как насмешка: заменять нечего.
-  document.getElementById('btn-corp').textContent =
-    (d.corp || []).length ? 'Заменить рабочий конфиг…' : 'Добавить рабочий конфиг…';
-
-  document.getElementById('confs-personal').innerHTML =
-    (d.personal_ambiguous
-      ? '<div class="warnline">подходящих личных конфигов несколько — выбери один, иначе сборка не пройдёт</div>'
-      : '') +
-    (rows(d.personal || [], true) ||
-      '<div class="emptyrow">личных конфигов нет</div>');
-  tick('confs');
+// Плитка: [цвет, подпись]. Без VPN мерить нечем — показываем, как туннель
+// отработал в прошлый раз: сломанный заменяют до включения, а не после.
+// Серым: зелёная «выключен · работал» читалась как «работает».
+function tileState(t, s, checking, direct) {
+  if (!hasConf(t)) return ['warn', 'нет конфига'];
+  if (!s.up) return t.last === 'error' ? ['bad', 'выключен · раньше не работал']
+                  : t.last === 'up' ? ['off', 'выключен · раньше работал'] : ['off', 'выключен'];
+  if (t.mode === 'all') {
+    if (direct) return ['bad', 'не работает · выход напрямую'];
+    if (checking(t)) return ['warn', 'проверяю…'];
+    if (s.exit_state === 'leak') return ['bad', 'мимо туннеля'];
+    if (t.check === 'up') return ['ok', `через туннель ${t.answer || ''}`.trim()];
+    if (t.check === 'error') return ['bad', 'не работает'];
+    return ['warn', 'проверяю…'];
+  }
+  if (checking(t)) return ['warn', 'проверяю…'];
+  if (t.check === 'up') return ['ok', `отвечает ${t.answer || ''}`.trim()];
+  if (t.check === 'error') return ['bad', 'молчит'];
+  if (t.check === 'none') return ['off', 'не с чем проверить: в «пускать» нет домена'];
+  return ['warn', 'проверяю…'];
 }
 
-// Выпадающее меню строки: удаление должно быть в одном клике, а не прятаться
-// внутри просмотра — там его никто не найдёт.
-function openMenu(name, kind, near) {
+function tileHtml(t, name, mark, state, pick) {
+  const [cls, text] = state;
+  // Туннель без конфига: правила оставили — плитка зовёт добавить файл в него.
+  const add = hasConf(t) ? ''
+    : ` · <button class="tile-add" data-add-to="${esc(t.id)}">Добавить…</button>`;
+  return `
+    <div class="card tile${pick ? ' pick' : ''}" data-id="${esc(t.id)}" data-name="${esc(name)}">
+      <span class="tile-mark ${mark}"></span>
+      <div class="tile-body">
+        <div class="tile-name">${esc(name || t.name)}</div>
+        <div class="tile-state ${cls}">${esc(text)}${add}</div>
+      </div>
+      <button class="tile-menu" data-menu="${esc(t.id)}" data-name="${esc(name)}"
+              title="Действия" aria-label="Действия">⋯</button>
+    </div>`;
+}
+
+function setTiles(id, html, count) {
+  const el = document.getElementById(id);
+  el.classList.toggle('many', count > 3);
+  // Присваивание innerHTML раз в две секунды снимало бы наведение и фокус.
+  if (prev[id] !== html) { prev[id] = html; el.innerHTML = html; }
+}
+
+function renderTiles(s, checking, direct) {
+  const T = s.tunnels || [];
+  // Сменился состав — меню повисло бы над конфигом, которого может уже не быть.
+  const shape = JSON.stringify(T.map(t => [t.id, t.active, t.confs]));
+  if (shape !== prev.shape) { prev.shape = shape; closeMenu(); }
+
+  // Основной: плитка на каждый конфиг, выбранный — со статусом, остальные запасные.
+  const main = T.find(t => t.mode === 'all');
+  let mains = [];
+  if (main && hasConf(main)) {
+    const confs = main.confs.includes(main.active)
+      ? [main.active, ...main.confs.filter(c => c !== main.active)] : main.confs;
+    mains = confs.map(c => {
+      if (c !== main.active) return tileHtml(main, c, 'spare', ['', 'запасной'], true);
+      const st = tileState(main, s, checking, direct);
+      return tileHtml(main, c, st[0], st, false);
+    });
+  } else if (main) {
+    mains = [tileHtml(main, '', 'warn', tileState(main, s, checking, direct), false)];
+  }
+  setTiles('tiles-all', mains.join('') ||
+    '<div class="emptyrow">нет — весь остальной трафик идёт напрямую</div>', mains.length);
+
+  // «По списку»: плитка на туннель, имя — его выбранный конфиг.
+  const lists = T.filter(t => t.mode === 'list').map(t => {
+    const st = tileState(t, s, checking, direct);
+    return tileHtml(t, t.active || (t.confs || [])[0] || '', st[0], st, false);
+  });
+  setTiles('tiles-list', lists.join('') ||
+    '<div class="emptyrow">нет — сюда ложатся конфиги с конкретными сетями в AllowedIPs</div>',
+    lists.length);
+}
+
+// Выпадающее меню плитки: items — [подпись, действие, danger].
+function openMenu(items, near) {
   closeMenu();
   const m = document.createElement('div');
   m.id = 'rowmenu';
-  m.innerHTML = ['Показать', 'Редактировать', 'Удалить']
-    .map((t, i) => `<button data-act="${['show','edit','del'][i]}"
-                      class="${i === 2 ? 'danger' : ''}">${t}</button>`).join('');
+  m.innerHTML = items.map(([label, , danger], i) =>
+    `<button data-i="${i}" class="${danger ? 'danger' : ''}">${label}</button>`).join('');
   document.body.appendChild(m);
   const r = near.getBoundingClientRect();
   m.style.top = Math.max(8, Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8)) + 'px';
-  m.style.left = Math.max(8, Math.min(r.left - 92, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.left = Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)) + 'px';
   m.onclick = e => {
-    const b = e.target.closest('[data-act]');
+    const b = e.target.closest('[data-i]');
     if (!b) return;
-    const act = b.dataset.act;
     closeMenu();
-    send(act === 'show' ? 'show_config' : act === 'edit' ? 'edit_config' : 'del_config',
-         {name, kind});
+    items[+b.dataset.i][1]();
   };
 }
 
@@ -588,8 +579,59 @@ function closeMenu() {
 document.addEventListener('click', e => {
   if (!e.target.closest('#rowmenu') && !e.target.closest('[data-menu]')) closeMenu();
 }, true);
-// Меню позиционируется абсолютно и при прокрутке колонки отрывается от строки.
-document.getElementById('side').addEventListener('scroll', closeMenu);
+// Меню позиционируется абсолютно и при прокрутке отрывается от плитки.
+document.getElementById('pane-tunnels').addEventListener('scroll', closeMenu);
+
+// Выше/Ниже — среди туннелей «по списку»: их порядок — порядок правил. Где в
+// файле стоит основной, роли не играет, и шаг через него ничего не менял бы.
+function moves(t) {
+  const T = LAST.tunnels || [];
+  const lists = T.filter(x => x.mode === 'list');
+  const i = lists.indexOf(t);
+  const go = j => () => send('move_tunnel', {tunnel: t.id, step: T.indexOf(lists[j]) - T.indexOf(t)});
+  return [...(i > 0 ? [['Выше', go(i - 1)]] : []),
+          ...(i >= 0 && i < lists.length - 1 ? [['Ниже', go(i + 1)]] : [])];
+}
+
+function tileMenu(id, name, near) {
+  const t = (LAST.tunnels || []).find(x => x.id === id);
+  if (!t) return;
+  const arg = {tunnel: id, name};
+  const rules = ['Туннелирование…', () => send('tunnel_rules', id)];
+  const show = ['Показать', () => send('show_config', arg)];
+  const edit = ['Редактировать', () => send('edit_config', arg)];
+  const del = ['Удалить', () => delConfig(t, name), true];
+  if (!name) {
+    openMenu([rules, ...moves(t), ['Удалить туннель', () => send('del_tunnel', id), true]], near);
+  } else if (t.mode === 'all') {
+    openMenu(name === t.active ? [rules, show, edit, del]
+      : [show, edit, ['Отдельным туннелем по списку',
+                      () => send('move_config', {...arg, to: 'new'})], del], near);
+  } else {
+    openMenu([rules, show, edit,
+              ['Заменить файл…', () => send('add_config', {tunnel: id, place: 'replace'})],
+              ...moves(t),
+              ...(t.full ? [['Вернуть в весь остальной трафик', () => moveToAll(t, name)]] : []),
+              del], near);
+  }
+}
+
+// Последний конфиг туннеля уходит: правила без него бесполезны, но набраны
+// руками — есть они, спрашиваем; нет — туннель уходит вместе с конфигом.
+function dropAsk(t, act) {
+  if ((t.confs || []).length > 1) return act(false);
+  if (!t.rules) return act(true);
+  openSheet(`Последний конфиг «${tname(t)}»`,
+    `<p>У туннеля есть правила туннелирования (${t.rules}). Оставить их до
+     нового конфига или удалить туннель вместе с ними?</p>`,
+    [['Оставить правила', () => act(false)],
+     ['Удалить вместе', () => act(true), 'danger'],
+     ['Отмена', closeSheet]]);
+}
+const delConfig = (t, name) =>
+  dropAsk(t, drop => send('del_config', {tunnel: t.id, name, drop_tunnel: drop}));
+const moveToAll = (t, name) =>
+  dropAsk(t, drop => send('move_config', {tunnel: t.id, name, to: 'all', drop_tunnel: drop}));
 
 // Строка sing-box наполовину состоит из повторяющейся меты. Часовой пояс
 // одинаков во всех строках, дата — тоже (лог на один запуск), а идентификатор
@@ -640,82 +682,78 @@ function renderLogs(lines) {
 }
 
 function renderHowto(h) {
-  const sig = JSON.stringify(h);
+  // Имена туннелей — из статуса: в собранном конфиге только теги wg-<id>.
+  const T = LAST.tunnels || [];
+  const names = Object.fromEntries(T.map(t => ['wg-' + t.id, tname(t)]));
+  const sig = JSON.stringify([h, names]);
   if (sig === prev.howto) { tick('howto'); return; }
   prev.howto = sig;
 
-  const ep = t => (h.endpoints || []).find(e => e.tag === t) || {};
-  const p = ep('wg-home'), c = ep('wg-work');
-  const nets = (h.corp_nets || []).map(n => `<code>${esc(n)}</code>`).join(' ') || '<span class="note">не задано</span>';
-  const doms = (h.corp_domains || []).map(d => `<code>${esc(d)}</code>`).join(' ') || '<span class="note">не задано</span>';
+  const eps = (h.endpoints || []).map(e => `
+    <tr><td>${esc(names[e.tag] || e.tag)}</td><td><code>${esc(e.address || '—')}</code>
+      MTU ${esc(e.mtu || '—')}${e.awg ? '  · с маскировкой' : ''}</td></tr>`).join('');
+  const codes = l => l.map(x => `<code>${esc(x)}</code>`).join(' ');
+  const nets = h.corp_nets || [], doms = h.corp_domains || [];
+  const work = T.find(t => t.mode === 'list');
+  // Подсети и домены служба отдаёт только окну с правами (service._howto).
+  const listBox = work && (nets.length || doms.length) ? `
+    <div class="box"><p>«${esc(tname(work))}»: сети ${codes(nets) || '—'},
+      домены ${codes(doms) || '—'}, DNS <code>${esc(h.corp_dns || '—')}</code></p></div>` : '';
 
   document.getElementById('how').innerHTML = `
-    <h3>Зачем два туннеля сразу</h3>
-    <p>Обычный VPN-клиент держит одно соединение: либо рабочее, либо личное.
-    Здесь подняты оба одновременно, и для каждого пакета решается, в какой из
-    них его отправить. Поэтому корпоративные ресурсы доступны, не отключая
-    личный туннель, и наоборот.</p>
-
-    <h3>Куда уходит конкретный пакет</h3>
-    <p>Правила проверяются по порядку, до первого совпадения:</p>
+    <h3>Как подключиться</h3>
+    <p>Нужен обычный файл WireGuard или AmneziaWG — его выдаёт админ или твой
+    сервер. Нажми «+ Добавить конфиг…» на вкладке «Туннели»: место конфиг
+    выбирает сам, по своему <code>AllowedIPs</code>:</p>
     <ol>
-      <li>адрес попадает в корп-подсети → <code>рабочий туннель</code></li>
-      <li>адрес локальный (<code>10/8</code>, <code>192.168/16</code>) → мимо туннелей, в свою сеть</li>
-      <li>всё остальное → <code>${esc(h.final || 'личный туннель')}</code></li>
+      <li>есть <code>0.0.0.0/0</code> → в «Весь остальной трафик»; если там уже
+        есть конфиг, новый ляжет запасным — переключить можно кликом по плитке;</li>
+      <li>конкретные сети → новый туннель «по списку»;</li>
+      <li>тот же частный DNS, что у туннеля «по списку», → заменяет его конфиг,
+        правила туннелирования остаются;</li>
+      <li>сети пересекаются с туннелем «по списку» → окно спросит: заменить или
+        добавить отдельным туннелем.</li>
     </ol>
-    <div class="box"><p>Твои корп-подсети: ${nets}</p></div>
+    <p class="note">Правки при включённом VPN применяются перезапуском туннеля.</p>
+    <h3>Подключено сейчас</h3>
+    <table>${eps || '<tr><td>—</td><td class="note">VPN ещё не собирался</td></tr>'}</table>
+    ${listBox}
+
+    <h3>Как это работает</h3>
+    <p>Все туннели подняты одновременно, и для каждого соединения решается, в
+    какой из них его отправить. Правила проверяются по порядку, до первого
+    совпадения:</p>
+    <ol>
+      <li>туннели «по списку», сверху вниз: адрес или домен из «Пускать через
+        туннель» или из <code>AllowedIPs</code> конфига, если его нет в «Не пускать»;</li>
+      <li>локальные адреса (<code>10/8</code>, <code>192.168/16</code>) → мимо
+        туннелей, в свою сеть;</li>
+      <li>«Мимо VPN» основного туннеля → напрямую;</li>
+      <li>всё остальное → «Весь остальной трафик», а без него — напрямую.</li>
+    </ol>
+    <p class="note">Домен из «пускать» узнаётся по имени сайта в соединении
+    (SNI, Host). SSH, RDP и прочее без имени пойдут в туннель, только если их
+    адрес есть в списке или в <code>AllowedIPs</code>.</p>
 
     <h3>Имена и DNS</h3>
-    <p>Адрес корп-сервера снаружи не резолвится, поэтому запросы к
-    ${doms} отправляются корпоративному DNS
-    <code>${esc(h.corp_dns || '—')}</code>, а остальные — публичному через личный
-    туннель. Разводит их сам sing-box: DNS-запросы идут через tun, и правила
-    успевают сработать до того, как ответит система. Отдельных правил Windows
-    (NRPT) для этого не нужно.</p>
-    <p class="note">Следствие: короткое имя вроде <code>git</code> не сработает,
-    нужно полное — правило срабатывает по суффиксу домена.</p>
-
-    <h3>Какие конфиги подходят</h3>
-    <p>Это обычные файлы WireGuard, которые выдаёт админ или личный сервер.
-    Кладутся в <code>conf/</code>, тип определяется по имени файла:</p>
-    <table>
-      <tr><td>рабочий</td><td><code>corp.conf</code>, <code>wg.conf</code>,
-        <code>wg-*.conf</code>, <code>wg0-*.conf</code><br>
-        <span class="note">обычный WireGuard. Маршруты берутся из его
-        <code>AllowedIPs</code> — что админ туда положил, то и пойдёт в
-        рабочий туннель</span></td></tr>
-      <tr><td>личный</td><td><code>personal.conf</code>, <code>awg-*.conf</code>,
-        <code>amnezia-*.conf</code><br>
-        <span class="note">WireGuard или AmneziaWG. Второй — форк с маскировкой
-        трафика (<code>Jc</code>, <code>S1</code>, <code>H1</code> и подобные
-        поля), чтобы провайдер не опознавал соединение как VPN</span></td></tr>
-    </table>
-    <p class="note">Любой другой файл в <code>conf/</code> тоже можно выбрать
-    личным — слева в списке. Рабочий подключается всегда и выбора не требует.</p>
-    <p class="note">Кнопками «Добавить … конфиг» можно брать файл с любым
-    именем: тип задаёт кнопка, а не имя. Рабочий сохраняется как
-    <code>corp.conf</code> и заменяет прежний, личный — под своим именем (похожее
-    на рабочее получает приставку <code>personal-</code>).</p>
-
-    <h3>Что подключено сейчас</h3>
-    <table>
-      <tr><td>рабочий</td><td><code>${esc(c.address || '—')}</code>  MTU ${esc(c.mtu || '—')}</td></tr>
-      <tr><td>личный</td><td><code>${esc(p.address || '—')}</code>  MTU ${esc(p.mtu || '—')}${p.awg ? '  · с маскировкой' : ''}</td></tr>
-    </table>
+    <p>Домены из «пускать» туннеля, у конфига которого задан
+    <code>DNS</code>, резолвит этот DNS через сам туннель: рабочие имена снаружи
+    не резолвятся. Остальные — публичный DNS. Разводит их сам sing-box, отдельных
+    правил Windows для этого не нужно.</p>
+    <p class="note">Короткое имя вроде <code>git</code> не сработает, нужно
+    полное — правило срабатывает по суффиксу домена.</p>
 
     <h3>Почему это две программы</h3>
     <p>Туннель правит таблицу маршрутов системы, а на это нужны права
-    администратора. Поэтому им владеет фоновая служба, запускаемая системой,
-    а это окно — обычная программа без особых прав: она показывает состояние и
-    посылает службе две команды, включить и выключить.</p>
-    <p class="note">Служба сама при загрузке Мака не стартует — только когда
-    нажмёшь «Включить».</p>
+    администратора. Поэтому им владеет фоновая служба Windows, а это окно —
+    обычная программа: показывает состояние и передаёт службе команды. Правка
+    конфигов и правил спрашивает права отдельно, на одно действие.</p>
 
     <h3>Если что-то не работает</h3>
-    <p>Смотри на строку «корп» слева. Если молчит она одна, а личный туннель
-    жив — проблема в рабочей сети, а не в программе. Если пропало всё сразу
-    после того, как ноутбук поспал, помогает «Перезапустить»: во сне соединение
-    рвётся, и открытые до этого страницы остаются висеть на мёртвых соединениях.</p>`;
+    <p>Смотри на плитки. Если молчит одна, а остальные живы — проблема в сети
+    этого туннеля, а не в программе. Если пропало всё сразу после того, как
+    ноутбук поспал, помогает «Перезапустить»: во сне соединение рвётся, и
+    открытые до этого страницы остаются висеть на мёртвых соединениях.</p>`;
   tick('howto');
 }
 
@@ -738,7 +776,7 @@ function failed(msg) {
 
 function restarting() {
   PENDING = {mode: 'restart', at: Date.now(), sawDown: false};
-  notice('применяю конфиг, туннель перезапускается…', 'var(--dim)', 25000);
+  notice('применяю изменения, туннель перезапускается…', 'var(--dim)', 25000);
 }
 
 function renderVersion(v) {
@@ -746,81 +784,114 @@ function renderVersion(v) {
     `DualVPN ${v.app}` + (v.singbox ? ` · sing-box ${v.singbox}` : '');
 }
 
-// Домены рабочей сети раньше были зашиты в код. Теперь их задают здесь,
-// иначе после выноса в файл задать их стало бы нечем.
-const SITE_FIELDS = [
-  ["CORP_DOMAINS", "Домены рабочей сети",
-   "example.local corp.example.com",
-   "их резолвит корпоративный DNS, остальное — публичный. Через пробел"],
-  ["CORP_PROBE", "Хост для проверки связи",
-   "git.example.local",
-   "по нему окно понимает, отвечает ли рабочая сеть. Должен быть доступен только изнутри"],
-  ["CORP_HOSTS", "Что проверяет диагностика",
-   "git.example.local wiki.example.local",
-   "необязательно, через пробел"],
-  ["SB_CORP_EXCLUDE", "Не гнать в рабочий туннель",
-   "198.51.100.7/32",
-   "нужно редко: когда хост из AllowedIPs через туннель не отвечает, а напрямую открывается"],
-  ["SB_LOG_LEVEL", "Подробность журнала sing-box",
-   "info",
-   "debug — пока ищем причину сбоя, потом вернуть пустым: журнал растёт в разы"],
-];
-
-function showSite(cur) {
-  document.getElementById('sheet-name').textContent = 'Раздельное туннелирование';
+// Лист поверх окна: заголовок, тело разметкой, кнопки [подпись, действие, класс].
+function openSheet(title, html, buttons) {
+  document.getElementById('sheet-name').textContent = title;
   const b = document.getElementById('sheet-body');
   b.classList.remove('mono');
-  b.innerHTML = SITE_FIELDS.map(([k, label, ph, hint]) => `
-    <label class="field">
-      <span class="flabel">${label}</span>
-      <input id="f-${k}" value="${esc(cur[k] || '')}" placeholder="${esc(ph)}"
-             spellcheck="false" autocapitalize="off">
-      <span class="fhint">${hint}</span>
-    </label>`).join('');
-  document.getElementById('sheet-del').hidden = true;
-  document.getElementById('sheet-save').hidden = false;
-  document.getElementById('sheet-load').hidden = false;
+  b.innerHTML = html;
+  const f = document.getElementById('sheet-foot');
+  f.innerHTML = buttons.map(([label, , cls], i) =>
+    `<button data-i="${i}" class="${cls || ''}">${label}</button>`).join('');
+  f.onclick = e => {
+    const x = e.target.closest('[data-i]');
+    if (x) buttons[+x.dataset.i][1]();
+  };
   document.getElementById('sheet').classList.add('on');
 }
 
-// Поля заполняются из выбранного файла: набивать их руками, когда готовый
-// site.env уже есть, — лишняя работа.
-function fillSite(v) {
-  SITE_FIELDS.forEach(([k]) => {
-    const el = document.getElementById('f-' + k);
-    if (el) el.value = v[k] || '';
-  });
-}
-
 function closeSheet() {
+  RULES = null;
   document.getElementById('sheet').classList.remove('on');
 }
 
 function showInfo(title, paras) {
-  document.getElementById('sheet-save').hidden = true;
-  document.getElementById('sheet-load').hidden = true;
-  document.getElementById('sheet-name').textContent = title;
-  const b = document.getElementById('sheet-body');
-  b.classList.remove('mono');
   // Абзацами, а не одним куском с переносами: иначе строки ломались там, где
   // я их набрал, и в конце абзаца оставалось по два слова.
-  b.innerHTML = paras.map(t => `<p>${esc(t)}</p>`).join('');
-  document.getElementById('sheet-del').hidden = true;
-  document.getElementById('sheet').classList.add('on');
+  openSheet(title, paras.map(t => `<p>${esc(t)}</p>`).join(''),
+            [['Закрыть', closeSheet, 'primary']]);
 }
 
-function showConf(name, kind, text) {
-  document.getElementById('sheet-save').hidden = true;
-  document.getElementById('sheet-load').hidden = true;
-  document.getElementById('sheet-del').hidden = false;
-  document.getElementById('sheet-body').classList.add('mono');
-  document.getElementById('sheet-name').textContent = name + '.conf';
+function showConf(tid, name, text) {
+  openSheet(name + '.conf', '', [
+    ['Удалить', () => {
+      const t = (LAST.tunnels || []).find(x => x.id === tid);
+      if (t) delConfig(t, name);
+    }, 'danger'],
+    ['Закрыть', closeSheet, 'primary']]);
   // Файл показывается целиком, включая ключи: он лежит на этой же машине,
   // и прятать его от владельца — только мешать копировать.
-  document.getElementById('sheet-body').textContent = text;
-  document.getElementById('sheet').classList.add('on');
-  document.getElementById('sheet').dataset.name = name;
-  document.getElementById('sheet').dataset.kind = kind;
+  const b = document.getElementById('sheet-body');
+  b.classList.add('mono');
+  b.textContent = text;
+}
+
+// Служба не решилась сама: файл похож на конфиг туннеля «по списку».
+function askPlace(a) {
+  const old = a.conf || a.name;
+  openSheet(`Похоже на «${old}»`,
+    `<p>«${esc(a.file)}» ведёт в те же сети, что и «${esc(old)}». Заменить его
+     конфиг (правила туннелирования сохранятся) или добавить отдельным туннелем?</p>`,
+    [['Заменить', () => { closeSheet(); send('place_config', {place: 'replace', tunnel: a.id}); }, 'primary'],
+     ['Отдельный туннель', () => { closeSheet(); send('place_config', {place: 'new'}); }],
+     ['Отмена', closeSheet]]);
+}
+
+// Лист «Туннелирование». У основного одно поле — его exclude: «пускать» ему
+// не нужно, туда и так идёт всё, что не забрали другие.
+const RULE_FIELDS = {
+  include: ['Пускать через туннель',
+            'домены, IP и подсети: a.ru, *.b.ru, 1.2.3.4, 10.0.0.0/8 — через пробел, запятую, «;» или с новой строки'],
+  exclude: ['Не пускать',
+            'не пойдёт в этот туннель, даже если попадает в «пускать» или в AllowedIPs его конфига'],
+};
+const ALL_FIELD = ['Мимо VPN (напрямую)', 'адреса и домены, которые идут напрямую, без туннеля'];
+const ruleKeys = r => r.mode === 'all' ? ['exclude'] : ['include', 'exclude'];
+
+function showRules(r) {
+  const field = k => {
+    const [label, hint] = r.mode === 'all' ? ALL_FIELD : RULE_FIELDS[k];
+    return `<label class="field"><span class="flabel">${label}</span>
+      <textarea id="f-${k}" spellcheck="false" autocapitalize="off">${esc(r[k].join('\n'))}</textarea>
+      <span class="fhint">${hint}</span><span class="fnote" id="n-${k}"></span></label>`;
+  };
+  openSheet('Туннелирование · ' + tname(r), ruleKeys(r).map(field).join(''), [
+    ['Загрузить из файла…', () => send('load_rules')],
+    ['Сохранить в файл…', () => send('export_rules',
+      {name: tname(RULES), include: RULES.include, exclude: RULES.exclude})],
+    ['Сохранить', saveRules, 'primary'],
+    ['Закрыть', closeSheet]]);
+  RULES = r;
+}
+
+function saveRules() {
+  const v = {tunnel: RULES.id};
+  ruleKeys(RULES).forEach(k => { v[k] = document.getElementById('f-' + k).value; });
+  send('save_rules', v);
+}
+
+// Ответ set-tunnel: поля — в том виде, как их понял routelist; непонятое —
+// под полем, молча ничего не пропадает.
+function rulesSaved(r) {
+  if (!RULES) return;
+  ruleKeys(RULES).forEach(k => {
+    RULES[k] = r[k] || [];
+    const f = document.getElementById('f-' + k), n = document.getElementById('n-' + k);
+    if (!f || !n) return;
+    f.value = RULES[k].join('\n');
+    const bad = (r.rejected || {})[k] || [];
+    n.textContent = `сохранено ${RULES[k].length}` + (bad.length ? ` · не понял: ${bad.join(', ')}` : '');
+    n.classList.toggle('warn', bad.length > 0);
+  });
+}
+
+// Из файла: JSON экспорта — по полям, просто текст — в первое поле.
+function fillRules(v) {
+  if (!RULES) return;
+  const keys = ruleKeys(RULES);
+  const put = (k, text) => { const f = document.getElementById('f-' + k); if (f) f.value = text; };
+  if ('text' in v) put(keys[0], v.text);
+  else keys.forEach(k => { if (k in v) put(k, v[k]); });
 }
 
 document.getElementById('btn-toggle').onclick = () => {
@@ -838,41 +909,44 @@ document.getElementById('autostart').onchange = e => {
 // Ответ на set_autostart — и при успехе, и при отказе: следующий render
 // покажет то, что на самом деле записала служба.
 function autostartDone() { AUTOSTART_PENDING = false; }
-document.getElementById('btn-site').onclick = () => send('site');
-document.getElementById('sheet-load').onclick = () => send('load_site');
-document.getElementById('sheet-save').onclick = () => {
-  const v = {};
-  SITE_FIELDS.forEach(([k]) => { v[k] = document.getElementById('f-' + k).value; });
-  send('save_site', v);
+document.getElementById('verbose').onchange = e => {
+  VERBOSE_PENDING = true;
+  send('log_level', e.target.checked);
+  render(LAST);
 };
+// Как у автозапуска: следующий render покажет записанный службой уровень.
+function logLevelDone() { VERBOSE_PENDING = false; }
 document.getElementById('btn-restart').onclick = () => {
   PENDING = {mode: 'restart', at: Date.now(), sawDown: false};
   send('restart');
   render(LAST);
 };
+document.getElementById('btn-add').onclick = () => send('add_config', {});
 
-document.getElementById('side').onclick = e => {
-  const i = e.target.closest('[data-info]');
-  if (i) { send('info', i.dataset.info); return; }
-  const a = e.target.closest('[data-add]');
-  if (a) send('add_config', a.dataset.add);
-};
+document.getElementById('pane-tunnels').addEventListener('click', e => {
+  const mb = e.target.closest('[data-menu]');
+  if (mb) { tileMenu(mb.dataset.menu, mb.dataset.name, mb); return; }
+  const add = e.target.closest('[data-add-to]');
+  if (add) { send('add_config', {tunnel: add.dataset.addTo}); return; }
+  // Посреди перезапуска выбор подождёт: команда ушла бы в середину цикла.
+  const tile = e.target.closest('.tile.pick');
+  if (tile && !busyNow(LAST) && !LAST.busy)
+    send('use_config', {tunnel: tile.dataset.id, name: tile.dataset.name});
+});
 
 document.getElementById('search').oninput = () => renderLogs(logLines);
 document.getElementById('only-err').onchange = () => renderLogs(logLines);
-document.getElementById('sheet-close').onclick = closeSheet;
-document.getElementById('sheet-del').onclick =
-  () => send('del_config', {name: document.getElementById('sheet').dataset.name,
-                            kind: document.getElementById('sheet').dataset.kind});
 document.getElementById('btn-check').onclick = () => {
-  CHECKING = true;
-  CHECK_LEFT = new Set(CHECK_SIDES);
+  checkStart();
   send('check');
-  render(LAST);
 };
 // Ответ на check — и при успехе, и при сбое: кнопка не должна застрять.
-function checkStart() { CHECKING = true; CHECK_LEFT = new Set(CHECK_SIDES); render(LAST); }
-// Один конфиг проверен, другой ещё ждёт: перекрашиваем только проверенный.
+function checkStart() {
+  CHECKING = true;
+  CHECK_LEFT = new Set((LAST.tunnels || []).map(t => t.id));
+  render(LAST);
+}
+// Один туннель проверен, другие ещё ждут: перекрашиваем только проверенный.
 function checkSides(s, left) {
   CHECK_LEFT = new Set(left.filter(k => CHECK_LEFT.has(k)));
   render(s);
@@ -886,20 +960,11 @@ send('ready');
 document.getElementById('tabs').onclick = e => {
   const t = e.target.closest('.tab');
   if (!t) return;
-  const log = t.dataset.tab === 'log';
+  closeMenu();
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
-  document.getElementById('logbar').hidden = !log;
-  document.getElementById('lines').hidden = !log;
-  document.getElementById('how').hidden = log;
+  document.querySelectorAll('.pane').forEach(p => { p.hidden = p.id !== 'pane-' + t.dataset.tab; });
 };
 
 addEventListener('keydown', e => { if (e.key === 'Tab') document.body.classList.add('kbd'); });
 addEventListener('mousedown', () => document.body.classList.remove('kbd'));
-
-document.getElementById('side').addEventListener('click', e => {
-  const mb = e.target.closest('[data-menu]');
-  if (mb) { openMenu(mb.dataset.menu, mb.dataset.kind, mb); return; }
-  const row = e.target.closest('.conf');
-  if (row && row.dataset.pick === '1') send('use_config', row.dataset.name);
-});
 </script>

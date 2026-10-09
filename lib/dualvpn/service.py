@@ -349,6 +349,8 @@ class Core:
         st["split"] = bool(work and (work["include"] or work["exclude"]))
         st["version"] = paths.version()
         st["singbox"] = self._singbox_version()
+        # Галочка «подробный журнал» в окне: set-log-level пишет, читать — любому.
+        st["log_level"] = data["log_level"]
         st["profiles"] = self._profiles(data)
         st["corp"] = self._corp(data)
         # Старые стороны окна — до шага окна.
@@ -1310,7 +1312,10 @@ class Core:
             if key in payload:
                 t[key] = payload[key]
         r = self._save_tunnels(data, f"изменён туннель {t['id']}")
-        return {**r, "rejected": rejected} if r["ok"] else r
+        # Сохранённые списки — окну: поля показывают записи в том виде, как
+        # их понял routelist, рядом с непонятыми.
+        return ({**r, "rejected": rejected, "include": t["include"],
+                 "exclude": t["exclude"]} if r["ok"] else r)
 
     def _remove_tunnel(self, tunnel):
         """Убирает туннель вместе с папкой его конфигов."""

@@ -36,11 +36,10 @@ def _setup(monkeypatch, status):
     return api, runs, shown
 
 
-def test_личный_конфиг_открывается_в_блокноте_с_правами(monkeypatch):
-    api, runs, _ = _setup(monkeypatch, {"profiles": ["nl-1"], "corp": ["corp"],
-                                        "tunnels": [WORK, HOME]})
+def test_конфиг_открывается_в_блокноте_с_правами(monkeypatch):
+    api, runs, _ = _setup(monkeypatch, {"tunnels": [WORK, HOME]})
 
-    api.send("edit_config", {"name": "nl-1", "kind": "personal"})
+    api.send("edit_config", {"tunnel": "home", "name": "nl-1"})
 
     exe, args, show = runs[0]
     # Путь Windows: на Linux-раннере os.path его не разберёт.
@@ -48,30 +47,27 @@ def test_личный_конфиг_открывается_в_блокноте_с
     assert args == [os.path.join(paths.CONF_TUNNELS, "home", "nl-1.conf")] and show
 
 
-def test_рабочий_конфиг_берётся_из_папки_своего_туннеля(monkeypatch):
-    api, runs, _ = _setup(monkeypatch, {"profiles": [], "corp": ["corp"],
-                                        "tunnels": [WORK, HOME]})
+def test_конфиг_берётся_из_папки_своего_туннеля(monkeypatch):
+    api, runs, _ = _setup(monkeypatch, {"tunnels": [WORK, HOME]})
 
-    api.send("edit_config", {"name": "corp", "kind": "corp"})
+    api.send("edit_config", {"tunnel": "work", "name": "corp"})
 
     assert runs[0][1] == [os.path.join(paths.CONF_TUNNELS, "work", "corp.conf")]
 
 
-def test_без_туннеля_этого_типа_не_открывается(monkeypatch):
-    api, runs, shown = _setup(monkeypatch, {"profiles": [], "corp": ["corp"],
-                                            "tunnels": [HOME]})
+def test_без_туннеля_в_статусе_не_открывается(monkeypatch):
+    api, runs, shown = _setup(monkeypatch, {"tunnels": [HOME]})
 
-    api.send("edit_config", {"name": "corp", "kind": "corp"})
+    api.send("edit_config", {"tunnel": "work", "name": "corp"})
 
     assert runs == []
     assert shown[0][0] == "failed"
 
 
 def test_имя_не_из_статуса_не_открывается(monkeypatch):
-    api, runs, shown = _setup(monkeypatch, {"profiles": ["nl-1"], "corp": [],
-                                            "tunnels": [WORK, HOME]})
+    api, runs, shown = _setup(monkeypatch, {"tunnels": [WORK, HOME]})
 
-    api.send("edit_config", {"name": "..\\..\\Windows\\win", "kind": "personal"})
+    api.send("edit_config", {"tunnel": "home", "name": "..\\..\\Windows\\win"})
 
     assert runs == []
     assert shown[0][0] == "failed"
@@ -92,9 +88,9 @@ def test_без_канала_окно_сообщает_стоит_ли_служ�
     assert shown == [("render", {"up": False, "no_service": True, "daemon": False})]
 
 
-def _save_site(monkeypatch, up):
-    """Сохранить настройки рабочей сети; вернуть команды, ушедшие в службу."""
-    ops, shown = [], []
+def _save_rules(monkeypatch, up):
+    """Сохранить правила туннеля; вернуть команды службе и вызовы страницы."""
+    ops, admin, shown = [], [], []
 
     def call(op, **_kw):
         ops.append(op)
@@ -102,25 +98,39 @@ def _save_site(monkeypatch, up):
             return {"ok": False, "error": "нет конфига"}
         return {"ok": True, "status": {"up": up}}
 
+    def admin_call(op, **kw):
+        admin.append((op, kw))
+        return {"ok": True, "include": ["a.ru"], "exclude": [],
+                "rejected": {"include": ["foo_bar"]}}
+
     monkeypatch.setattr(ipc, "call", call)
     api = window.Api({})
-    monkeypatch.setattr(api, "_admin_call", lambda op, **_kw: {"ok": True})
+    monkeypatch.setattr(api, "_admin_call", admin_call)
     monkeypatch.setattr(api, "js", lambda fn, arg=None: shown.append((fn, arg)))
-    api.send("save_site", {"CORP_DOMAINS": "corp.example.com"})
-    return ops, [fn for fn, _ in shown]
+    api.send("save_rules", {"tunnel": "work", "include": "a.ru foo_bar"})
+    return ops, admin, shown
 
 
-def test_настройки_при_выключенном_vpn_не_включают_его(monkeypatch):
-    ops, shown = _save_site(monkeypatch, up=False)
+def test_правила_уходят_текстом_поля_а_ответ_со_списками_на_страницу(monkeypatch):
+    _, admin, shown = _save_rules(monkeypatch, up=False)
+
+    # Только присланные поля: exclude не пришёл — служба его не трогает.
+    assert admin == [("set-tunnel", {"tunnel": "work", "include": "a.ru foo_bar"})]
+    assert ("rulesSaved", {"include": ["a.ru"], "exclude": [],
+                           "rejected": {"include": ["foo_bar"]}}) in shown
+
+
+def test_правка_при_выключенном_vpn_не_включает_его(monkeypatch):
+    ops, _, shown = _save_rules(monkeypatch, up=False)
 
     # Без конфигов «Включить» падало бы с «нет конфига» — его и не зовём.
     assert "start" not in ops and "stop" not in ops
-    assert "failed" not in shown and "restarting" not in shown
-    assert "closeSheet" in shown
+    assert "failed" not in [fn for fn, _ in shown]
+    assert "restarting" not in [fn for fn, _ in shown]
 
 
-def test_настройки_при_включённом_vpn_перезапускают_туннель(monkeypatch):
-    ops, shown = _save_site(monkeypatch, up=True)
+def test_правка_при_включённом_vpn_перезапускает_туннель(monkeypatch):
+    ops, _, shown = _save_rules(monkeypatch, up=True)
 
     assert ops.index("stop") < ops.index("start")
-    assert "restarting" in shown
+    assert "restarting" in [fn for fn, _ in shown]

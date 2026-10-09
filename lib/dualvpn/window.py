@@ -35,7 +35,9 @@ COLD_SHOW_WAIT = 4.0
 # без точек, а кириллица на части сборок под \w не подходит. Из-за «site.env
 # (*.env)» и «Все файлы (*.*)» диалог падал с ValueError ещё до открытия —
 # держим строки латиницей и без точек в описании.
-_FILE_TYPES = ("Config files (*.conf;*.env)", "All files (*.*)")
+_FILE_TYPES = ("Config files (*.conf)", "All files (*.*)")
+# Списки правил туннеля: JSON экспорта или текст списка.
+_RULES_TYPES = ("Rules (*.json;*.txt)", "All files (*.*)")
 
 
 def _is_admin():
@@ -121,6 +123,9 @@ class Api:
         # край — открыто, в панели задач есть, на экране нет.
         self._show_wanted = False
         self._park_lock = threading.Lock()
+        # Файл, про место которого служба спросила (ask): (имя, текст). Ответ
+        # человека приходит через place_config — диалог выбора второй раз не нужен.
+        self._asked = None
 
     # ------------------------------------------------------- приём из JS
 
@@ -166,46 +171,55 @@ class Api:
                 self.js("autostartDone")
                 self.refresh()
         elif name == "use_config":
-            self._guard(ipc.call("set-profile", profile=arg))
-            self.refresh(full=True)
+            # Выбор среди лежащих конфигов — без прав, как set-profile.
+            self._guard(ipc.call("set-active", tunnel=arg["tunnel"], name=arg["name"]))
+            self._apply()
         elif name == "del_config":
-            self._guard(self._admin_call("remove-config", name=arg["name"],
-                                         kind=arg["kind"]))
+            self._guard(self._admin_call("remove-config", tunnel=arg["tunnel"],
+                                         name=arg["name"],
+                                         drop_tunnel=bool(arg.get("drop_tunnel"))))
             self.js("closeSheet")
-            self.refresh(full=True)
+            self._apply()
+        elif name == "del_tunnel":
+            self._guard(self._admin_call("remove-tunnel", tunnel=arg))
+            self._apply()
         elif name == "add_config":
-            self._add_config(arg)
+            self._add_config(arg or {})
+        elif name == "place_config":
+            self._place_config(arg or {})
         elif name == "show_config":
-            self._show_conf(arg["name"], arg["kind"])
+            self._show_conf(arg["tunnel"], arg["name"])
         elif name == "edit_config":
             # Блокнот держит поток, пока его не закроют, — мост не ждёт.
             threading.Thread(target=self._edit_conf,
-                             args=(arg["name"], arg["kind"]), daemon=True).start()
-        elif name == "info":
-            # «i» у колонки показывает тот конфиг, что пойдёт в сборку.
-            st = ipc.call("status").get("status", {})
-            conf = self._confs(st).get(arg) or []
-            chosen = [c for c in conf if c["active"]] or conf[:1]
-            if chosen:
-                self._show_conf(chosen[0]["name"], arg)
-        elif name == "site":
-            self.js("showSite", _parse_env(self._admin_call("get-site").get("text", "")))
-        elif name == "load_site":
-            self._load_site()
-        elif name == "save_site":
-            self._guard(self._admin_call("set-site", text=_format_env(arg or {})))
+                             args=(arg["tunnel"], arg["name"]), daemon=True).start()
+        elif name == "move_config":
+            self._guard(self._admin_call("move-config", tunnel=arg["tunnel"],
+                                         name=arg["name"], to=arg["to"],
+                                         drop_tunnel=bool(arg.get("drop_tunnel"))))
             self.js("closeSheet")
-            # Перезапуск — только чтобы применить настройки к живому туннелю.
-            # Выключенный раньше включался сам, а без конфига падал с ошибкой.
+            self._apply()
+        elif name == "move_tunnel":
+            self._guard(self._admin_call("move-tunnel", tunnel=arg["tunnel"],
+                                         step=int(arg["step"])))
+            self._apply()
+        elif name == "tunnel_rules":
+            self._tunnel_rules(arg)
+        elif name == "save_rules":
+            self._save_rules(arg)
+        elif name == "load_rules":
+            self._load_rules()
+        elif name == "export_rules":
+            self._export_rules(arg)
+        elif name == "log_level":
+            # Как флажок автозапуска: чем бы ни кончился UAC, галочка на
+            # странице вернётся к настоящему уровню.
             try:
-                up = ipc.call("status").get("status", {}).get("up")
-            except ipc.NotRunning:
-                up = False
-            if up:
-                self.js("restarting")
-                ipc.call("stop")
-                self._guard(ipc.call("start", profile=""))
-            self.refresh()
+                self._guard(self._admin_call("set-log-level",
+                                             level="debug" if arg else "info"))
+            finally:
+                self.js("logLevelDone")
+            self._apply()
         elif name == "logs":
             self._push_logs()
         elif name == "install_daemon":
@@ -232,6 +246,22 @@ class Api:
     def _guard(reply):
         if not reply.get("ok"):
             raise RuntimeError(reply.get("error") or "служба отказала")
+
+    def _apply(self):
+        """Правка туннелей действует на живом VPN только после перезапуска
+        (решение #12). Выключенный не включаем: раньше он включался сам,
+        а без конфига падал с ошибкой."""
+        try:
+            try:
+                up = ipc.call("status").get("status", {}).get("up")
+            except ipc.NotRunning:
+                up = False
+            if up:
+                self.js("restarting")
+                ipc.call("stop")
+                self._guard(ipc.call("start", profile=""))
+        finally:
+            self.refresh(full=True)
 
     # ------------------------------------------------------------- права
 
@@ -310,37 +340,16 @@ class Api:
         if full:
             self.js("renderVersion", {"app": st.get("version", paths.version()),
                                       "singbox": st.get("singbox", "")})
-            self.js("renderConfs", self._confs(st))
             self.js("renderHowto", self._howto(st))
             self._push_logs()
 
-    @staticmethod
-    def _confs(st):
-        """Раскладка конфигов по колонкам — ровно та, что ждёт renderConfs."""
-        names = st.get("profiles") or []
-        # Без выбранного профиля сборка берёт единственный личный — его и
-        # подсвечиваем. Из нескольких без выбора не подсвечен ни один.
-        active = st.get("profile") or (names[0] if len(names) == 1 else "")
-        personal = [{"name": n, "active": n == active} for n in names]
-        corp = [{"name": n, "active": False} for n in st.get("corp") or []]
-        return {
-            "corp": corp, "personal": personal,
-            "corp_ambiguous": len(corp) > 1,
-            "personal_ambiguous": len(names) > 1 and active not in names,
-        }
-
     def _check(self):
         """Проверка туннелей службой сейчас; страница на это время пишет
-        «проверяю…» — у каждого конфига, пока не проверен он сам."""
+        «проверяю…» — у каждой плитки, пока не проверен её туннель."""
         self.js("checkStart")
 
         def on_side(st, pending):
-            # Страница до шага окна знает только стороны corp/personal: ждущие
-            # id — в стороны; стороны без туннеля не ждёт никто.
-            items = st.get("tunnels") or []
-            sides = [k for k in tunnels.LEGACY
-                     if (tunnels.by_kind(items, k) or {}).get("id") in pending]
-            self.jsn("checkSides", (st, sides))
+            self.jsn("checkSides", (st, sorted(pending)))
 
         try:
             st = ipc.check_by_side(on_side).get("status")
@@ -361,28 +370,27 @@ class Api:
             reply = {}
         howto = reply.get("howto") or {"endpoints": [], "corp_nets": [],
                                         "corp_domains": []}
-        return {**howto, "corp_dns": st.get("corp_dns", ""),
-                "final": "личный туннель"}
+        return {**howto, "corp_dns": st.get("corp_dns", "")}
 
     def _push_logs(self):
         self.js("renderLogs", ipc.call("log", lines=400).get("lines", []))
 
     # ------------------------------------------------------------ конфиги
 
-    def _show_conf(self, name, kind):
+    def _show_conf(self, tunnel, name):
         """Показывает содержимое конфига. Читает служба — каталог закрыт."""
-        reply = self._admin_call("read-config", name=name, kind=kind)
+        reply = self._admin_call("read-config", tunnel=tunnel, name=name)
         if reply.get("ok"):
-            self.jsn("showConf", [name, kind, reply.get("text", "")])
+            self.jsn("showConf", [tunnel, name, reply.get("text", "")])
         else:
             self.js("failed", reply.get("error") or "не прочитать конфиг")
 
-    def _edit_conf(self, name, kind):
+    def _edit_conf(self, tunnel, name):
         """Открывает конфиг в Блокноте с правами: каталог conf\\ закрыт для
         пользователя. Свой редактор в окне не делаем, как и на macOS.
 
-        Путь собирается только из имени, которое служба сама отдала в
-        статусе: имя приходит со страницы, и «..\\» вывел бы Блокнот с правами
+        Путь собирается только из id и имени, которые служба сама отдала в
+        статусе: они приходят со страницы, и «..\\» вывел бы Блокнот с правами
         за пределы conf\\.
         """
         try:
@@ -390,55 +398,115 @@ class Api:
         except ipc.NotRunning as exc:
             self.js("failed", str(exc))
             return
-        confs = self._confs(st).get(kind) if kind in ("corp", "personal") else []
-        if name not in [c["name"] for c in confs]:
+        t = next((x for x in st.get("tunnels") or [] if x["id"] == tunnel), None)
+        if t is None or name not in (t.get("confs") or []):
             self.js("failed", f"нет конфига «{name}»")
-            return
-        tunnel = tunnels.by_kind(st.get("tunnels", []), kind)
-        if tunnel is None:
-            self.js("failed", f"нет туннеля для конфига «{name}»")
             return
         # Полный путь: с правами запускается то, что найдётся по имени, а
         # PATH и текущий каталог пишет и обычный пользователь.
         notepad = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
                                "System32", "notepad.exe")
-        _run_elevated(notepad, [tunnels.conf_path(tunnel["id"], name)], show=True)
-        self.refresh(full=True)
+        _run_elevated(notepad, [tunnels.conf_path(t["id"], name)], show=True)
+        # Был ли файл изменён, окну не узнать — каталог закрыт. Перезапуск
+        # нужен только выбранному: запасной в сборку не идёт.
+        try:
+            if name == t.get("active"):
+                self._apply()
+            else:
+                self.refresh(full=True)
+        except Exception as exc:                       # noqa: BLE001
+            self.js("failed", f"edit_config: {exc}")
 
-    def _add_config(self, kind):
+    def _pick(self, file_types):
+        """Путь из диалога открытия файла; None — передумали."""
+        import webview
+        picked = self.holder.get("window").create_file_dialog(
+            webview.FileDialog.OPEN, allow_multiple=False, file_types=file_types)
+        return picked[0] if picked else None
+
+    def _add_config(self, arg):
         """Диалог выбора файла и передача его службе.
 
+        arg пустой — место по AllowedIPs выбирает служба (_place); {tunnel} —
+        в этот туннель; {tunnel, place: "replace"} — «Заменить файл…» у плитки.
         Файл читаем здесь, от пользователя: у него есть доступ к своим папкам,
         а у службы под SYSTEM его может не быть — сетевой диск или профиль
         другого пользователя ей просто не видны.
         """
-        import webview
-        w = self.holder.get("window")
-        picked = w.create_file_dialog(
-            webview.OPEN_DIALOG, allow_multiple=False, file_types=_FILE_TYPES)
-        if not picked:
+        path = self._pick(_FILE_TYPES)
+        if not path:
             return
-        path = picked[0]
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
-        # Тип задаёт кнопка, имя чистит служба (buildconfig.safe_name):
-        # там же удаляется прежний рабочий и выбирается новый личный.
+        # Имя чистит служба (tunnels.safe_name).
         name = os.path.splitext(os.path.basename(path))[0]
-        reply = self._admin_call("add-config", name=name, text=text, kind=kind)
+        self._send_config(name, text, arg.get("tunnel", ""), arg.get("place", ""))
+
+    def _place_config(self, arg):
+        """Ответ на вопрос службы о месте: place "replace" (с tunnel) или "new"."""
+        asked, self._asked = self._asked, None
+        if asked is None or arg.get("place") not in ("replace", "new"):
+            return
+        self._send_config(*asked, arg.get("tunnel", ""), arg["place"])
+
+    def _send_config(self, name, text, tunnel, place):
+        reply = self._admin_call("add-config", name=name, text=text,
+                                 tunnel=tunnel, place=place)
+        if reply.get("ask"):
+            # Похоже на конфиг туннеля «по списку»: заменить его или отдельным
+            # туннелем — решает человек; служба при ask ничего не записала.
+            self._asked = (name, text)
+            self.js("askPlace", {**reply["ask"], "file": name})
+            return
         if not reply.get("ok"):
             self.js("failed", reply.get("error") or "не удалось добавить")
             return
-        self.refresh(full=True)
+        self._apply()
 
-    def _load_site(self):
+    # ------------------------------------------------------ туннелирование
+
+    def _tunnel_rules(self, tunnel):
+        """Лист «Туннелирование»: списки — только у администратора (get-tunnels),
+        в них адреса и домены рабочей сети."""
+        reply = self._admin_call("get-tunnels")
+        self._guard(reply)
+        t = next((x for x in reply.get("tunnels") or [] if x["id"] == tunnel), None)
+        if t is None:
+            raise RuntimeError(f"нет туннеля {tunnel}")
+        self.js("showRules", {k: t[k] for k in ("id", "name", "mode", "active",
+                                                "include", "exclude")})
+
+    def _save_rules(self, arg):
+        """Поля листа — текстом, как их ввёл человек: разбирает служба
+        (routelist.parse), непонятое возвращается в rejected и стоит под полем."""
+        lists = {k: arg[k] for k in ("include", "exclude") if k in arg}
+        reply = self._admin_call("set-tunnel", tunnel=arg["tunnel"], **lists)
+        self._guard(reply)
+        self.js("rulesSaved", {"include": reply.get("include", []),
+                               "exclude": reply.get("exclude", []),
+                               "rejected": reply.get("rejected", {})})
+        self._apply()
+
+    def _load_rules(self):
+        path = self._pick(_RULES_TYPES)
+        if not path:
+            return
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            self.js("fillRules", _rules_from_file(fh.read()))
+
+    def _export_rules(self, arg):
+        """Сохранённые списки туннеля — в JSON, который «Загрузить из файла…»
+        примет обратно, в том числе у другого туннеля."""
         import webview
-        w = self.holder.get("window")
-        picked = w.create_file_dialog(
-            webview.OPEN_DIALOG, allow_multiple=False, file_types=_FILE_TYPES)
+        picked = self.holder.get("window").create_file_dialog(
+            webview.FileDialog.SAVE, file_types=_RULES_TYPES,
+            save_filename=f"{tunnels.safe_name(arg.get('name', ''))}.json")
         if not picked:
             return
-        with open(picked[0], encoding="utf-8", errors="replace") as fh:
-            self.js("fillSite", _parse_env(fh.read()))
+        out = {k: [str(x) for x in arg.get(k) or []] for k in ("include", "exclude")}
+        with open(picked[0], "w", encoding="utf-8") as fh:
+            json.dump(out, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
 
     def _install_hint(self):
         self.jsn("showInfo", [
@@ -460,6 +528,24 @@ class Api:
                 fh.write(f"{time.strftime('%H:%M:%S')} {line}\n")
         except OSError:
             pass
+
+
+def _rules_from_file(text):
+    """Поля листа «Туннелирование» из файла: JSON экспорта {include, exclude}
+    раскладывается по полям, любой другой текст — {text}: страница кладёт его
+    в первое поле («пускать», у основного — «мимо VPN»)."""
+    try:
+        data = json.loads(text.lstrip("﻿"))
+    except ValueError:
+        data = None
+    if not isinstance(data, dict) or not ({"include", "exclude"} & data.keys()):
+        return {"text": text}
+    out = {}
+    for key in ("include", "exclude"):
+        val = data.get(key)
+        out[key] = ("\n".join(str(x) for x in val) if isinstance(val, list)
+                    else val if isinstance(val, str) else "")
+    return out
 
 
 # ------------------------------------------------------------ site.env

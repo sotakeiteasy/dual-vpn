@@ -443,7 +443,9 @@ def test_списки_разбираются_а_непонятое_возвра�
     r = core._set_tunnel("work", {"include": "a.ru, 1.2.3.4; *.b.ru  foo_bar",
                                   "name": "Офис"})
 
-    assert r == {"ok": True, "rejected": {"include": ["foo_bar"]}}
+    # Сохранённые списки — в ответе: окно показывает «сохранено N» рядом с непонятым.
+    assert r == {"ok": True, "rejected": {"include": ["foo_bar"]},
+                 "include": ["a.ru", "1.2.3.4/32", "*.b.ru"], "exclude": []}
     t = tunnels.find(tunnels.load(), "work")
     assert t["include"] == ["a.ru", "1.2.3.4/32", "*.b.ru"]
     assert t["name"] == "Офис" and t["exclude"] == []
