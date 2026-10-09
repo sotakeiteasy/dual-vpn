@@ -76,11 +76,6 @@ def _icon_image(state):
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.ellipse((6, 6, size - 6, size - 6), fill=COLORS.get(state, COLORS["off"]))
-    if state == "up":
-        # Вторая, меньшая точка: два туннеля — два кружка. На беглый взгляд
-        # видно не только «включено», но и что поднято именно наше двойное.
-        d.ellipse((size // 2 - 4, size // 2 - 4, size // 2 + 4, size // 2 + 4),
-                  fill=(255, 255, 255, 255))
     return img
 
 
