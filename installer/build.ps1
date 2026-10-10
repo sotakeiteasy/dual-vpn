@@ -1,8 +1,8 @@
-﻿# Сборка DualVPN: три exe через PyInstaller, затем установщик через Inno Setup.
+﻿# Сборка TunnelVPN: три exe через PyInstaller, затем установщик через Inno Setup.
 #
 #   powershell -ExecutionPolicy Bypass -File installer\build.ps1
 #
-# Готовый установщик кладётся в installer\Output\DualVPN-<версия>-setup.exe.
+# Готовый установщик кладётся в installer\Output\TunnelVPN-<версия>-setup.exe.
 # Запускать из корня репозитория или откуда угодно — путь вычисляется сам.
 #
 # ВАЖНО: файл сохранён в UTF-8 С BOM. Windows PowerShell 5.1 (powershell.exe,
@@ -17,7 +17,7 @@ $Bin = Join-Path $Root 'lib\bin'
 $Inst = Join-Path $Root 'installer'
 $Version = (Get-Content (Join-Path $Root 'VERSION') -Raw).Trim()
 
-Write-Host "-> DualVPN $Version, корень: $Root"
+Write-Host "-> TunnelVPN $Version, корень: $Root"
 
 # --- Бинарники должны быть на месте ДО сборки: PyInstaller кладёт их внутрь
 # сборки, и без них установщик соберётся, а приложение работать не будет.
@@ -78,7 +78,7 @@ if ($LASTEXITCODE -ne 0) { throw "pip install вернул $LASTEXITCODE" }
 if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller вернул $LASTEXITCODE" }
 
 # --- Значок
-& $Py (Join-Path $Inst 'make_icon.py') (Join-Path $Inst 'DualVPN.ico')
+& $Py (Join-Path $Inst 'make_icon.py') (Join-Path $Inst 'TunnelVPN.ico')
 
 Push-Location $Root
 try {
@@ -86,43 +86,43 @@ try {
     & $Py -m PyInstaller --noconfirm --clean `
         --distpath (Join-Path $Root 'dist') `
         --workpath (Join-Path $Root 'build') `
-        (Join-Path $Inst 'dualvpn.spec')
+        (Join-Path $Inst 'tunnelvpn.spec')
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller вернул $LASTEXITCODE" }
 
     # Бинарники кладём рядом с exe: paths.BIN у обычной сборки — это папка
     # приложения, и sing-box ищет wintun.dll в своём каталоге.
     # Портативному это не нужно: у него оба файла уже внутри.
-    $Dist = Join-Path $Root 'dist\DualVPN'
+    $Dist = Join-Path $Root 'dist\TunnelVPN'
     Copy-Item (Join-Path $Bin 'sing-box.exe') $Dist -Force
     Copy-Item (Join-Path $Bin 'wintun.dll') $Dist -Force
 
-    # Дымовая проверка: установщик зовёт dualvpn.exe для службы, и если под
+    # Дымовая проверка: установщик зовёт tunnelvpn.exe для службы, и если под
     # этим именем окажется не CLI (так было, когда трей назывался DualVPN.exe
     # и ложился поверх), установка зависает намертво. Лучше упасть здесь.
-    $Cli = Join-Path $Dist 'dualvpn.exe'
+    $Cli = Join-Path $Dist 'tunnelvpn.exe'
     $p = Start-Process $Cli -ArgumentList 'version' -NoNewWindow -PassThru `
         -RedirectStandardOutput (Join-Path $Root 'build\cli-version.txt')
     if (-not $p.WaitForExit(30000)) {
         Stop-Process -Id $p.Id -Force
-        throw 'dualvpn.exe version не ответил за 30 с — под этим именем не CLI?'
+        throw 'tunnelvpn.exe version не ответил за 30 с — под этим именем не CLI?'
     }
     $out = Get-Content (Join-Path $Root 'build\cli-version.txt') -Raw
     if ($out -notmatch [regex]::Escape($Version)) {
-        throw "dualvpn.exe version: ждали $Version, получили: $out"
+        throw "tunnelvpn.exe version: ждали $Version, получили: $out"
     }
     # Служба ищет sing-box.exe и wintun.dll там же, где их видит version.
     # Раз они уже не там, где их кладёт сборка, — установленная версия не
     # поднимет туннель, хотя всё остальное в ней работает.
     if ($out -match 'MISSING') {
-        throw "dualvpn.exe не находит бинарники:`n$out"
+        throw "tunnelvpn.exe не находит бинарники:`n$out"
     }
-    if (-not (Test-Path (Join-Path $Dist 'DualVPN-Tray.exe'))) {
-        throw 'нет DualVPN-Tray.exe в dist\DualVPN'
+    if (-not (Test-Path (Join-Path $Dist 'TunnelVPN-Tray.exe'))) {
+        throw 'нет TunnelVPN-Tray.exe в dist\TunnelVPN'
     }
-    # Ресурс версии собирает dualvpn.spec. Пустое описание — и диспетчер
-    # задач снова покажет вместо «DualVPN» имя файла.
-    foreach ($exe in (Join-Path $Dist 'dualvpn.exe'), (Join-Path $Dist 'DualVPN-Tray.exe'),
-                     (Join-Path $Root 'dist\DualVPN-Portable.exe')) {
+    # Ресурс версии собирает tunnelvpn.spec. Пустое описание — и диспетчер
+    # задач снова покажет вместо «TunnelVPN» имя файла.
+    foreach ($exe in (Join-Path $Dist 'tunnelvpn.exe'), (Join-Path $Dist 'TunnelVPN-Tray.exe'),
+                     (Join-Path $Root 'dist\TunnelVPN-Portable.exe')) {
         $desc = (Get-Item $exe).VersionInfo.FileDescription
         if (-not $desc) { throw "у $exe нет FileDescription — ресурс версии не собрался" }
     }
@@ -130,10 +130,10 @@ try {
     Pop-Location
 }
 
-$Portable = Join-Path $Root 'dist\DualVPN-Portable.exe'
+$Portable = Join-Path $Root 'dist\TunnelVPN-Portable.exe'
 if (Test-Path $Portable) {
     $mb = [math]::Round((Get-Item $Portable).Length / 1MB)
-    Write-Host "-> портативный: dist\DualVPN-Portable.exe ($mb МБ)"
+    Write-Host "-> портативный: dist\TunnelVPN-Portable.exe ($mb МБ)"
 }
 
 # --- Установщик
@@ -150,6 +150,6 @@ if (-not $Iscc) {
     exit 0
 }
 
-& $Iscc "/DMyVersion=$Version" (Join-Path $Inst 'dualvpn.iss')
+& $Iscc "/DMyVersion=$Version" (Join-Path $Inst 'tunnelvpn.iss')
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup вернул $LASTEXITCODE" }
-Write-Host "-> готово: installer\Output\DualVPN-$Version-setup.exe"
+Write-Host "-> готово: installer\Output\TunnelVPN-$Version-setup.exe"

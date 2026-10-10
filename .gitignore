@@ -3,15 +3,15 @@ conf/*.conf
 conf/site.env
 !conf/*.example
 
-# Рабочее состояние живёт в %ProgramData%\DualVPN, но при запуске из
-# исходников с DUALVPN_DATA=. оно оседает здесь.
+# Рабочее состояние живёт в %ProgramData%\TunnelVPN, но при запуске из
+# исходников с TUNNELVPN_DATA=. оно оседает здесь.
 state/
 lib/state/
 
 # Бинарники: sing-box.exe ~60 МБ и wintun.dll, качаются отдельно (см. README).
 lib/bin/
 
-# Окружение и сборка. installer/dualvpn.spec написан руками и в репозитории
+# Окружение и сборка. installer/tunnelvpn.spec написан руками и в репозитории
 # нужен — игнорируем только то, что PyInstaller генерирует сам, в build/.
 lib/venv/
 build/
@@ -24,7 +24,7 @@ __pycache__/
 installer/Output/
 
 # Генерируется из icon.svg при сборке.
-lib/dualvpn/ui/icons/
+lib/tunnelvpn/ui/icons/
 *.ico
 
 # Локальные индексы инструментов разработки — у каждого свои, в репозитории

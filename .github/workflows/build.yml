@@ -4,8 +4,8 @@
 # собранное дополнительно прикладывается к релизу.
 #
 # Готовые файлы лежат в артефактах прогона:
-#   DualVPN-Portable.exe   портативная версия, один файл
-#   DualVPN-setup.exe      установщик (служба, ярлыки, автозапуск)
+#   TunnelVPN-Portable.exe   портативная версия, один файл
+#   TunnelVPN-setup.exe      установщик (служба, ярлыки, автозапуск)
 
 name: build
 
@@ -86,14 +86,14 @@ jobs:
       - name: Портативная версия
         uses: actions/upload-artifact@v4
         with:
-          name: DualVPN-Portable
-          path: dist/DualVPN-Portable.exe
+          name: TunnelVPN-Portable
+          path: dist/TunnelVPN-Portable.exe
           if-no-files-found: error
 
       - name: Установщик
         uses: actions/upload-artifact@v4
         with:
-          name: DualVPN-setup
+          name: TunnelVPN-setup
           path: installer/Output/*.exe
           if-no-files-found: error
 
@@ -102,13 +102,13 @@ jobs:
       - name: Распакованная версия
         uses: actions/upload-artifact@v4
         with:
-          name: DualVPN-dist
-          path: dist/DualVPN/
+          name: TunnelVPN-dist
+          path: dist/TunnelVPN/
 
       - name: Приложить к релизу
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/DualVPN-Portable.exe
+            dist/TunnelVPN-Portable.exe
             installer/Output/*.exe

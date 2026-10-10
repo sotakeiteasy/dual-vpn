@@ -1,11 +1,12 @@
-﻿; Установщик DualVPN. Собирается из installer\build.ps1, руками звать не нужно.
+﻿; Установщик TunnelVPN. Собирается из installer\build.ps1, руками звать не нужно.
 ;
 ; Что делает сверх обычного копирования файлов:
-;   * заводит C:\ProgramData\DualVPN с раздельными правами на conf\ и state\
-;   * ставит и запускает службу DualVPN
+;   * заводит C:\ProgramData\TunnelVPN с раздельными правами на conf\ и state\
+;   * ставит и запускает службу TunnelVPN
 ;   * при удалении снимает службу, но оставляет конфиги
 ;   * поверх установленной версии спрашивает: обновить или удалить
 ;   * тихое обновление возвращает туннель и трей, как они были
+;   * переносит установку под прежним именем DualVPN (MigrateLegacy в [Code])
 ;
 ; ВАЖНО: файл в UTF-8 С BOM. Без BOM Inno Setup читает его как ANSI, и вся
 ; кириллица в подписях кнопок и сообщениях превращается в мусор. Та же беда,
@@ -15,9 +16,13 @@
   #define MyVersion "0.0.0"
 #endif
 
-#define MyName "DualVPN"
-#define MyExe "DualVPN-Tray.exe"
-#define MyCli "dualvpn.exe"
+#define MyName "TunnelVPN"
+#define MyExe "TunnelVPN-Tray.exe"
+#define MyCli "tunnelvpn.exe"
+; Прежнее имя проекта: с него переезжают уже установленные копии.
+#define LegacyName "DualVPN"
+#define LegacyExe "DualVPN-Tray.exe"
+#define LegacyCli "dualvpn.exe"
 
 [Setup]
 ; Тот же GUID — в UninstKey в [Code]: по нему ищется установленная версия.
@@ -28,10 +33,14 @@ AppPublisher=Enkeym
 AppUpdatesURL=https://github.com/enkeym/dual-vpn
 DefaultDirName={autopf}\{#MyName}
 DefaultGroupName={#MyName}
+; AppId общий с DualVPN, и Inno взял бы её папку и группу ярлыков из реестра:
+; программа осталась бы в Program Files\DualVPN под новым именем.
+UsePreviousAppDir=no
+UsePreviousGroup=no
 UninstallDisplayIcon={app}\{#MyExe}
 OutputDir=Output
 OutputBaseFilename={#MyName}-{#MyVersion}-setup
-SetupIconFile=DualVPN.ico
+SetupIconFile=TunnelVPN.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -55,7 +64,7 @@ Name: "desktopicon"; Description: "Значок на рабочем столе";
 ; uninsrestartdelete: файл, который при удалении занят (служба журнала событий
 ; держит servicemanager.pyd, если хоть раз показывала записи службы), удаляется
 ; при перезагрузке, а не остаётся в Program Files навсегда.
-Source: "..\dist\DualVPN\*"; DestDir: "{app}"; \
+Source: "..\dist\TunnelVPN\*"; DestDir: "{app}"; \
   Flags: ignoreversion recursesubdirs createallsubdirs uninsrestartdelete
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -78,6 +87,7 @@ Name: "{autodesktop}\{#MyName}"; Filename: "{app}\{#MyExe}"; Tasks: desktopicon
 ; Ярлык автозапуска из прошлых версий: трей теперь требует администратора,
 ; и из «Автозагрузки» Windows его просто не запустит.
 Type: files; Name: "{userstartup}\{#MyName}.lnk"
+Type: files; Name: "{userstartup}\{#LegacyName}.lnk"
 ; Образцы конфигов, которые клали версии до 0.2.9: их больше не поставляем.
 Type: filesandordirs; Name: "{app}\examples"
 
@@ -131,10 +141,10 @@ Filename: "{app}\{#MyExe}"; Description: "Запустить {#MyName}"; \
 
 [UninstallRun]
 ; Трей — отдельный процесс со своим списком открытых файлов в _internal\
-; (общих с dualvpn.exe). Пока он жив, деинсталлятор не может удалить папку и
+; (общих с tunnelvpn.exe). Пока он жив, деинсталлятор не может удалить папку и
 ; падает на «файл занят» — снятие службы ниже этого не решает вовсе, служба
 ; и трей друг с другом никак не связаны. Убиваем первым делом, до всего.
-; /T — вместе с окном, которое трей держит прогретым (dualvpn.exe window).
+; /T — вместе с окном, которое трей держит прогретым (tunnelvpn.exe window).
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#MyExe} /F /T"; \
   Flags: runhidden waituntilterminated; RunOnceId: "KillTray"
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyName} Tray"" /F"; \
@@ -144,11 +154,11 @@ Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""{#MyName} Tray"" /F";
 ; в удалённый адаптер.
 Filename: "{app}\{#MyCli}"; Parameters: "stop"; \
   Flags: runhidden waituntilterminated; RunOnceId: "StopTunnel"
-; net stop, а не «dualvpn service stop»: тот только посылает команду и сразу
+; net stop, а не «tunnelvpn service stop»: тот только посылает команду и сразу
 ; выходит, и файлы ещё заняты процессом службы, когда их начинают удалять.
 Filename: "{sys}\net.exe"; Parameters: "stop {#MyName}"; \
   Flags: runhidden waituntilterminated; RunOnceId: "StopService"
-; Окно, пережившее трей, держит dualvpn.exe и _internal\. Служба уже
+; Окно, пережившее трей, держит tunnelvpn.exe и _internal\. Служба уже
 ; остановлена, так что под этим именем остались только окна.
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM {#MyCli} /F /T"; \
   Flags: runhidden waituntilterminated; RunOnceId: "KillWindow"
@@ -175,29 +185,59 @@ var
   // Что было до обновления: RestoreAfterUpdate возвращает так же.
   TunnelWasUp, TrayWasRunning: Boolean;
 
-// Закрывает трей, окно и службу: иначе файлы заняты (служба работает из
-// {app}\dualvpn.exe) и обновление падает на середине, оставляя половину
-// старой версии. net stop, а не sc stop: ждёт, пока служба действительно
-// остановится и опустит туннель. dualvpn.exe убиваем только после неё —
-// под этим именем работает и служба, и окно трея.
-procedure StopEverything;
+// Убивает процессы Image вместе с дочерними. True — было что убить.
+function KillImage(const Image: String): Boolean;
 var
   ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM ' + Image + ' /F /T',
+                 '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+// Был ли поднят туннель у службы с данными в {commonappdata}\Name. Читать до
+// остановки службы. status.json пишет служба (probe.py:write_status),
+// отступ 1 — "up": true.
+function TunnelUp(const Name: String): Boolean;
+var
   Status: AnsiString;
 begin
-  // /T — вместе с окном, которое трей держит прогретым. 0 — было что убить.
-  TrayWasRunning := Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#MyExe} /F /T',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
-  // status.json пишет служба (probe.py:write_status), отступ 1 — "up": true.
-  TunnelWasUp := LoadStringFromFile(
-       ExpandConstant('{commonappdata}\{#MyName}\state\status.json'), Status)
-       and (Pos('"up": true', Status) > 0);
+  Result := LoadStringFromFile(ExpandConstant('{commonappdata}\') + Name + '\state\status.json',
+                               Status) and (Pos('"up": true', Status) > 0);
+end;
+
+// net stop, а не sc stop: ждёт, пока служба действительно остановится и
+// опустит туннель. True — служба работала и остановилась.
+function StopService(const Name: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec(ExpandConstant('{sys}\net.exe'), 'stop ' + Name,
+                 '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+// Закрывает трей, окно и службу: иначе файлы заняты (служба работает из
+// {app}\tunnelvpn.exe) и обновление падает на середине, оставляя половину
+// старой версии. То же для установки под прежним именем DualVPN: её служба,
+// остановившись, сама снимает свои маршруты и правила. CLI убиваем только
+// после службы — под этим именем работает и служба, и окно трея.
+procedure StopEverything;
+var
+  LegacyUp: Boolean;
+begin
+  // /T — вместе с окном, которое трей держит прогретым.
+  TrayWasRunning := KillImage('{#MyExe}');
+  if KillImage('{#LegacyExe}') then
+    TrayWasRunning := True;
   // Служба не работала — status.json старый, туннеля не было.
-  if not Exec(ExpandConstant('{sys}\net.exe'), 'stop {#MyName}',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+  TunnelWasUp := TunnelUp('{#MyName}');
+  if not StopService('{#MyName}') then
     TunnelWasUp := False;
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM {#MyCli} /F /T',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  LegacyUp := TunnelUp('{#LegacyName}');
+  if not StopService('{#LegacyName}') then
+    LegacyUp := False;
+  TunnelWasUp := TunnelWasUp or LegacyUp;
+  KillImage('{#MyCli}');
+  KillImage('{#LegacyCli}');
 end;
 
 // После запуска новой службы — как было до обновления. Туннель при
@@ -247,13 +287,17 @@ begin
   ActionPage.SelectedValueIndex := 0;
 end;
 
-// Данные WebView2 окна (window.py:_storage_path). Только эти папки, не весь
-// %LOCALAPPDATA%\DualVPN: туда кладёт конфиги портативная версия.
-procedure DeleteWindowData;
+// Данные WebView2 окна (window.py:_storage_path) в %LOCALAPPDATA%\Name.
+// Только эти папки, не всю: туда кладёт конфиги портативная версия
+// (portable.data_dir, и под прежним именем — её же _adopt).
+procedure DeleteWindowData(const Name: String);
+var
+  Dir: String;
 begin
-  DelTree(ExpandConstant('{localappdata}\{#MyName}\WebView2-admin'), True, True, True);
-  DelTree(ExpandConstant('{localappdata}\{#MyName}\WebView2-user'), True, True, True);
-  RemoveDir(ExpandConstant('{localappdata}\{#MyName}'));
+  Dir := ExpandConstant('{localappdata}\') + Name;
+  DelTree(Dir + '\WebView2-admin', True, True, True);
+  DelTree(Dir + '\WebView2-user', True, True, True);
+  RemoveDir(Dir);
 end;
 
 // Удаление прежней установкой: её деинсталлятор знает, что она ставила.
@@ -273,9 +317,14 @@ begin
            'Попробуй через «Параметры → Приложения».', mbError, MB_OK);
     Exit;
   end;
-  DeleteWindowData;
+  // Удалять могли и установку под прежним именем: её данные — под ним же.
+  DeleteWindowData('{#MyName}');
+  DeleteWindowData('{#LegacyName}');
   if Purge then
+  begin
     DelTree(ExpandConstant('{commonappdata}\{#MyName}'), True, True, True);
+    DelTree(ExpandConstant('{commonappdata}\{#LegacyName}'), True, True, True);
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -310,12 +359,79 @@ begin
                                'DeleteFlag', Flag) and (Flag = 1);
 end;
 
-function PrepareToInstall(var NeedsRestart: Boolean): String;
+// Версии до 0.2.7 писали в журнал событий, и служба журнала держит
+// servicemanager.pyd загруженным до перезагрузки: ни перезаписать его, ни
+// удалить нельзя, и установка встала бы на «файл занят». Загруженную DLL можно
+// переименовать — убираем её с дороги, а старую копию удалит перезагрузка.
+procedure MoveAsideLocked(const AppDir: String);
 var
   SmPyd, Old: String;
+begin
+  SmPyd := AppDir + '\_internal\win32\servicemanager.pyd';
+  if FileExists(SmPyd) and not DeleteFile(SmPyd) then
+  begin
+    Old := SmPyd + '.old';
+    DeleteFile(Old);
+    if RenameFile(SmPyd, Old) then
+    begin
+      RestartReplace(Old, '');
+      // И папки за ним — иначе после удаления программы и перезагрузки
+      // оставались бы пустые _internal\win32. Непустые Windows не тронет.
+      RestartReplace(ExtractFileDir(SmPyd), '');
+      RestartReplace(ExtractFileDir(ExtractFileDir(SmPyd)), '');
+      RestartReplace(AppDir, '');
+    end;
+  end;
+end;
+
+// Переезд с DualVPN — прежнего имени проекта. AppId общий, поэтому установщик
+// видит её как прошлую версию, но служба, задача, папки и ярлыки у неё свои,
+// и новая установка поверх них ничего не перепишет. StopEverything уже
+// остановил её службу (туннель, маршруты, NRPT и правило IPv6 она сняла сама)
+// и убил процессы. Правила аварийно умершей службы снимет уже новая служба:
+// winnet.LEGACY_NRPT_COMMENT и LEGACY_V6_RULE. '' — можно ставить дальше.
+function MigrateLegacy: String;
+var
+  OldData, NewData, OldApp: String;
+  ResultCode: Integer;
+begin
+  Result := '';
+  OldData := ExpandConstant('{commonappdata}\{#LegacyName}');
+  NewData := ExpandConstant('{commonappdata}\{#MyName}');
+  // Конфиги и ключи первыми: не переехали — прежнюю установку не трогаем,
+  // её служба с автозапуском поднимется после перезагрузки как была.
+  // Переименование на том же томе сохраняет права conf\ и state\run\.
+  if DirExists(OldData) and not DirExists(NewData) and not RenameFile(OldData, NewData) then
+  begin
+    Result := 'Не получилось перенести данные ' + OldData + ' в ' + NewData +
+              ': их держит другая программа. Перезагрузи компьютер и запусти установку снова.';
+    Exit;
+  end;
+  Exec(ExpandConstant('{sys}\sc.exe'), 'delete {#LegacyName}',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "{#LegacyName} Tray" /F',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Её деинсталлятор не зовём: он снёс бы общую запись AppId в реестре и
+  // state\ уже перенесённых данных искал бы по старому пути. Чистим сами.
+  OldApp := ExpandConstant('{autopf}\{#LegacyName}');
+  if DirExists(OldApp) then
+  begin
+    MoveAsideLocked(OldApp);
+    DelTree(OldApp, True, True, True);
+  end;
+  DelTree(ExpandConstant('{autoprograms}\{#LegacyName}'), True, True, True);
+  DeleteFile(ExpandConstant('{autodesktop}\{#LegacyName}.lnk'));
+  DeleteWindowData('{#LegacyName}');
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
   I: Integer;
 begin
   StopEverything;
+  Result := MigrateLegacy;
+  if Result <> '' then
+    Exit;
 
   // Дескриптор мог держать только что убитый трей — даём Windows дочистить.
   for I := 1 to 20 do
@@ -331,25 +447,7 @@ begin
     Exit;
   end;
 
-  // Версии до 0.2.7 писали в журнал событий, и служба журнала держит
-  // servicemanager.pyd загруженным до перезагрузки: перезаписать его нельзя,
-  // и установка встала бы на «файл занят». Загруженную DLL можно
-  // переименовать — убираем её с дороги, а старую копию удалит перезагрузка.
-  SmPyd := ExpandConstant('{app}\_internal\win32\servicemanager.pyd');
-  if FileExists(SmPyd) and not DeleteFile(SmPyd) then
-  begin
-    Old := SmPyd + '.old';
-    DeleteFile(Old);
-    if RenameFile(SmPyd, Old) then
-    begin
-      RestartReplace(Old, '');
-      // И папки за ним — иначе после удаления программы и перезагрузки
-      // оставались бы пустые _internal\win32. Непустые Windows не тронет.
-      RestartReplace(ExtractFileDir(SmPyd), '');
-      RestartReplace(ExtractFileDir(ExtractFileDir(SmPyd)), '');
-      RestartReplace(ExpandConstant('{app}'), '');
-    end;
-  end;
+  MoveAsideLocked(ExpandConstant('{app}'));
   Result := '';
 end;
 
@@ -382,11 +480,11 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
-    DeleteWindowData;
+    DeleteWindowData('{#MyName}');
   if (CurUninstallStep = usPostUninstall) and not UninstallSilent then
     if MsgBox('Удалить также конфиги и ключи VPN?' + #13#10 + #13#10 +
               ExpandConstant('{commonappdata}\{#MyName}') + #13#10 + #13#10 +
-              'Если собираешься поставить DualVPN заново, ответь «Нет» — ' +
+              'Если собираешься поставить {#MyName} заново, ответь «Нет» — ' +
               'конфиги останутся и подхватятся.',
               mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       DelTree(ExpandConstant('{commonappdata}\{#MyName}'), True, True, True);
