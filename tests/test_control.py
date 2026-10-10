@@ -91,7 +91,7 @@ class FakeDaemon(control.Ops):
         if self.start_mode == "ok":
             self.at(3, self._set(up=True))
         elif self.start_mode == "config_error":
-            self.at(1, self._write_error("не удалось собрать конфиг — правь conf/*.conf\n"
+            self.at(1, self._write_error("could not build the config — fix conf/*.conf\n"
                                          "ValueError: '25-35'"))
             self.at(1.5, self._set(running=False))
         elif self.start_mode == "silent_exit":
@@ -170,12 +170,26 @@ class StartTests(unittest.TestCase):
         ctrl, ops, _, changes = make("ok")
         step = "перезапускаю sing-box: порт занят (попытка 1 из 3)…"
         ops.at(1, ops._set(session=["=== старт ===", "→ запускаю sing-box…",
-                                    "→ перезапускаю sing-box: порт занят (попытка 1 из 3)"]))
+                                    "→ restarting sing-box: port busy (attempt 1 of 3)"]))
         snap = run(ctrl, "start")
         self.assertEqual(snap["error"], "")
         steps = [c["step"] for c in changes]
         self.assertEqual(steps.count(step), 1,
                          "шага нет или он перерисовывается на каждом опросе")
+
+    def test_watchdog_step_follows_ui_language(self):
+        # Строка службы английская, шаг — на языке интерфейса.
+        line = "→ restarting sing-box: port busy (attempt 2 of 3)"
+        i18n.LANG = "en"
+        try:
+            self.assertEqual(control.restart_step([line]),
+                             "restarting sing-box: port busy (attempt 2 of 3)…")
+        finally:
+            i18n.LANG = "ru"
+        self.assertEqual(control.restart_step([line]),
+                         "перезапускаю sing-box: порт занят (попытка 2 из 3)…")
+        self.assertEqual(control.restart_step(["→ restarting sing-box: other"]),
+                         "перезапускаю sing-box…")
 
     def test_already_up_does_not_kick(self):
         # kickstart -k на поднятой службе — это её убийство и перезапуск.
@@ -188,7 +202,7 @@ class StartTests(unittest.TestCase):
         ctrl, ops, clock, _ = make("config_error")
         t0 = clock.now()
         snap = run(ctrl, "start")
-        self.assertIn("не удалось собрать конфиг", snap["error"])
+        self.assertIn("could not build the config", snap["error"])
         self.assertIn("25-35", snap["error"])
         self.assertTrue(snap["error_log"], "к ошибке не приложен лог")
         # Причину узнаём сразу, а не по таймауту.
@@ -280,7 +294,7 @@ class RestartTests(unittest.TestCase):
     def test_restart_reports_start_failure(self):
         ctrl, ops, _, _ = make(start_mode="config_error", up=True, running=True)
         snap = run(ctrl, "restart")
-        self.assertIn("не удалось собрать конфиг", snap["error"])
+        self.assertIn("could not build the config", snap["error"])
 
 
 class ConcurrencyTests(unittest.TestCase):
@@ -321,9 +335,9 @@ class SnapshotTests(unittest.TestCase):
     def test_shows_daemon_error_when_idle(self):
         # Служба упала сама, пока окно было закрыто: ошибку всё равно видно.
         ctrl, ops, clock, _ = make()
-        ops.err_text, ops.err_time = "tun не поднялся за 30 с", clock.now()
+        ops.err_text, ops.err_time = "tun did not come up in 30 s", clock.now()
         snap = ctrl.snapshot()
-        self.assertEqual(snap["error"], "tun не поднялся за 30 с")
+        self.assertEqual(snap["error"], "tun did not come up in 30 s")
         self.assertTrue(snap["error_log"])
 
     def test_dismiss(self):

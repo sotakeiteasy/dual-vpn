@@ -82,15 +82,24 @@ def read_last_error(path, since=0.0):
 
 # Строка сторожа в логе службы (vpn: run_singbox) и сколько строк хвоста
 # смотреть: между строкой и проверкой sing-box успевает написать десяток своих.
-RESTART_MARK = "→ перезапускаю sing-box: "
+RESTART_MARK = "→ restarting sing-box: "
+RESTART_TRY = re.compile(r"\(attempt (\d+) of (\d+)\)")
 RESTART_TAIL = 40
 
 
 def restart_step(lines):
-    """Шаг «перезапускаю sing-box: …» по последней такой строке лога, или ''."""
+    """Шаг «перезапускаю sing-box: …» по последней такой строке лога, или ''.
+
+    Строка службы всегда английская, шаг — на языке интерфейса.
+    """
     for line in reversed(lines):
         if line.startswith(RESTART_MARK):
-            return line[len("→ "):] + "…"
+            m = RESTART_TRY.search(line)
+            if not m:
+                return t("перезапускаю sing-box…", "restarting sing-box…")
+            n, total = m.groups()
+            return t(f"перезапускаю sing-box: порт занят (попытка {n} из {total})…",
+                     f"restarting sing-box: port busy (attempt {n} of {total})…")
     return ""
 
 

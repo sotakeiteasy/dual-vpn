@@ -73,7 +73,7 @@ def personal_patterns():
     if not name:
         return PERSONAL_PAT
     if os.sep in name:
-        sys.exit(f"профиль — это имя файла в conf/, без путей: получено {name!r}")
+        sys.exit(f"a profile is a file name in conf/, without a path: got {name!r}")
     stem = re.escape(name[:-5] if name.lower().endswith(".conf") else name)
     return (rf"^{stem}\.conf$",)
 
@@ -92,7 +92,7 @@ def pick_conf(what, patterns, exclude=None):
     try:
         files = sorted(os.listdir(CONF))
     except OSError:
-        sys.exit(f"нет каталога {CONF}\nсоздай его и положи туда .conf")
+        sys.exit(f"no directory {CONF}\ncreate it and put the .conf files there")
 
     for pat in patterns:
         found = [
@@ -102,15 +102,15 @@ def pick_conf(what, patterns, exclude=None):
         ]
         if len(found) > 1:
             names = ", ".join(os.path.basename(f) for f in found)
-            sys.exit(f"{what} конфиг неоднозначен: подходят {names}\n"
-                     f"оставь в {CONF} только один")
+            sys.exit(f"the {what} config is ambiguous: {names} all match\n"
+                     f"keep only one in {CONF}")
         if found:
             return found[0]
 
     have = list_profiles()
-    sys.exit(f"в {CONF} не найден {what} конфиг\n"
-             f"ожидаю имя вида: {', '.join(p.strip('^$') for p in patterns)}\n"
-             f"есть: {', '.join(have) if have else '(пусто)'}")
+    sys.exit(f"no {what} config found in {CONF}\n"
+             f"expected a name like: {', '.join(p.strip('^$') for p in patterns)}\n"
+             f"found: {', '.join(have) if have else '(none)'}")
 
 
 def parse_conf(path):
@@ -130,7 +130,7 @@ def parse_conf(path):
             key, val = line.split("=", 1)
             out[section][key.strip().lower()] = val.strip()
     if not out["interface"] or not out["peer"]:
-        sys.exit(f"{path}: не хватает секции [Interface] или [Peer]")
+        sys.exit(f"{path}: missing the [Interface] or [Peer] section")
     return out
 
 
@@ -153,11 +153,11 @@ def endpoint(conf, tag, default_mtu):
     for required, where in (("privatekey", iface), ("publickey", peer),
                             ("endpoint", peer), ("allowedips", peer)):
         if required not in where:
-            sys.exit(f"[{tag}] в конфиге нет обязательного поля {required}")
+            sys.exit(f"[{tag}] the config is missing the required field {required}")
 
     host, _, port = peer["endpoint"].rpartition(":")
     if not port.isdigit():
-        sys.exit(f"[{tag}] Endpoint должен быть host:port, получено {peer['endpoint']!r}")
+        sys.exit(f"[{tag}] Endpoint must be host:port, got {peer['endpoint']!r}")
 
     # Имя резолвим ЗДЕСЬ, пока системный DNS ещё обычный. Иначе sing-box при
     # старте попробует резолвить его через свой же туннель, который в этот
@@ -167,7 +167,7 @@ def endpoint(conf, tag, default_mtu):
         try:
             host = socket.getaddrinfo(name, None, socket.AF_INET)[0][4][0]
         except OSError as exc:
-            sys.exit(f"[{tag}] не удалось резолвить {name}: {exc}")
+            sys.exit(f"[{tag}] could not resolve {name}: {exc}")
 
         # НЕ подменять частный адрес публичным. Корп-сервер доступен по
         # внутреннему адресу (имя из конфига -> адрес внутри сети), и именно на
@@ -237,7 +237,7 @@ def as_int(value, tag, field):
     try:
         return int(str(value).strip())
     except ValueError:
-        sys.exit(f"[{tag}] {field} = {value!r}: ожидаю целое число")
+        sys.exit(f"[{tag}] {field} = {value!r}: expected an integer")
 
 
 def num_or_range(value, tag, field):
@@ -267,7 +267,7 @@ def corp_routes(conf):
             continue
         nets.append(str(net))
     if not nets:
-        sys.exit("[corp] в AllowedIPs нет ни одной IPv4-подсети")
+        sys.exit("[corp] AllowedIPs has no IPv4 subnet")
     return nets
 
 
@@ -322,8 +322,8 @@ def main():
     # запуска, поэтому его это не касается; запрет — на ручные пересборки.
     pid = running_pid()
     if pid and "--force" not in sys.argv and "--out" not in sys.argv:
-        sys.exit(f"sing-box уже работает (pid {pid}) — конфиг не трогаю.\n"
-                 f"Останови его (`vpn stop`) или пересобери в другой файл:\n"
+        sys.exit(f"sing-box is already running (pid {pid}) — leaving the config alone.\n"
+                 f"Stop it (`vpn stop`) or build into another file:\n"
                  f"  python3 {os.path.relpath(__file__, BASE)} --out /tmp/test.json")
     if "--out" in sys.argv:
         out_path = sys.argv[sys.argv.index("--out") + 1]
@@ -331,8 +331,8 @@ def main():
     # Выключенный туннель не собираем вовсе: ни эндпоинта, ни маршрутов, ни
     # DNS. Его файл тогда и не нужен — истёкший корп можно просто не трогать.
     off = disabled_tunnel()
-    p_path = pick_conf("личный", personal_patterns()) if off != "personal" else None
-    c_path = (pick_conf("корпоративный", CORP_PAT, exclude=p_path)
+    p_path = pick_conf("personal", personal_patterns()) if off != "personal" else None
+    c_path = (pick_conf("corp", CORP_PAT, exclude=p_path)
               if off != "corp" else None)
 
     personal = parse_conf(p_path) if p_path else None

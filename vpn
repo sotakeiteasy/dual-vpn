@@ -97,7 +97,7 @@ set_profile() {
   name="${name%.conf}"
   if [ ! -f "$CONF/$name.conf" ]; then
     cmd_list
-    fail_start "нет профиля «${name}»: не найден $CONF/$name.conf"
+    fail_start "no profile \"${name}\": $CONF/$name.conf not found"
   fi
   SB_PERSONAL="$name"
   export SB_PERSONAL
@@ -505,7 +505,7 @@ await_singbox() {
     grep -q "$SB_BAD_BIND" "$SB_HEAD" 2>/dev/null && return 1
     if [ -z "$TUN" ]; then
       TUN=$(find_tun) || kill -0 "$PID" 2>/dev/null \
-        || fail_start "sing-box упал на старте" "подробности — в логе выше"
+        || fail_start "sing-box crashed on start" "details are in the log above"
     fi
     if [ -n "$TUN" ]; then
       after=$((after + 1))
@@ -517,7 +517,7 @@ await_singbox() {
     fi
     sleep 0.2
   done
-  fail_start "tun не поднялся за 30 с"
+  fail_start "tun did not come up in 30 s"
 }
 
 # Поднять sing-box со сторожем. На выходе заданы PID и TUN.
@@ -527,14 +527,14 @@ run_singbox() {
     if [ "$try" = 0 ]; then
       echo "→ запускаю sing-box…"
     else
-      echo "→ перезапускаю sing-box: порт занят (попытка $try из $SB_BIND_RETRIES)"
+      echo "→ restarting sing-box: port busy (attempt $try of $SB_BIND_RETRIES)"
     fi
     spawn_singbox
     await_singbox && return 0
     kill_singbox
   done
-  fail_start "sing-box не смог занять порт WireGuard за $((SB_BIND_RETRIES + 1)) запуска" \
-             "выключи и включи ещё раз; подробности — в логе выше"
+  fail_start "sing-box could not bind the WireGuard port in $((SB_BIND_RETRIES + 1)) starts" \
+             "turn it off and on again; details are in the log above"
 }
 
 cmd_start() {
@@ -564,12 +564,12 @@ cmd_start() {
   out=$(python3 "$SCRIPTS/build-config.py" 2>&1); rc=$?
   [ -n "$out" ] && printf '%s\n' "$out"
   if [ $rc != 0 ]; then
-    fail_start "не удалось собрать конфиг — правь conf/*.conf" "$(printf '%s\n' "$out" | tail -1)"
+    fail_start "could not build the config — fix conf/*.conf" "$(printf '%s\n' "$out" | tail -1)"
   fi
   out=$("$BIN/sing-box" check -c "$STATE/config.json" 2>&1); rc=$?
   [ -n "$out" ] && printf '%s\n' "$out"
   if [ $rc != 0 ]; then
-    fail_start "конфиг не прошёл проверку sing-box" "$(printf '%s\n' "$out" | tail -1)"
+    fail_start "the config failed the sing-box check" "$(printf '%s\n' "$out" | tail -1)"
   fi
 
   # Шлюз по умолчанию: определяем ДО старта, пока туннель не перебил маршруты.
@@ -577,7 +577,7 @@ cmd_start() {
   GW=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2; exit}')
   IFACE=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')
   if [ -z "$GW" ]; then
-    fail_start "нет маршрута по умолчанию — сеть не поднята?"
+    fail_start "no default route — is the network up?"
   fi
   echo "→ аплинк: $IFACE, шлюз $GW"
 
@@ -604,8 +604,8 @@ cmd_start() {
     [ -n "$IP" ] && PEERS="$PEERS $IP"
   done
   if [ -z "$PEERS" ]; then
-    fail_start "не удалось определить адреса серверов — прерываю, иначе будет петля" \
-               "проверь Endpoint в конфигах и что есть интернет"
+    fail_start "could not resolve the server addresses — aborting to avoid a routing loop" \
+               "check Endpoint in the configs and the internet connection"
   fi
   echo "→ пиры (пойдут мимо туннеля):$PEERS"
 

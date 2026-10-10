@@ -136,12 +136,12 @@ test('операция идёт: окно ожидания, все кнопки 
 
 test('ошибка старта: причина, подробность и лог, кнопка «Повторить»', () => {
   const v = viewModel({...OFF,
-    error: 'не удалось собрать конфиг — правь conf/*.conf\nValueError: 25-35',
+    error: 'could not build the config — fix conf/*.conf\nValueError: 25-35',
     error_log: ['=== старт ===', 'Traceback …', 'ValueError: 25-35']});
   assert.equal(v.cls, 'bad');
   assert.equal(v.title, 'Не удалось включить');
-  assert.equal(v.sub, 'не удалось собрать конфиг — правь conf/*.conf');
-  assert.equal(v.error.head, 'не удалось собрать конфиг — правь conf/*.conf');
+  assert.equal(v.sub, 'could not build the config — fix conf/*.conf');
+  assert.equal(v.error.head, 'could not build the config — fix conf/*.conf');
   assert.equal(v.error.more, 'ValueError: 25-35');
   assert.equal(v.error.log.length, 3);
   assert.equal(v.toggle.label, 'Повторить');

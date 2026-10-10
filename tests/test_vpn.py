@@ -53,19 +53,19 @@ DAEMON={1 if daemon else 0}
         r = self.run_vpn("cmd_start", daemon=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         err = self.last_error()
-        self.assertIn("не удалось собрать конфиг", err)
+        self.assertIn("could not build the config", err)
         self.assertIn("25-35", err, "в причину не попала последняя строка вывода")
         self.assertIn("уборка", r.stdout, "после отказа не убрано за собой")
 
     def test_terminal_exits_nonzero(self):
         r = self.run_vpn("cmd_start", daemon=False)
         self.assertEqual(r.returncode, 1)
-        self.assertIn("не удалось собрать конфиг", self.last_error())
+        self.assertIn("could not build the config", self.last_error())
 
     def test_missing_profile_is_recorded(self):
         r = self.run_vpn("set_profile nosuch", daemon=True)
         self.assertEqual(r.returncode, 0)
-        self.assertIn("нет профиля «nosuch»", self.last_error())
+        self.assertIn('no profile "nosuch"', self.last_error())
 
     def test_start_clears_previous_reason(self):
         state = os.path.join(self.data, "lib", "state")
@@ -78,12 +78,12 @@ DAEMON={1 if daemon else 0}
     def test_reason_without_detail_is_written(self):
         # Раньше группа «echo; [ -n ] && echo» без подробности возвращала 1,
         # и файл не записывался как раз в простом случае.
-        r = self.run_vpn('fail_start "нет маршрута по умолчанию"', daemon=True)
+        r = self.run_vpn('fail_start "no default route"', daemon=True)
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(self.last_error(), "нет маршрута по умолчанию\n")
+        self.assertEqual(self.last_error(), "no default route\n")
 
     def test_ansi_is_stripped_from_detail(self):
-        self.run_vpn("fail_start \"конфиг не прошёл проверку\" "
+        self.run_vpn("fail_start \"the config failed the check\" "
                      "$'\\x1b[31mFATAL\\x1b[0m[0000] bad key'", daemon=True)
         err = self.last_error()
         self.assertIn("FATAL[0000] bad key", err)
@@ -136,7 +136,7 @@ kill "$PID"
     def test_good_start_is_left_alone(self):
         r = self.run_watch(bad=0)
         self.assertEqual(self.starts(), 1)
-        self.assertNotIn("перезапускаю", r.stdout)
+        self.assertNotIn("restarting", r.stdout)
         self.assertIn("TUN=utun9", r.stdout)
         # Вывод sing-box по-прежнему идёт в лог службы.
         self.assertIn("sing-box started", r.stdout)
@@ -144,7 +144,7 @@ kill "$PID"
     def test_busy_port_restarts_until_clean(self):
         r = self.run_watch(bad=2)
         self.assertEqual(self.starts(), 3, r.stdout + r.stderr)
-        self.assertEqual(r.stdout.count("перезапускаю sing-box: порт занят"), 2)
+        self.assertEqual(r.stdout.count("restarting sing-box: port busy"), 2)
         self.assertIn("TUN=utun9", r.stdout)
 
     def test_gives_up_with_reason(self):
@@ -152,7 +152,7 @@ kill "$PID"
         self.assertEqual(self.starts(), 4)
         self.assertNotIn("TUN=", r.stdout, "сломанный туннель оставлен как рабочий")
         with open(os.path.join(self.data, "lib", "state", "last-error"), encoding="utf-8") as fh:
-            self.assertIn("не смог занять порт WireGuard", fh.read())
+            self.assertIn("could not bind the WireGuard port", fh.read())
 
 
 if __name__ == "__main__":

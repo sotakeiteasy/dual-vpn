@@ -70,13 +70,13 @@ class MenuModelTests(unittest.TestCase):
             self.assertEqual(m["note"], "выключаю…")
 
     def test_error_offers_retry_and_details(self):
-        m = menu_model({}, op(error="не удалось собрать конфиг — правь conf/*.conf\n"
+        m = menu_model({}, op(error="could not build the config — fix conf/*.conf\n"
                                     "ValueError: invalid literal"))
         self.assertEqual(m["icon"], "bad")
         self.assertEqual(m["title"], "Не удалось включить")
         self.assertEqual(on(m), {"start", "details"})
         self.assertFalse(m["switch"])
-        self.assertEqual(m["note"], "не удалось собрать конфиг — правь conf/*.conf")
+        self.assertEqual(m["note"], "could not build the config — fix conf/*.conf")
 
     def test_error_ignored_when_up(self):
         # Туннель подняли уже после ошибки — она устарела.
