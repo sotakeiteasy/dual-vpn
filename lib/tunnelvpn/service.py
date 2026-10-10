@@ -359,13 +359,14 @@ class Core:
         if op == "stop":
             return self._do_stop()
         if op == "apply":
-            return self._apply()
+            return self._apply(bool(payload.get("ask")))
         if op == "set-profile":
             return self._set_profile(payload.get("profile", ""))
         if op == "set-active":
             return self._set_active(payload.get("name", ""), tunnel=tid)
         if op == "set-enabled":
-            return self._set_enabled(tid, payload.get("on"))
+            # Строго True, как on: строка «false» из канала выключила бы чужие туннели.
+            return self._set_enabled(tid, payload.get("on"), payload.get("replace") is True)
         if op == "list-profiles":
             return {"ok": True, "profiles": self._profiles(), "corp": self._corp()}
         if op == "check":
@@ -742,7 +743,8 @@ class Core:
             self.lock.release()
 
     def _wake_all(self):
-        """Нет включённого туннеля с конфигом — включает все «по списку», а
+        """Нет включённого туннеля с конфигом — включает все «по списку», кроме
+        пересекающихся с уже включённым (_clashing), а
         основного нет — им становится первый полный без «пускать» (_promote;
         решение пользователя 10.10.2026). Есть хоть один — флаги как
         сохранены. '' или текст ошибки записи; испорченный файл скажет start."""
@@ -756,31 +758,40 @@ class Core:
         if not off:
             return ""
         for t in off:
-            t["enabled"] = True
+            # Пересекающиеся — только первый по файлу: второй — заменой из окна.
+            t["enabled"] = t["mode"] != "list" or not self._clashing(data, t)
+        woke = [t["id"] for t in off if t["enabled"]]
+        if not woke:
+            return ""
         up = self._promote(data)
         r = self._save_tunnels(data, "включённых туннелей нет — включаю все «по списку»: "
-                                     + ", ".join(t["id"] for t in off))
+                                     + ", ".join(woke))
         if not r["ok"]:
             return f"флаги туннелей не записать: {r['error']}"
         self._log_promoted(up)
         return ""
 
-    def _apply(self):
+    def _apply(self, ask=False):
         """Правка конфигов — на живой VPN (решение #14): боковые со сменившимся
         конфигом, вкл/выкл туннеля, списки и смена основного — на лету
         (Tunnel.reload_sides), tun и интернет не падают. Сменилось то, что держит
-        основной процесс, — выключение и включение. Выключенный VPN не
-        включаем: правка подхватится на включении."""
+        основной процесс, — выключение и включение; с ask вместо него ответ
+        applied "ask": окно спрашивает человека и повторяет без ask, правка
+        уже записана. Выключенный VPN не включаем: правка подхватится на
+        включении."""
         if not self.lock.acquire(blocking=False):
             return {"ok": False, "error": f"уже идёт: {self.busy or 'операция'}"}
         try:
             if self.tunnel.uplink is None:
                 return {"ok": True, "applied": "off"}
+            plan = self.tunnel.live_plan()
+            if plan is None and ask:
+                return {"ok": True, "applied": "ask"}
             # Круг сторожа, начатый до правки, увидел бы перезапускаемый
             # процесс лежащим и перезапустил бы его сам.
             self._human += 1
             main = self.tunnel.main_id
-            done = self.tunnel.reload_sides()
+            done = self.tunnel.reload_sides(plan) if plan else None
             if done is not None:
                 errs = [err for _, err in done if err]
                 for side, err in done:
@@ -1379,7 +1390,8 @@ class Core:
                             "conf": self._in_use(data)[t["id"]]},
                     "error": f"похоже на «{t['name']}»: заменить его конфиг "
                              f"или добавить отдельным туннелем?"}
-        if t is None:
+        new = t is None
+        if new:
             # До записи файла: иначе отказ tunnels.save оставил бы конфиг без туннеля.
             if len(data["tunnels"]) >= tunnels.MAX_TUNNELS:
                 return {"ok": False, "error": f"туннелей уже {tunnels.MAX_TUNNELS}, "
@@ -1402,6 +1414,14 @@ class Core:
         if where == "replace":
             # В окне туннель зовётся своим конфигом (решение #12).
             t["name"] = name
+        if new and t["mode"] == "list":
+            # «Отдельным туннелем» в те же сети: включённым он делил бы их с
+            # прежним по порядку в файле. Выключенный включается заменой (_set_enabled).
+            clash = self._clashing(data, t)
+            t["enabled"] = not clash
+            if clash:
+                names = ", ".join(f"«{o['name']}»" for o in clash)
+                self.log(f"→ «{t['name']}» ведёт в сети {names} — добавлен выключенным")
         try:
             data = tunnels.save(data)
         except (OSError, ValueError) as exc:
@@ -1549,11 +1569,16 @@ class Core:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "tunnel": t["id"], "active": name}
 
-    def _set_enabled(self, tunnel, on):
+    def _set_enabled(self, tunnel, on, replace=False):
         """Включает или выключает туннель «по списку»: у выключенного нет
         процесса и rule-set пустой, конфиги и правила остаются. На живой VPN переносит apply
         отправителя, как после set-active и правки правил. Основной так не
-        выключается: «Всё остальное напрямую»."""
+        выключается: «Всё остальное напрямую».
+
+        Записи включаемого уже забирает включённый (_clashing) — отказ с clash
+        [{id, name}]: окно предлагает замену и повторяет с replace: мешающие
+        выключаются в той же записи, и reload_sides опустошает их rule-set вместе с
+        заполнением нового."""
         if not isinstance(on, bool):
             return {"ok": False, "error": "on должен быть true или false"}
         try:
@@ -1565,9 +1590,19 @@ class Core:
                                            f"«Всё остальное напрямую»"}
         if t["enabled"] == on:
             return {"ok": True, "tunnel": t["id"], "enabled": on}
+        off = self._clashing(data, t) if on else []
+        if off and not replace:
+            names = ", ".join(f"«{o['name']}»" for o in off)
+            return {"ok": False, "clash": [{"id": o["id"], "name": o["name"]} for o in off],
+                    "error": f"«{t['name']}» забирает те же адреса, что {names}: "
+                             f"вместе их не включить"}
+        for o in off:
+            o["enabled"] = False
         t["enabled"] = on
         r = self._save_tunnels(data, f"туннель {t['id']} "
-                                     f"{'включён' if on else 'выключен'}")
+                                     f"{'включён' if on else 'выключен'}"
+                                     + (f" вместо {', '.join(o['id'] for o in off)}"
+                                        if off else ""))
         return {**r, "tunnel": t["id"], "enabled": on} if r["ok"] else r
 
     def _set_profile(self, name):
@@ -1757,7 +1792,9 @@ class Core:
         confs = {t["id"]: c for t, c in self._list_confs(data)}
         in_use = self._in_use(data)
         ids = {t["id"] for t in changed}
-        lists = sorted((t for t in data["tunnels"] if t["mode"] == "list"),
+        # Выключенный ничего не забирает: «Офис» и «Офис-2» с одной сетью
+        # лежат рядом, включён один; второй — заменой (_set_enabled).
+        lists = sorted((t for t in data["tunnels"] if t["mode"] == "list" and t["enabled"]),
                        key=lambda t: t["id"] not in ids)
         seen, texts = set(), []
         for t in lists:
@@ -1776,6 +1813,21 @@ class Core:
                         seen.add(key)
                         texts.append(why)
         return [{"field": "include", "text": w} for w in texts]
+
+    def _clashing(self, data, t):
+        """Включённые туннели «по списку», чьи записи пересекаются с
+        записями t — «пускать» и сетями конфига с обеих сторон: включённый вместе
+        с ними t отдал бы общее тому, что выше в файле. В отличие от _clash_of, сети
+        конфига t тоже сверяются: новый туннель из «отдельным туннелем» ведёт
+        только ими."""
+        confs = {u["id"]: c for u, c in self._list_confs(data)}
+        in_use = self._in_use(data)
+        conf = confs.get(t["id"])
+        own = {**t, "include": t["include"]
+               + (buildconfig.allowed_nets(conf, v6=True) if conf else [])}
+        return [o for o in data["tunnels"]
+                if o is not t and o["mode"] == "list" and o["enabled"]
+                and _clash(own, o, confs.get(o["id"]), in_use[o["id"]])]
 
     def _remove_tunnel(self, tunnel):
         """Убирает туннель вместе с папкой его конфигов."""

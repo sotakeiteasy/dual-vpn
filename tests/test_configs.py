@@ -635,6 +635,70 @@ def test_одна_запись_у_двух_туннелей_отказ(core):
     assert _tunnel("work")["include"] == []
 
 
+def test_запись_выключенного_туннеля_не_дубль(core):
+    """«Офис» и «Офис-2» с одной сетью лежат рядом, включён один."""
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "a.ru"})
+    core._set_enabled("t1", False)
+
+    assert core._set_tunnel("work", {"include": "a.ru"})["ok"]
+    assert _tunnel("work")["include"] == ["a.ru"]
+
+
+def test_включение_поверх_тех_же_адресов_предлагает_замену(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_enabled("t1", False)
+    core._set_tunnel("t1", {"include": "a.ru"})
+    core._set_tunnel("work", {"include": "x.a.ru"})
+
+    r = core._set_enabled("t1", True)
+
+    assert not r["ok"] and r["clash"] == [{"id": "work", "name": "Работа"}]
+    assert _tunnel("t1")["enabled"] is False and _tunnel("work")["enabled"] is True
+
+    assert core._set_enabled("t1", True, replace=True)["ok"]
+    assert _tunnel("t1")["enabled"] is True and _tunnel("work")["enabled"] is False
+
+
+def test_включение_сверяет_и_сети_конфигов(core):
+    """Туннель без «пускать» ведёт сетями AllowedIPs — их пересечение тоже конфликт."""
+    _put("work", "corp.conf", _wg("10.53.0.0/16"))
+    core._add_tunnel("Лаб", "list")
+    _put("t1", "lab.conf", _wg("10.53.1.0/24"))
+    core._set_enabled("t1", False)
+
+    assert core._set_enabled("t1", True)["clash"] == [{"id": "work", "name": "Работа"}]
+
+
+def test_отдельный_туннель_в_те_же_сети_ложится_выключенным(core):
+    _put("work", "corp.conf", _wg("10.53.0.0/16"))
+
+    r = core._add_config("office-2", _wg("10.53.0.0/16"), place="new")
+
+    assert r["ok"] and _tunnel(r["tunnel"])["enabled"] is False
+    assert _tunnel("work")["enabled"] is True
+
+
+def test_отдельный_туннель_в_свои_сети_включён(core):
+    _put("work", "corp.conf", _wg("10.53.0.0/16"))
+
+    r = core._add_config("lab", _wg("10.60.0.0/16"), place="new")
+
+    assert r["ok"] and _tunnel(r["tunnel"])["enabled"] is True
+
+
+def test_включить_всё_не_включает_пересекающиеся(core):
+    _put("work", "corp.conf", _wg("10.53.0.0/16"))
+    core._add_tunnel("Лаб", "list")
+    _put("t1", "lab.conf", _wg("10.53.0.0/16"))
+    core._set_enabled("work", False)
+    core._set_enabled("t1", False)
+
+    assert core._wake_all() == ""
+
+    assert _tunnel("work")["enabled"] is True and _tunnel("t1")["enabled"] is False
+
+
 def test_вложенный_домен_дубль_по_суффиксу(core):
     core._add_tunnel("Лаб", "list")
     core._set_tunnel("t1", {"include": "a.ru"})

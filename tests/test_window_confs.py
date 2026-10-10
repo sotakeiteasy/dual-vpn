@@ -78,10 +78,54 @@ def test_вкл_выкл_туннеля_без_прав_и_сразу_на_жи�
 
     api.send("set_enabled", {"tunnel": "work", "on": False})
 
-    # set-enabled в USER_OPS, как stop; флаг на живой VPN переносит apply.
-    assert calls[:2] == [("set-enabled", {"tunnel": "work", "on": False}), ("apply", {})]
+    # set-enabled в USER_OPS, как stop; флаг на живой VPN переносит apply — с ask:
+    # полный перезапуск сам не делается.
+    assert calls[:2] == [("set-enabled", {"tunnel": "work", "on": False, "replace": False}),
+                         ("apply", {"ask": True})]
     assert admin == []
     assert "failed" not in [fn for fn, _ in shown]
+
+
+def test_конфликт_при_включении_предлагает_замену_и_не_применяет(monkeypatch):
+    api, _, shown = _api(monkeypatch, [])
+    calls = []
+    clash = [{"id": "t1", "name": "Офис"}]
+    monkeypatch.setattr(ipc, "call", lambda op, **kw: calls.append((op, kw)) or
+                        {"ok": False, "clash": clash, "error": "…"})
+
+    api.send("set_enabled", {"tunnel": "t2", "on": True})
+
+    assert [op for op, _ in calls] == ["set-enabled"]
+    assert ("askSwap", {"tunnel": "t2", "clash": clash}) in shown
+    assert "failed" not in [fn for fn, _ in shown]
+
+
+def test_замена_уходит_службе_с_replace(monkeypatch):
+    api, _, _ = _api(monkeypatch, [])
+    calls = []
+    monkeypatch.setattr(ipc, "call", lambda op, **kw: calls.append((op, kw)) or
+                        {"ok": True, "status": {}})
+
+    api.send("set_enabled", {"tunnel": "t2", "on": True, "replace": True})
+
+    assert calls[0] == ("set-enabled", {"tunnel": "t2", "on": True, "replace": True})
+
+
+def test_полный_перезапуск_спрашивает_а_после_да_идёт_без_ask(monkeypatch):
+    api, _, shown = _api(monkeypatch, [])
+    calls = []
+
+    def call(op, **kw):
+        calls.append((op, kw))
+        return {"ok": True, "applied": "ask"} if kw.get("ask") else {"ok": True, "status": {}}
+    monkeypatch.setattr(ipc, "call", call)
+
+    api.send("use_config", {"tunnel": "home", "name": "de-2"})
+    assert ("askFull", None) in shown
+    assert "failed" not in [fn for fn, _ in shown]
+
+    api.send("apply_full")
+    assert ("apply", {}) in calls
 
 
 def test_отказ_вкл_выкл_виден_и_не_применяет(monkeypatch):

@@ -552,10 +552,13 @@ function records(n) {
 }
 
 // Что туннель забирает: всё остальное или только свой список (rules — записей в
-// «пускать» и «не пускать»; без них — сети AllowedIPs его конфига).
-function tileRole(t) {
+// «пускать» и «не пускать»; без них — сети AllowedIPs его конфига). У «по списку» —
+// и куда идёт не забранное им (и вынесенное в «не пускать»): в основной, а без
+// него или пока он не работает — напрямую.
+function tileRole(t, main, direct) {
   if (t.mode === 'all') return 'всё остальное через него';
-  return t.rules ? `только по списку: ${records(t.rules)}` : 'только сети своего конфига';
+  const own = t.rules ? `только по списку: ${records(t.rules)}` : 'только сети своего конфига';
+  return `${own} · остальное → ${main && !direct ? `«${tname(main)}»` : 'напрямую'}`;
 }
 
 function tileHtml(t, name, mark, state, pick, role) {
@@ -597,6 +600,7 @@ function setTiles(id, html, count) {
 // выход — запасной путь службы, а не конфиг: плитки у него нет.
 function renderTiles(s, checking, direct) {
   const T = s.tunnels || [];
+  const main = T.find(t => t.mode === 'all');
   // Сменился состав — меню повисло бы над конфигом, которого может уже не быть.
   const shape = JSON.stringify(T.map(t => [t.id, t.mode, t.active, t.confs]));
   if (shape !== prev.shape) { prev.shape = shape; closeMenu(); }
@@ -605,13 +609,14 @@ function renderTiles(s, checking, direct) {
   T.forEach(t => {
     const st = tileState(t, s, checking, direct);
     if (t.mode !== 'all' || !hasConf(t)) {
-      tiles.push(tileHtml(t, t.active || (t.confs || [])[0] || '', st[0], st, false, tileRole(t)));
+      tiles.push(tileHtml(t, t.active || (t.confs || [])[0] || '', st[0], st, false,
+                          tileRole(t, main, direct)));
       return;
     }
     const confs = t.confs.includes(t.active)
       ? [t.active, ...t.confs.filter(c => c !== t.active)] : t.confs;
     confs.forEach(c => tiles.push(c === t.active
-      ? tileHtml(t, c, st[0], st, false, tileRole(t))
+      ? tileHtml(t, c, st[0], st, false, tileRole(t, main, direct))
       : tileHtml(t, c, 'spare', spareState(t, c), true)));
   });
   setTiles('tiles', tiles.join(''), tiles.length);
@@ -781,7 +786,9 @@ function renderHowto(h) {
       <li>сети пересекаются с туннелем «по списку» → окно спросит: заменить или
         добавить отдельным туннелем.</li>
     </ol>
-    <p class="note">Правки при включённом VPN применяются перезапуском туннеля.</p>
+    <p class="note">Правки при включённом VPN применяются на лету, без падения
+    интернета. Новый туннель, смена DNS в конфиге «по списку» или MTU основного
+    требуют переподключения — окно спросит перед ним.</p>
     <h3>Подключено сейчас</h3>
     <table>${eps || '<tr><td>—</td><td class="note">VPN ещё не собирался</td></tr>'}</table>
     ${listBox}
@@ -896,10 +903,50 @@ function askPlace(a) {
   const old = a.conf || a.name;
   openSheet(`Похоже на «${old}»`,
     `<p>«${esc(a.file)}» ведёт в те же сети, что и «${esc(old)}». Заменить его
-     конфиг (правила туннелирования сохранятся) или добавить отдельным туннелем?</p>`,
+     конфиг (правила туннелирования сохранятся) или добавить отдельным туннелем?</p>
+     <p>Отдельный ляжет выключенным: одни сети — у одного включённого туннеля.
+     «Включить» в его меню предложит выключить «${esc(old)}».</p>`,
     [['Заменить', () => { closeSheet(); send('place_config', {place: 'replace', tunnel: a.id}); }, 'primary'],
      ['Отдельный туннель', () => { closeSheet(); send('place_config', {place: 'new'}); }],
      ['Отмена', closeSheet]]);
+}
+
+// Включаемый забирает те же адреса, что включённые a.clash: вместе их не
+// включить, служба ничего не записала. Замена — те выключаются в той же записи.
+function askSwap(a) {
+  const t = (LAST.tunnels || []).find(x => x.id === a.tunnel);
+  const name = t ? tname(t) : a.tunnel;
+  const others = a.clash.map(o => {
+    const x = (LAST.tunnels || []).find(u => u.id === o.id);
+    return `«${esc(x ? tname(x) : o.name)}»`;
+  }).join(', ');
+  openSheet(`Включить «${name}»`,
+    `<p>«${esc(name)}» забирает те же адреса, что ${others}: вместе их не
+     включить. Выключить ${others} и включить «${esc(name)}»?</p>
+     <p>Конфиги и правила выключенного останутся — вернуть его можно
+     так же, через «Включить» в его меню.</p>`,
+    [['Заменить', () => { closeSheet(); send('set_enabled', {tunnel: a.tunnel, on: true, replace: true}); },
+      'primary'],
+     ['Отмена', closeSheet]]);
+}
+
+// Правку на лету не применить (новый туннель, DNS «по списку», MTU основного):
+// полный перезапуск уронит соединения всех приложений, поэтому — только по
+// слову человека. Правка уже записана: «Позже» — со следующего включения.
+function askFull() {
+  openSheet('Переподключить VPN?',
+    `<p>Эту правку на лету не применить: VPN переподключится целиком,
+     интернет пропадёт на несколько секунд, открытые соединения приложений
+     оборвутся.</p>
+     <p>Правка уже сохранена: без переподключения она вступит в силу при
+     следующем включении VPN.</p>`,
+    [['Переподключить', () => {
+        closeSheet();
+        PENDING = {mode: 'restart', at: Date.now(), sawDown: false};
+        send('apply_full');
+        render(LAST);
+      }, 'primary'],
+     ['Позже', closeSheet]]);
 }
 
 // Лист «Туннелирование». У основного одно поле — его exclude: «пускать» ему

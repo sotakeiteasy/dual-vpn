@@ -178,9 +178,21 @@ class Api:
             self._apply()
         elif name == "set_enabled":
             # Вкл/выкл туннеля «по списку» — без прав, как выбор конфига; на
-            # живой VPN переносит тот же _apply, что и сохранение правил.
-            self._guard(ipc.call("set-enabled", tunnel=arg["tunnel"], on=bool(arg["on"])))
+            # живой VPN переносит тот же _apply, что и сохранение правил. Те же
+            # адреса у включённого — служба ничего не записала, замену решает человек.
+            reply = ipc.call("set-enabled", tunnel=arg["tunnel"], on=bool(arg["on"]),
+                             replace=bool(arg.get("replace")))
+            if reply.get("clash"):
+                self.js("askSwap", {"tunnel": arg["tunnel"], "clash": reply["clash"]})
+                return None
+            self._guard(reply)
             self._apply()
+        elif name == "apply_full":
+            # Подтверждённый в askFull полный перезапуск: правка уже записана.
+            try:
+                self._guard(ipc.call("apply"))
+            finally:
+                self.refresh(full=True)
         elif name == "del_config":
             self._guard(self._admin_call("remove-config", tunnel=arg["tunnel"],
                                          name=arg["name"],
@@ -260,12 +272,16 @@ class Api:
 
     def _apply(self):
         """Правка туннелей — на живой VPN через службу (решение #14): она
-        перезапускает только процесс туннеля со сменившимся конфигом, а
-        целиком — лишь когда сменилось то, что держит основной процесс.
+        перезапускает только процесс туннеля со сменившимся конфигом. Сменилось
+        то, что держит основной процесс, — служба не перезапускает сама (ask),
+        а страница спрашивает человека (askFull): сеть упадёт для всех приложений.
         Выключенный не включает."""
         try:
             try:
-                self._guard(ipc.call("apply"))
+                reply = ipc.call("apply", ask=True)
+                if reply.get("applied") == "ask":
+                    self.js("askFull")
+                self._guard(reply)
             except ipc.NotRunning:
                 pass
         finally:

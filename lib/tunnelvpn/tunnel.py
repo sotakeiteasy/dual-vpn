@@ -697,24 +697,10 @@ class Tunnel:
             self.log(f"→ процесс «{side.title}» перезапущен")
         return err
 
-    def reload_sides(self):
-        """Правка конфигов на поднятом VPN без падения tun. [(процесс, ошибка
-        или '')] затронутых боковых или None, если без полного перезапуска не
-        обойтись.
-
-        На лету: смена .conf (перезапуск одного бокового), вкл/выкл туннеля
-        «по списку», списки и смена основного — файлы rule-set, NRPT и выбор
-        selector out. Полный нужен, когда новая сборка меняет сам основной
-        конфиг: новый туннель (новый socks), адрес DNS «по списку», MTU и IPv6
-        основного, — или sing-box отверг новый rule-set. Пока лежит процесс
-        основного туннеля, выход идёт напрямую.
-
-        Порядок: включённый — старт бокового и socks до rule-set, иначе первые
-        соединения получили бы отказ; выключенный — пустой rule-set до остановки.
-
-        Уровень журнала полного не требует: боковые перезапускаются с ним сразу,
-        основной возьмёт его на следующем включении — ради журнала tun не роняем.
-        """
+    def live_plan(self):
+        """Сборка правки для reload_sides или None, если на лету её не
+        применить (причины — там). Ничего не трогает: по нему служба
+        спрашивает человека до полного перезапуска."""
         if self.uplink is None or self.proc is None or self.proc.poll() is not None:
             return None
         running = buildconfig.read_json(paths.CONFIG_JSON)
@@ -730,6 +716,30 @@ class Tunnel:
             return None
         if _fixed(config) != _fixed(running):
             return None
+        return running, data, confs, config, sides, sets, built
+
+    def reload_sides(self, plan=None):
+        """Правка конфигов на поднятом VPN без падения tun. [(процесс, ошибка
+        или '')] затронутых боковых или None, если без полного перезапуска не
+        обойтись. plan — готовый live_plan, без него собирается здесь.
+
+        На лету: смена .conf (перезапуск одного бокового), вкл/выкл туннеля
+        «по списку», списки и смена основного — файлы rule-set, NRPT и выбор
+        selector out. Полный нужен, когда новая сборка меняет сам основной
+        конфиг: новый туннель (новый socks), адрес DNS «по списку», MTU и IPv6
+        основного, — или sing-box отверг новый rule-set. Пока лежит процесс
+        основного туннеля, выход идёт напрямую.
+
+        Порядок: включённый — старт бокового и socks до rule-set, иначе первые
+        соединения получили бы отказ; выключенный — пустой rule-set до остановки.
+
+        Уровень журнала полного не требует: боковые перезапускаются с ним сразу,
+        основной возьмёт его на следующем включении — ради журнала tun не роняем.
+        """
+        plan = plan or self.live_plan()
+        if plan is None:
+            return None
+        running, data, confs, config, sides, sets, built = plan
         stamps = {tid: _conf_stamp(path) for tid, path in confs.items()}
         main = tunnels.main_tunnel(data)
         self.profile = main["active"] if main else ""

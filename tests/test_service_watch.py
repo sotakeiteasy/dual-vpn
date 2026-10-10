@@ -640,13 +640,16 @@ def test_правка_конфигов_ставит_круг_сторожа_на
 
 
 def _reload(monkeypatch, core, result):
-    """reload_sides туннеля: отдаёт result и запоминает, что видел в этот момент."""
+    """reload_sides туннеля: отдаёт result и запоминает, что видел в этот момент.
+    result None — live_plan тоже None: на лету не выйдет."""
     seen = []
 
-    def reload_sides():
-        seen.append({"busy": core.busy, "locked": core.lock.locked()})
+    def reload_sides(plan=None):
+        seen.append({"busy": core.busy, "locked": core.lock.locked(), "plan": plan})
         return result() if callable(result) else result
 
+    monkeypatch.setattr(core.tunnel, "live_plan",
+                        lambda: None if result is None else "plan", raising=False)
     monkeypatch.setattr(core.tunnel, "reload_sides", reload_sides, raising=False)
     return seen
 
@@ -672,8 +675,9 @@ def test_правка_перезапускает_только_сменивший
     reply = core._apply()
 
     assert reply == {"ok": True, "applied": "sides", "restarted": ["home"]}
-    # Трей не сереет: busy пуст, а замок держим — сторож ждёт.
-    assert seen == [{"busy": "", "locked": True}]
+    # Трей не сереет: busy пуст, а замок держим — сторож ждёт. Сборка — та же, что
+    # решила «на лету», второй раз не собирается.
+    assert seen == [{"busy": "", "locked": True, "plan": "plan"}]
     assert core.tunnel.starts == 0
     # Таймауты и пауза перезапуска были у прежнего конфига.
     assert [h[1] for h in core._dead_hits] == [work.tag]
@@ -710,6 +714,24 @@ def test_сменился_основной_конфиг_полный_перез�
     assert reply == {"ok": True, "applied": "full"}
     assert core.tunnel.starts == 1 and core.tunnel.uplink == OFFICE
     assert _said(core, "сменилось то, что держит основной процесс")
+
+
+def test_полный_перезапуск_с_ask_только_спрашивает(monkeypatch):
+    """Окно спрашивает человека до падения tun: служба ничего не трогает."""
+    core = _core(monkeypatch)
+    seen = _reload(monkeypatch, core, None)
+
+    assert core._apply(ask=True) == {"ok": True, "applied": "ask"}
+
+    assert seen == [] and core.tunnel.starts == 0 and core.tunnel.uplink == OFFICE
+    assert not _said(core, "сменилось то, что держит основной процесс")
+
+
+def test_правка_на_лету_с_ask_не_спрашивает(monkeypatch):
+    core = _core(monkeypatch)
+    _reload(monkeypatch, core, [(core.tunnel.home, "")])
+
+    assert core._apply(ask=True) == {"ok": True, "applied": "sides", "restarted": ["home"]}
 
 
 def test_правка_посреди_круга_сторожа_перезапуск_не_делает(monkeypatch):
