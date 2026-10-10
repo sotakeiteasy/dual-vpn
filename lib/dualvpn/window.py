@@ -199,9 +199,11 @@ class Api:
                                          drop_tunnel=bool(arg.get("drop_tunnel"))))
             self.js("closeSheet")
             self._apply()
-        elif name == "move_tunnel":
-            self._guard(self._admin_call("move-tunnel", tunnel=arg["tunnel"],
-                                         step=int(arg["step"])))
+        elif name == "set_mode":
+            # «Всё остальное через этот туннель» (all) или напрямую (list у
+            # основного): прежний основной служба сама переводит в list.
+            self._guard(self._admin_call("set-tunnel", tunnel=arg["tunnel"],
+                                         mode=arg["mode"]))
             self._apply()
         elif name == "tunnel_rules":
             self._tunnel_rules(arg)
@@ -478,7 +480,11 @@ class Api:
         (routelist.parse), непонятое возвращается в rejected и стоит под полем."""
         lists = {k: arg[k] for k in ("include", "exclude") if k in arg}
         reply = self._admin_call("set-tunnel", tunnel=arg["tunnel"], **lists)
-        self._guard(reply)
+        if not reply.get("ok"):
+            # Строка состояния — под листом: отказ («a.ru уже в «Работа»»)
+            # стоит под полями, лист остаётся открытым с набранным.
+            self.js("rulesFailed", reply.get("error") or "служба отказала")
+            return
         self.js("rulesSaved", {"include": reply.get("include", []),
                                "exclude": reply.get("exclude", []),
                                "rejected": reply.get("rejected", {})})

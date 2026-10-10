@@ -98,8 +98,8 @@ button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accen
 h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
      letter-spacing: 0.5px; color: var(--dim); margin: 4px 0 -4px 3px; }
 
-/* Плитки: до трёх в разделе — каждая во всю строку, чтобы имя конфига и
-   статус читались целиком; больше — сеткой. */
+/* Плитки: до трёх — каждая во всю строку, чтобы имя конфига и статус
+   читались целиком; больше — сеткой. */
 .tiles { display: grid; gap: 8px; grid-template-columns: 1fr; }
 .tiles.many { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
 .tile { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; }
@@ -118,6 +118,9 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
 .tile-state.ok   { color: var(--ok); }
 .tile-state.warn { color: var(--warn); }
 .tile-state.bad  { color: var(--bad); }
+.tile-role { color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
+/* «Мой интернет» — не туннель: без рамки цвета карточки, чтобы не читался конфигом. */
+.tile.direct { border-style: dashed; }
 .tile-add { flex: none; padding: 0; border: none; background: none; color: var(--accent);
             font-size: 13px; }
 .tile-add:hover:not(:disabled) { background: none; text-decoration: underline; }
@@ -246,10 +249,7 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
   </div>
 
   <div id="tiles-wrap">
-    <h2>Весь остальной трафик</h2>
-    <div class="tiles" id="tiles-all"></div>
-    <h2>По списку</h2>
-    <div class="tiles" id="tiles-list"></div>
+    <div class="tiles" id="tiles"></div>
   </div>
   <button id="btn-add">+ Добавить конфиг…</button>
 </div>
@@ -496,7 +496,21 @@ function tileState(t, s, checking, direct) {
   return ['warn', 'проверяю…'];
 }
 
-function tileHtml(t, name, mark, state, pick) {
+function records(n) {
+  const d = n % 10, h = n % 100;
+  const w = d === 1 && h !== 11 ? 'запись'
+          : d >= 2 && d <= 4 && (h < 12 || h > 14) ? 'записи' : 'записей';
+  return `${n} ${w}`;
+}
+
+// Что туннель забирает: всё остальное или только свой список (rules — записей в
+// «пускать» и «не пускать»; без них — сети AllowedIPs его конфига).
+function tileRole(t) {
+  if (t.mode === 'all') return 'всё остальное через него';
+  return t.rules ? `только по списку: ${records(t.rules)}` : 'только сети своего конфига';
+}
+
+function tileHtml(t, name, mark, state, pick, role) {
   const [cls, text] = state;
   // Туннель без конфига: правила оставили — плитка зовёт добавить файл в него.
   const add = hasConf(t) ? ''
@@ -507,9 +521,32 @@ function tileHtml(t, name, mark, state, pick) {
       <div class="tile-body">
         <div class="tile-name">${esc(name || t.name)}</div>
         <div class="tile-state ${cls}">${esc(text)}${add}</div>
+        ${role ? `<div class="tile-role">${esc(role)}</div>` : ''}
       </div>
       <button class="tile-menu" data-menu="${esc(t.id)}" data-name="${esc(name)}"
               title="Действия" aria-label="Действия">⋯</button>
+    </div>`;
+}
+
+// «Мой интернет» — выход напрямую: туда идёт всё остальное без основного
+// туннеля и через него, когда основной упал (selector out → direct).
+function directHtml(s, main, direct) {
+  const [cls, text] = !s.up ? ['off', 'VPN выключен']
+    : !main ? ['ok', 'всё остальное идёт напрямую']
+    : direct ? ['warn', `сейчас выход здесь: «${tname(main)}» не работает`]
+    : ['off', 'запасной'];
+  const role = main ? `если «${tname(main)}» не работает — выход через него`
+                    : 'туннеля для всего остального нет';
+  const menu = main ? `<button class="tile-menu" data-menu="" data-name=""
+              title="Действия" aria-label="Действия">⋯</button>` : '';
+  return `
+    <div class="card tile direct">
+      <span class="tile-mark ${cls}"></span>
+      <div class="tile-body">
+        <div class="tile-name">Мой интернет (напрямую)</div>
+        <div class="tile-state ${cls}">${esc(text)}</div>
+        <div class="tile-role">${esc(role)}</div>
+      </div>${menu}
     </div>`;
 }
 
@@ -520,37 +557,31 @@ function setTiles(id, html, count) {
   if (prev[id] !== html) { prev[id] = html; el.innerHTML = html; }
 }
 
+// Один список в порядке tunnels.json (решение #15): на маршрут порядок не
+// влияет — одну запись у двух туннелей служба не пустит. У основного —
+// плитка на каждый конфиг: выбранный со статусом, за ним запасные. Последней —
+// «Мой интернет».
 function renderTiles(s, checking, direct) {
   const T = s.tunnels || [];
   // Сменился состав — меню повисло бы над конфигом, которого может уже не быть.
-  const shape = JSON.stringify(T.map(t => [t.id, t.active, t.confs]));
+  const shape = JSON.stringify(T.map(t => [t.id, t.mode, t.active, t.confs]));
   if (shape !== prev.shape) { prev.shape = shape; closeMenu(); }
 
-  // Основной: плитка на каждый конфиг, выбранный — со статусом, остальные запасные.
-  const main = T.find(t => t.mode === 'all');
-  let mains = [];
-  if (main && hasConf(main)) {
-    const confs = main.confs.includes(main.active)
-      ? [main.active, ...main.confs.filter(c => c !== main.active)] : main.confs;
-    mains = confs.map(c => {
-      if (c !== main.active) return tileHtml(main, c, 'spare', ['', 'запасной'], true);
-      const st = tileState(main, s, checking, direct);
-      return tileHtml(main, c, st[0], st, false);
-    });
-  } else if (main) {
-    mains = [tileHtml(main, '', 'warn', tileState(main, s, checking, direct), false)];
-  }
-  setTiles('tiles-all', mains.join('') ||
-    '<div class="emptyrow">нет — весь остальной трафик идёт напрямую</div>', mains.length);
-
-  // «По списку»: плитка на туннель, имя — его выбранный конфиг.
-  const lists = T.filter(t => t.mode === 'list').map(t => {
+  const tiles = [];
+  T.forEach(t => {
     const st = tileState(t, s, checking, direct);
-    return tileHtml(t, t.active || (t.confs || [])[0] || '', st[0], st, false);
+    if (t.mode !== 'all' || !hasConf(t)) {
+      tiles.push(tileHtml(t, t.active || (t.confs || [])[0] || '', st[0], st, false, tileRole(t)));
+      return;
+    }
+    const confs = t.confs.includes(t.active)
+      ? [t.active, ...t.confs.filter(c => c !== t.active)] : t.confs;
+    confs.forEach(c => tiles.push(c === t.active
+      ? tileHtml(t, c, st[0], st, false, tileRole(t))
+      : tileHtml(t, c, 'spare', ['', 'запасной'], true)));
   });
-  setTiles('tiles-list', lists.join('') ||
-    '<div class="emptyrow">нет — сюда ложатся конфиги с конкретными сетями в AllowedIPs</div>',
-    lists.length);
+  tiles.push(directHtml(s, T.find(t => t.mode === 'all'), direct));
+  setTiles('tiles', tiles.join(''), tiles.length);
 }
 
 // Выпадающее меню плитки: items — [подпись, действие, danger].
@@ -582,19 +613,17 @@ document.addEventListener('click', e => {
 // Меню позиционируется абсолютно и при прокрутке отрывается от плитки.
 document.getElementById('pane-tunnels').addEventListener('scroll', closeMenu);
 
-// Выше/Ниже — среди туннелей «по списку»: их порядок — порядок правил. Где в
-// файле стоит основной, роли не играет, и шаг через него ничего не менял бы.
-function moves(t) {
-  const T = LAST.tunnels || [];
-  const lists = T.filter(x => x.mode === 'list');
-  const i = lists.indexOf(t);
-  const go = j => () => send('move_tunnel', {tunnel: t.id, step: T.indexOf(lists[j]) - T.indexOf(t)});
-  return [...(i > 0 ? [['Выше', go(i - 1)]] : []),
-          ...(i >= 0 && i < lists.length - 1 ? [['Ниже', go(i + 1)]] : [])];
-}
+const setMode = (tunnel, mode) => send('set_mode', {tunnel, mode});
 
 function tileMenu(id, name, near) {
-  const t = (LAST.tunnels || []).find(x => x.id === id);
+  const T = LAST.tunnels || [];
+  const main = T.find(x => x.mode === 'all');
+  // «Мой интернет»: меню есть, только пока всё остальное забирает туннель.
+  if (!id) {
+    if (main) openMenu([['Всё остальное напрямую', () => setMode(main.id, 'list')]], near);
+    return;
+  }
+  const t = T.find(x => x.id === id);
   if (!t) return;
   const arg = {tunnel: id, name};
   const rules = ['Туннелирование…', () => send('tunnel_rules', id)];
@@ -602,17 +631,21 @@ function tileMenu(id, name, near) {
   const edit = ['Редактировать', () => send('edit_config', arg)];
   const del = ['Удалить', () => delConfig(t, name), true];
   if (!name) {
-    openMenu([rules, ...moves(t), ['Удалить туннель', () => send('del_tunnel', id), true]], near);
+    openMenu([rules, ['Удалить туннель', () => send('del_tunnel', id), true]], near);
   } else if (t.mode === 'all') {
-    openMenu(name === t.active ? [rules, show, edit, del]
+    openMenu(name === t.active
+      ? [rules, show, edit, ['Всё остальное напрямую', () => setMode(id, 'list')], del]
       : [show, edit, ['Отдельным туннелем по списку',
                       () => send('move_config', {...arg, to: 'new'})], del], near);
   } else {
+    // Всё остальное — только через конфиг с 0.0.0.0/0: иначе его сервер отбросит
+    // чужой трафик (служба тоже откажет). Запасным — если основной уже есть.
+    const full = t.full ? [['Всё остальное через этот туннель', () => setMode(id, 'all')],
+                           ...(main ? [[`Запасным к «${esc(tname(main))}»`, () => moveToAll(t, name)]] : [])]
+                        : [];
     openMenu([rules, show, edit,
               ['Заменить файл…', () => send('add_config', {tunnel: id, place: 'replace'})],
-              ...moves(t),
-              ...(t.full ? [['Вернуть в весь остальной трафик', () => moveToAll(t, name)]] : []),
-              del], near);
+              ...full, del], near);
   }
 }
 
@@ -706,8 +739,9 @@ function renderHowto(h) {
     сервер. Нажми «+ Добавить конфиг…» на вкладке «Туннели»: место конфиг
     выбирает сам, по своему <code>AllowedIPs</code>:</p>
     <ol>
-      <li>есть <code>0.0.0.0/0</code> → в «Весь остальной трафик»; если там уже
-        есть конфиг, новый ляжет запасным — переключить можно кликом по плитке;</li>
+      <li>есть <code>0.0.0.0/0</code> → в туннель, через который идёт всё остальное;
+        если в нём уже есть конфиг, новый ляжет запасным — переключить можно
+        кликом по плитке;</li>
       <li>конкретные сети → новый туннель «по списку»;</li>
       <li>тот же частный DNS, что у туннеля «по списку», → заменяет его конфиг,
         правила туннелирования остаются;</li>
@@ -724,12 +758,15 @@ function renderHowto(h) {
     какой из них его отправить. Правила проверяются по порядку, до первого
     совпадения:</p>
     <ol>
-      <li>туннели «по списку», сверху вниз: адрес или домен из «Пускать через
-        туннель» или из <code>AllowedIPs</code> конфига, если его нет в «Не пускать»;</li>
+      <li>туннели «только по списку»: адрес или домен из «Пускать через
+        туннель» или из <code>AllowedIPs</code> конфига, если его нет в «Не пускать».
+        Одна запись — у одного туннеля: адрес из сетей чужого конфига сначала
+        впиши тому в «Не пускать», поэтому порядок туннелей не важен;</li>
       <li>локальные адреса (<code>10/8</code>, <code>192.168/16</code>) → мимо
         туннелей, в свою сеть;</li>
       <li>«Мимо VPN» основного туннеля → напрямую;</li>
-      <li>всё остальное → «Весь остальной трафик», а без него — напрямую.</li>
+      <li>всё остальное → в туннель с «Всё остальное через этот туннель» (меню ⋯
+        плитки), а без него или пока он не работает — «Мой интернет», напрямую.</li>
     </ol>
     <p class="note">Домен из «пускать» узнаётся по имени сайта в соединении
     (SNI, Host). SSH, RDP и прочее без имени пойдут в туннель, только если их
@@ -878,6 +915,14 @@ function rulesSaved(r) {
     n.textContent = `сохранено ${RULES[k].length}` + (bad.length ? ` · не понял: ${bad.join(', ')}` : '');
     n.classList.toggle('warn', bad.length > 0);
   });
+}
+
+// Отказ set-tunnel («a.ru уже в «Работа»», отменённый UAC): лист остаётся
+// открытым с набранным, причина — под первым полем, а не под листом.
+function rulesFailed(msg) {
+  if (!RULES) return;
+  const n = document.getElementById('n-' + ruleKeys(RULES)[0]);
+  if (n) { n.textContent = msg; n.classList.add('warn'); }
 }
 
 // Из файла: JSON экспорта — по полям, просто текст — в первое поле.

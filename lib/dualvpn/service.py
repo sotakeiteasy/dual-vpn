@@ -141,6 +141,47 @@ def _same_dns(conf, other):
     return bool(_private_dns(conf) & _private_dns(other))
 
 
+def _nets(entries):
+    """Подсети из записей списка или AllowedIPs; домены пропускаются."""
+    out = []
+    for entry in entries:
+        try:
+            out.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            pass
+    return out
+
+
+def _clash(t, other, conf):
+    """Почему запись «пускать» туннеля t уже забирает other, иначе None.
+
+    Порядок туннелей на маршрут не влияет (решение #16), а sing-box берёт
+    первое совпавшее правило: запись, которую забирают два туннеля «по
+    списку», ушла бы в тот, что выше в файле. Забирает — та же запись в его
+    «пускать» или пересечение с его подсетями (AllowedIPs конфига conf и
+    «пускать»), не вынесенное там в «не пускать».
+    """
+    nets = _nets(other["include"])
+    if conf:
+        nets += _nets(buildconfig.allowed_nets(conf, v6=True))
+    out = _nets(other["exclude"])
+    for entry in t["include"]:
+        if entry in other["include"]:
+            return f"«{entry}» уже в «{other['name']}»"
+        for a in _nets([entry]):
+            for b in nets:
+                if a.version != b.version or not a.overlaps(b):
+                    continue
+                # Подсети либо вложены, либо не пересекаются: общая часть — меньшая.
+                inner = a if a.prefixlen >= b.prefixlen else b
+                if not any(x.version == inner.version and inner.subnet_of(x)
+                           for x in out):
+                    return (f"«{entry}» из «{t['name']}» уже идёт через "
+                            f"«{other['name']}» — убери его здесь или впиши "
+                            f"туда в «не пускать»")
+    return None
+
+
 class Core:
     """Логика службы, отделённая от обвязки Windows.
 
@@ -303,8 +344,6 @@ class Core:
             return self._set_tunnel(tid, payload)
         if op == "remove-tunnel":
             return self._remove_tunnel(tid)
-        if op == "move-tunnel":
-            return self._move_tunnel(tid, payload.get("step", 0))
         if op == "set-log-level":
             return self._set_log_level(payload.get("level", ""))
         if op == "set-site":
@@ -1364,6 +1403,11 @@ class Core:
         Списки — текстом поля, как его ввёл человек (routelist.parse).
         Понятое сохраняется, непонятое возвращается в rejected: окно его
         покажет, молча ничего не пропадает.
+
+        mode all — «всё остальное через этот туннель»: прежний основной
+        становится «по списку», как переключатель; list у основного — всё
+        остальное напрямую. Запись, которую уже забирает другой туннель «по
+        списку», — отказ (_clash).
         """
         try:
             data, t = self._load_target(tunnel)
@@ -1371,16 +1415,51 @@ class Core:
             for key in ("include", "exclude"):
                 if key in payload:
                     t[key], rejected[key] = self._rules(payload[key])
+            changed = [t]
+            if payload.get("mode") == "all" and t["mode"] != "all":
+                changed += self._make_main(data, t)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         for key in ("name", "mode"):
             if key in payload:
                 t[key] = payload[key]
+        why = self._clash_of(data, changed)
+        if why:
+            return {"ok": False, "error": why}
         r = self._save_tunnels(data, f"изменён туннель {t['id']}")
         # Сохранённые списки — окну: поля показывают записи в том виде, как
         # их понял routelist, рядом с непонятыми.
         return ({**r, "rejected": rejected, "include": t["include"],
                  "exclude": t["exclude"]} if r["ok"] else r)
+
+    def _make_main(self, data, t):
+        """Готовит t к режиму all: конфиг должен забирать весь трафик, иначе
+        его сервер отбросил бы чужой. Прежний основной → list; он и
+        возвращается — его записи тоже проверяются на дубль."""
+        if not _conf_full(t["id"], self._in_use(data)[t["id"]]):
+            raise ValueError(f"у «{t['name']}» нет конфига с 0.0.0.0/0 в AllowedIPs — "
+                             f"весь остальной трафик его сервер отбросил бы")
+        main = tunnels.main_tunnel(data)
+        if main is None:
+            return []
+        main["mode"] = "list"
+        return [main]
+
+    def _clash_of(self, data, changed):
+        """Первый дубль записи «пускать» между туннелями «по списку», где хоть
+        один из changed; None — дублей нет. Старые дубли других пар правку
+        не держат: их порядок в файле не менялся."""
+        confs = {t["id"]: c for t, c in self._list_confs(data)}
+        lists = [t for t in data["tunnels"] if t["mode"] == "list"]
+        ids = {t["id"] for t in changed}
+        for t in lists:
+            for other in lists:
+                if other is t or not {t["id"], other["id"]} & ids:
+                    continue
+                why = _clash(t, other, confs.get(other["id"]))
+                if why:
+                    return why
+        return None
 
     def _remove_tunnel(self, tunnel):
         """Убирает туннель вместе с папкой его конфигов."""
@@ -1404,18 +1483,6 @@ class Core:
             pass
         except OSError as exc:
             self.log(f"!! не удалить конфиги туннеля {tid}: {exc}")
-
-    def _move_tunnel(self, tunnel, step):
-        """Сдвигает туннель на step позиций: порядок в файле — порядок правил."""
-        try:
-            data, t = self._load_target(tunnel)
-            step = int(step)
-        except (TypeError, ValueError) as exc:
-            return {"ok": False, "error": str(exc)}
-        items = data["tunnels"]
-        i = items.index(t)
-        items.insert(max(0, min(len(items) - 1, i + step)), items.pop(i))
-        return self._save_tunnels(data, f"туннель {t['id']} перемещён")
 
     def _set_log_level(self, level):
         try:

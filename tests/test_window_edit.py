@@ -88,7 +88,7 @@ def test_без_канала_окно_сообщает_стоит_ли_служ�
     assert shown == [("render", {"up": False, "no_service": True, "daemon": False})]
 
 
-def _save_rules(monkeypatch, up):
+def _save_rules(monkeypatch, up, reply=None):
     """Сохранить правила туннеля; вернуть команды службе и вызовы страницы."""
     ops, admin, shown = [], [], []
 
@@ -100,8 +100,8 @@ def _save_rules(monkeypatch, up):
 
     def admin_call(op, **kw):
         admin.append((op, kw))
-        return {"ok": True, "include": ["a.ru"], "exclude": [],
-                "rejected": {"include": ["foo_bar"]}}
+        return reply or {"ok": True, "include": ["a.ru"], "exclude": [],
+                         "rejected": {"include": ["foo_bar"]}}
 
     monkeypatch.setattr(ipc, "call", call)
     api = window.Api({})
@@ -118,6 +118,16 @@ def test_правила_уходят_текстом_поля_а_ответ_со_
     assert admin == [("set-tunnel", {"tunnel": "work", "include": "a.ru foo_bar"})]
     assert ("rulesSaved", {"include": ["a.ru"], "exclude": [],
                            "rejected": {"include": ["foo_bar"]}}) in shown
+
+
+def test_отказ_службы_показан_в_листе_и_ничего_не_применяется(monkeypatch):
+    ops, _, shown = _save_rules(monkeypatch, up=True,
+                                reply={"ok": False, "error": "«a.ru» уже в «Лаб»"})
+
+    # Строка состояния — под листом: отказ должен стоять в самом листе.
+    assert ("rulesFailed", "«a.ru» уже в «Лаб»") in shown
+    assert "rulesSaved" not in [fn for fn, _ in shown]
+    assert "apply" not in ops
 
 
 def test_правка_при_выключенном_vpn_не_включает_его(monkeypatch):

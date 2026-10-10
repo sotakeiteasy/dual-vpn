@@ -74,13 +74,13 @@ def test_команды_плитки_уходят_администратору_�
     api, admin, shown = _api(monkeypatch, [])
 
     api.send("move_config", {"tunnel": "home", "name": "nl-1", "to": "new"})
-    api.send("move_tunnel", {"tunnel": "t3", "step": "-2"})
+    api.send("set_mode", {"tunnel": "t3", "mode": "all"})
     api.send("del_tunnel", "work")
 
     assert admin == [
         ("move-config", {"tunnel": "home", "name": "nl-1", "to": "new",
                          "drop_tunnel": False}),
-        ("move-tunnel", {"tunnel": "t3", "step": -2}),
+        ("set-tunnel", {"tunnel": "t3", "mode": "all"}),
         ("remove-tunnel", {"tunnel": "work"})]
     assert "failed" not in [fn for fn, _ in shown]
 

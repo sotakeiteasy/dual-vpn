@@ -460,10 +460,84 @@ def test_длинный_список_отклоняется_целиком(core,
     assert tunnels.find(tunnels.load(), "work")["include"] == []
 
 
-def test_неверный_режим_не_записывается(core):
+def test_всё_остальное_без_полного_конфига_не_ставится(core):
+    _put("work", "corp.conf", _wg("10.53.0.0/16"))
+
     r = core._set_tunnel("work", {"mode": "all"})
-    assert not r["ok"]
-    assert tunnels.find(tunnels.load(), "work")["mode"] == "list"
+
+    assert not r["ok"] and "0.0.0.0/0" in r["error"]
+    assert [_tunnel(i)["mode"] for i in ("work", "home")] == ["list", "all"]
+
+
+def test_всё_остальное_через_туннель_переключает_основной(core):
+    _put("work", "nl.conf", FULL)
+    _put("home", "de.conf", FULL)
+
+    r = core._set_tunnel("work", {"mode": "all"})
+
+    assert r["ok"]
+    assert [_tunnel(i)["mode"] for i in ("work", "home")] == ["all", "list"]
+
+
+def test_всё_остальное_напрямую(core):
+    assert core._set_tunnel("home", {"mode": "list"})["ok"]
+    assert tunnels.main_tunnel(tunnels.load()) is None
+
+
+def test_одна_запись_у_двух_туннелей_отказ(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "a.ru"})
+
+    r = core._set_tunnel("work", {"include": "b.ru a.ru"})
+
+    assert not r["ok"] and "«a.ru» уже в «Лаб»" in r["error"]
+    assert _tunnel("work")["include"] == []
+
+
+def test_вложенный_домен_не_дубль(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "a.ru"})
+
+    assert core._set_tunnel("work", {"include": "x.a.ru"})["ok"]
+
+
+def test_адрес_в_сетях_конфига_другого_туннеля_только_через_его_не_пускать(core):
+    _put("work", "corp.conf", _wg("10.53.0.0/16"))
+    core._add_tunnel("Лаб", "list")
+
+    r = core._set_tunnel("t1", {"include": "10.53.1.5"})
+    assert not r["ok"] and "«не пускать»" in r["error"] and "«Работа»" in r["error"]
+
+    assert core._set_tunnel("work", {"exclude": "10.53.1.0/24"})["ok"]
+    assert core._set_tunnel("t1", {"include": "10.53.1.5"})["ok"]
+
+    # Убрать исключение назад — снова дубль, уже со стороны «Работы».
+    r = core._set_tunnel("work", {"exclude": ""})
+    assert not r["ok"] and _tunnel("work")["exclude"] == ["10.53.1.0/24"]
+
+
+def test_подсеть_шире_чужой_тоже_дубль(core):
+    _put("work", "corp.conf", _wg("10.53.1.0/24"))
+    core._add_tunnel("Лаб", "list")
+
+    r = core._set_tunnel("t1", {"include": "10.53.0.0/16"})
+
+    assert not r["ok"] and _tunnel("t1")["include"] == []
+
+
+def test_прежний_основной_со_списком_проверяется_на_дубль(core):
+    _put("work", "nl.conf", FULL)
+    data = tunnels.load()
+    tunnels.find(data, "home")["include"] = ["a.ru"]     # набрано, пока был основным
+    tunnels.find(data, "work")["include"] = ["a.ru"]
+    tunnels.save(data)
+    core._add_tunnel("Лаб", "list")
+    _put("t1", "de.conf", FULL)
+
+    r = core._set_tunnel("t1", {"mode": "all"})
+
+    assert not r["ok"] and "«a.ru» уже в" in r["error"]
+    assert [_tunnel(i)["mode"] for i in ("work", "home", "t1")] == ["list", "all", "list"]
 
 
 def test_удаление_туннеля_убирает_его_конфиги(core):
@@ -474,14 +548,6 @@ def test_удаление_туннеля_убирает_его_конфиги(co
     assert r["ok"]
     assert [t["id"] for t in tunnels.load()["tunnels"]] == ["home"]
     assert not os.path.exists(tunnels.conf_dir("work"))
-
-
-@pytest.mark.parametrize("step, order", [
-    (1, ["home", "work"]), (-1, ["work", "home"]), (5, ["home", "work"]),
-])
-def test_туннель_сдвигается_в_пределах_списка(core, step, order):
-    assert core._move_tunnel("work", step)["ok"]
-    assert [t["id"] for t in tunnels.load()["tunnels"]] == order
 
 
 def test_уровень_журнала(core):
@@ -508,7 +574,7 @@ def test_испорченный_tunnels_json_команды_туннелей_н�
 
     for r in (core._get_tunnels(), core._add_tunnel("x", "list"),
               core._set_tunnel("work", {"name": "x"}), core._remove_tunnel("work"),
-              core._move_tunnel("work", 1), core._set_log_level("debug"),
+              core._set_log_level("debug"),
               core._set_site('CORP_DOMAINS="a.ru"')):
         assert not r["ok"] and "tunnels.json" in r["error"]
 
