@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from dualvpn import ipc, tray
+from tunnelvpn import ipc, tray
 
 
 class _Icon:

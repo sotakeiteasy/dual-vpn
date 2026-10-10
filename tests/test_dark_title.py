@@ -7,7 +7,7 @@ Linux в CI, где windll нет вовсе.
 import ctypes
 import types
 
-from dualvpn import window
+from tunnelvpn import window
 
 
 def _fake_dwm(monkeypatch):

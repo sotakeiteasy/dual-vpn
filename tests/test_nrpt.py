@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from dualvpn import paths, winnet
-from dualvpn.tunnel import Tunnel
+from tunnelvpn import paths, winnet
+from tunnelvpn.tunnel import Tunnel
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +28,7 @@ def test_дубли_схлопываются():
 
 
 def test_не_домен_отбрасывается():
-    """site.env правит пользователь: мусор из него не должен попасть в правило."""
+    """tunnels.json правит пользователь: мусор из него не должен попасть в правило."""
     bad = ["a'; Remove-Item C:\\ #", "x y", "", "-corp.example", "a$(b).example"]
     assert winnet.nrpt_namespaces(bad + ["ok.example"]) == [".ok.example"]
 
@@ -73,24 +73,59 @@ class Rule:
 
 
 def test_nrpt_set_меняет_своё_правило_на_dns_туннеля(monkeypatch):
-    wmi = FakeNrptWmi([Rule("{old}", "DualVPN"), Rule("{чужое}", "Corp IT")])
+    wmi = FakeNrptWmi([Rule("{old}", "TunnelVPN"), Rule("{чужое}", "Corp IT")])
     monkeypatch.setattr(winnet, "_nrpt_call", wmi)
 
     assert winnet.nrpt_set(["corp.example"], paths.TUN_DNS) is True
 
     assert ("Remove", {"Name": "{old}", "Force": True}) in wmi.calls
     assert ("Add", {"Namespace": [".corp.example"], "NameServers": [paths.TUN_DNS],
-                    "Comment": "DualVPN"}) in wmi.calls
+                    "Comment": "TunnelVPN"}) in wmi.calls
     assert [r.Name for r in wmi.rules] == ["{чужое}", "{new}"]
 
 
 def test_nrpt_clear_через_wmi_снимает_только_свои(monkeypatch):
-    wmi = FakeNrptWmi([Rule("{a}", "DualVPN"), Rule("{b}", "Corp IT")])
+    wmi = FakeNrptWmi([Rule("{a}", "TunnelVPN"), Rule("{b}", "Corp IT")])
     monkeypatch.setattr(winnet, "_nrpt_call", wmi)
 
     assert winnet.nrpt_clear() is True
 
     assert [r.Name for r in wmi.rules] == ["{b}"]
+
+
+def test_nrpt_clear_снимает_и_правило_старого_имени(monkeypatch):
+    """Упавшая DualVPN оставила бы своё правило навсегда."""
+    wmi = FakeNrptWmi([Rule("{old}", "DualVPN"), Rule("{b}", "Corp IT")])
+    monkeypatch.setattr(winnet, "_nrpt_call", wmi)
+
+    assert winnet.nrpt_clear() is True
+
+    assert [r.Name for r in wmi.rules] == ["{b}"]
+
+
+class FakeFirewall:
+    """HNetCfg.FwPolicy2: имена правил в памяти, дубли допустимы."""
+
+    def __init__(self, names):
+        self.Rules = self
+        self.names = list(names)
+
+    def Item(self, name):
+        if name not in self.names:
+            raise KeyError(name)
+
+    def Remove(self, name):
+        self.names.remove(name)
+
+
+def test_v6_unblock_снимает_новое_и_старое_правило(monkeypatch):
+    fw = FakeFirewall(["TunnelVPN-block-IPv6", "TunnelVPN-block-IPv6",
+                       "DualVPN-block-IPv6", "Чужое"])
+    monkeypatch.setattr(winnet, "_firewall", lambda: fw)
+
+    winnet.v6_unblock()
+
+    assert fw.names == ["Чужое"]
 
 
 def test_без_wmi_правило_не_ставится_и_это_видно(monkeypatch):

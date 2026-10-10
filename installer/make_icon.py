@@ -1,6 +1,6 @@
-"""Рисует DualVPN.ico для exe и установщика.
+"""Рисует TunnelVPN.ico для exe и установщика.
 
-Сам значок рисует lib/dualvpn/icon.py: тот же ico нужен окну, запущенному из
+Сам значок рисует lib/tunnelvpn/icon.py: тот же ico нужен окну, запущенному из
 исходников, и форма задана в одном месте.
 
     python installer/make_icon.py [куда.ico]
@@ -12,7 +12,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from dualvpn import icon  # noqa: E402
+from tunnelvpn import icon  # noqa: E402
 
 # Консоль на английской Windows — cp1252, и обычный print с кириллицей падает
 # с UnicodeEncodeError. Именно на этом рушилась сборка в CI: скрипт делал своё
@@ -23,7 +23,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        ROOT, "installer", "DualVPN.ico")
+        ROOT, "installer", "TunnelVPN.ico")
     icon.write_ico(out)
     print(f"собрано: {out}")
 

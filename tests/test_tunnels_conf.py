@@ -14,7 +14,7 @@ import shutil
 
 import pytest
 
-from dualvpn import paths, tunnels
+from tunnelvpn import paths, tunnels
 
 WG = "[Interface]\nPrivateKey = x\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = y\n"
 

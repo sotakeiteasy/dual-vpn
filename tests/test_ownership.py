@@ -11,7 +11,7 @@ Linux нет, да и проверять надо не его, а решение
 
 import pytest
 
-from dualvpn import paths, tunnel
+from tunnelvpn import paths, tunnel
 
 
 class FakeNet:

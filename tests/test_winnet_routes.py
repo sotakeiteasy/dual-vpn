@@ -6,7 +6,7 @@
 
 import types
 
-from dualvpn import winnet
+from tunnelvpn import winnet
 
 
 class _Prop:

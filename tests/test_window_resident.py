@@ -6,7 +6,7 @@
 import sys
 import types
 
-from dualvpn import cli, ipc, window
+from tunnelvpn import cli, ipc, window
 
 
 class _SyncThread:
@@ -269,7 +269,7 @@ def test_cli_передаёт_режимы_окна_и_трея(monkeypatch):
     seen = {}
     monkeypatch.setattr(window, "open_window",
                         lambda **kw: seen.setdefault("window", kw))
-    from dualvpn import tray
+    from tunnelvpn import tray
     monkeypatch.setattr(tray, "run", lambda **kw: seen.setdefault("tray", kw))
 
     cli.main(["window", "--resident", "--hidden"])

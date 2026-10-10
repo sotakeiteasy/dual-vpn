@@ -300,7 +300,7 @@ class Api:
             if getattr(sys, "frozen", False):
                 exe, base_args = sys.executable, []
             else:
-                exe, base_args = sys.executable, ["-m", "dualvpn.cli"]
+                exe, base_args = sys.executable, ["-m", "tunnelvpn.cli"]
             _run_elevated(exe, base_args + ["admin-op", op, payload_file, result_file])
 
             if os.path.isfile(result_file):
@@ -548,7 +548,7 @@ class Api:
              "включат: править таблицу маршрутов от обычного пользователя "
              "нельзя.",
              "Открой командную строку от имени администратора и выполни: "
-             "dualvpn service install",
+             "tunnelvpn service install",
              "Установщик делает это сам; вручную нужно только при запуске из "
              "исходников."],
         ])
@@ -664,7 +664,7 @@ def _unpark(window, api):
 def _source_icon():
     """Значок окна, запущенного из исходников. None — остаётся значок exe.
 
-    pywebview берёт значок окна из sys.executable. В сборке это dualvpn.exe
+    pywebview берёт значок окна из sys.executable. В сборке это tunnelvpn.exe
     со своим ico, а из исходников — python.exe, и окно с кнопкой в панели
     задач показывали значок Python. Свой AppUserModelID нужен затем же: без
     него панель задач складывает окно в одну группу с python.exe и берёт
@@ -673,12 +673,12 @@ def _source_icon():
     """
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Enkeym.DualVPN")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Enkeym.TunnelVPN")
     except Exception:
         pass
     try:
         from . import icon
-        return icon.write_ico(os.path.join(tempfile.gettempdir(), "DualVPN-window.ico"))
+        return icon.write_ico(os.path.join(tempfile.gettempdir(), "TunnelVPN-window.ico"))
     except Exception:
         return None
 
@@ -706,7 +706,7 @@ def _storage_path():
     pywebview это лишь пишет в лог, и окно остаётся серым и пустым.
     """
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "DualVPN",
+    return os.path.join(base, "TunnelVPN",
                         "WebView2-" + ("admin" if _is_admin() else "user"))
 
 
@@ -781,7 +781,7 @@ def open_window(resident=False, hidden=False):
     index = os.path.join(paths.UI_DIR, "index.html")
 
     holder["window"] = webview.create_window(
-        f"DualVPN {paths.version()}", _page_url(index),
+        f"TunnelVPN {paths.version()}", _page_url(index),
         # Спрятанным создаётся и видимое окно: покажет его Api.reveal.
         js_api=api, width=1040, height=720, min_size=(880, 560), hidden=True,
         # Тот же фон, что --bg в index.html: иначе до загрузки страницы окно
@@ -826,6 +826,6 @@ def open_window(resident=False, hidden=False):
                   storage_path=_storage_path())
     holder["window"] = None
     # Окно закрыто — процесс тоже. WebView2 ходит через pythonnet, и потоки
-    # .NET способны удержать dualvpn.exe после закрытия окна: тогда он висел
+    # .NET способны удержать tunnelvpn.exe после закрытия окна: тогда он висел
     # бы в диспетчере задач без окна. Ничего несохранённого здесь нет.
     os._exit(0)

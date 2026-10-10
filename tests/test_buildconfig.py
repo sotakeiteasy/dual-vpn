@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from dualvpn import buildconfig, paths, tunnel, tunnels
+from tunnelvpn import buildconfig, paths, tunnel, tunnels
 
 
 CORP = """

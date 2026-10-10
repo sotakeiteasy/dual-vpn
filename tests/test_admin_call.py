@@ -11,7 +11,7 @@ import subprocess
 import sys
 import types
 
-from dualvpn import window
+from tunnelvpn import window
 
 
 class _WinError(Exception):
@@ -70,7 +70,7 @@ def test_команда_с_правами_идёт_через_shellexecute_и_ж
     assert reply == {"ok": True, "text": "corp"}
     kw = calls[0][1]
     assert kw["lpVerb"] == "runas" and kw["lpFile"] == sys.executable
-    assert _args(kw["lpParameters"])[:4] == ["-m", "dualvpn.cli", "admin-op", "read-config"]
+    assert _args(kw["lpParameters"])[:4] == ["-m", "tunnelvpn.cli", "admin-op", "read-config"]
     assert calls[1:] == [("wait", 77, -1), ("close", 77)]
 
 

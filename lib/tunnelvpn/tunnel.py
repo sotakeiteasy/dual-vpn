@@ -249,7 +249,7 @@ class Tunnel:
                 pass
         fh = open(path, "a", encoding="utf-8", errors="replace")
         fh.write(
-            f"\n=== {datetime.datetime.now():%Y-%m-%d %H:%M:%S} DualVPN ===\n")
+            f"\n=== {datetime.datetime.now():%Y-%m-%d %H:%M:%S} TunnelVPN ===\n")
         fh.flush()
         return fh
 

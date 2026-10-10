@@ -8,7 +8,7 @@
 
 import pytest
 
-from dualvpn import routelist
+from tunnelvpn import routelist
 
 
 @pytest.mark.parametrize("text", [

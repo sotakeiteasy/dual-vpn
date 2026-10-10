@@ -3,7 +3,7 @@
 Служба в обычной версии нужна ровно за одним: держать права постоянно, чтобы
 трей мог править маршруты, не вызывая UAC на каждое включение. Портативная
 версия решает ту же задачу иначе — просит права один раз, при запуске (это
-делает манифест exe, см. installer/dualvpn.spec), и дальше держит туннель
+делает манифест exe, см. installer/tunnelvpn.spec), и дальше держит туннель
 прямо в себе.
 
 Кода это почти не добавляет: логика службы и так вынесена в service.Core,
@@ -20,6 +20,22 @@
 import os
 import sys
 
+# Каталоги данных до переименования в TunnelVPN: встретив их, забираем целиком.
+DATA_NAME, LEGACY_DATA_NAME = "TunnelVPN-Data", "DualVPN-Data"
+LOCAL_NAME, LEGACY_LOCAL_NAME = "TunnelVPN", "DualVPN"
+
+
+def _adopt(legacy, path):
+    """Каталог старого имени → новое имя, если нового ещё нет: конфиги и ключи
+    переезжают с прошлой версии. Не вышло (занят, нет прав) — новый каталог
+    заведётся пустым, старый останется нетронутым."""
+    if os.path.isdir(legacy) and not os.path.exists(path):
+        try:
+            os.rename(legacy, path)
+        except OSError:
+            pass
+    return path
+
 
 def data_dir():
     """Куда портативная версия кладёт конфиги и состояние.
@@ -32,7 +48,8 @@ def data_dir():
     here = os.path.dirname(os.path.abspath(sys.executable
                                            if getattr(sys, "frozen", False)
                                            else sys.argv[0]))
-    candidate = os.path.join(here, "DualVPN-Data")
+    candidate = _adopt(os.path.join(here, LEGACY_DATA_NAME),
+                       os.path.join(here, DATA_NAME))
     try:
         os.makedirs(candidate, exist_ok=True)
         probe = os.path.join(candidate, ".writable")
@@ -41,8 +58,9 @@ def data_dir():
         os.remove(probe)
         return candidate
     except OSError:
-        return os.path.join(os.environ.get("LOCALAPPDATA")
-                            or os.path.expanduser("~"), "DualVPN")
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return _adopt(os.path.join(base, LEGACY_LOCAL_NAME),
+                      os.path.join(base, LOCAL_NAME))
 
 
 def run(background=False):
@@ -55,7 +73,7 @@ def run(background=False):
     Главный поток обязан достаться трею: pystray держит в нём цикл сообщений
     Windows, и из любого другого потока значок просто не появится.
     """
-    # Импорт после того, как выставлен DUALVPN_DATA: paths читает его при
+    # Импорт после того, как выставлен TUNNELVPN_DATA: paths читает его при
     # импорте, и раскладка определяется один раз на весь процесс.
     from . import service, tray
 

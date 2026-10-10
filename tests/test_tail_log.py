@@ -9,8 +9,8 @@ import types
 
 import pytest
 
-from dualvpn import paths, service, tunnels
-from dualvpn.service import Core
+from tunnelvpn import paths, service, tunnels
+from tunnelvpn.service import Core
 
 
 @pytest.fixture

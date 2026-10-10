@@ -1,7 +1,7 @@
 """Окно: конфиги и правила по id туннеля — вопрос о месте конфига, удаление
 последнего, списки правил из файла."""
 
-from dualvpn import ipc, window
+from tunnelvpn import ipc, window
 
 WG = "[Interface]\nAddress = 10.53.0.4/32\n[Peer]\nAllowedIPs = 10.53.0.0/16\n"
 

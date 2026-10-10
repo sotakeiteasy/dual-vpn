@@ -20,7 +20,7 @@ import urllib.request
 
 import pytest
 
-from dualvpn import buildconfig, paths, tunnel, tunnels, winnet
+from tunnelvpn import buildconfig, paths, tunnel, tunnels, winnet
 
 
 class FakeNet:

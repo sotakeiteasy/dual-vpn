@@ -7,7 +7,7 @@
 import ntpath
 import os
 
-from dualvpn import ipc, paths, window
+from tunnelvpn import ipc, paths, window
 
 WORK = {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
         "confs": ["corp"]}

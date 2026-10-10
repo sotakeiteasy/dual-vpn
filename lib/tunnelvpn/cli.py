@@ -1,32 +1,32 @@
-"""Командная строка DualVPN — то же, что делает трей, но из консоли.
+"""Командная строка TunnelVPN — то же, что делает трей, но из консоли.
 
-    dualvpn status              что сейчас поднято
-    dualvpn start [ПРОФИЛЬ]     поднять
-    dualvpn stop                опустить и откатить маршруты
-    dualvpn list                туннели и их конфиги (* — активный)
-    dualvpn use ТУННЕЛЬ КОНФИГ  выбрать конфиг туннеля (туннель — id или имя)
-    dualvpn enable|disable ТУННЕЛЬ
-                                включить или выключить туннель «по списку»;
-                                основной выключает «Всё остальное напрямую» в окне
-    dualvpn profile ИМЯ         выбрать конфиг основного туннеля
-    dualvpn log [N]             последние строки журнала sing-box
-    dualvpn version
+    tunnelvpn status              что сейчас поднято
+    tunnelvpn start [ПРОФИЛЬ]     поднять
+    tunnelvpn stop                опустить и откатить маршруты
+    tunnelvpn list                туннели и их конфиги (* — активный)
+    tunnelvpn use ТУННЕЛЬ КОНФИГ  выбрать конфиг туннеля (туннель — id или имя)
+    tunnelvpn enable|disable ТУННЕЛЬ
+                                  включить или выключить туннель «по списку»;
+                                  основной выключает «Всё остальное напрямую» в окне
+    tunnelvpn profile ИМЯ         выбрать конфиг основного туннеля
+    tunnelvpn log [N]             последние строки журнала sing-box
+    tunnelvpn version
 
-    dualvpn tray [--background] значок в трее и окно (обычный способ запуска);
-                                --background — только значок, без окна
-    dualvpn window              окно с состоянием, конфигами и логом
-                                (--resident --hidden — так его зовёт трей)
-    dualvpn admin-op ОП ЗАПРОС ОТВЕТ
-                                служебное: окно зовёт так себя же с правами
-                                администратора на одну команду в conf\\ —
-                                руками вводить незачем
+    tunnelvpn tray [--background] значок в трее и окно (обычный способ запуска);
+                                  --background — только значок, без окна
+    tunnelvpn window              окно с состоянием, конфигами и логом
+                                  (--resident --hidden — так его зовёт трей)
+    tunnelvpn admin-op ОП ЗАПРОС ОТВЕТ
+                                  служебное: окно зовёт так себя же с правами
+                                  администратора на одну команду в conf\\ —
+                                  руками вводить незачем
 
 Управление службой (нужны права администратора):
 
-    dualvpn service install     поставить и запустить службу
-    dualvpn service remove      снять службу
-    dualvpn service start|stop|restart
-    dualvpn service console     запустить логику службы прямо здесь, без установки
+    tunnelvpn service install     поставить и запустить службу
+    tunnelvpn service remove      снять службу
+    tunnelvpn service start|stop|restart
+    tunnelvpn service console     запустить логику службы прямо здесь, без установки
 
 Команды туннеля идут в службу через канал — сами они систему не трогают.
 """
@@ -37,7 +37,7 @@ import sys
 from . import ipc, paths
 
 # Весь вывод здесь русский, а консоль на английской Windows — cp1252, где
-# кириллицы нет вовсе. Без этого `dualvpn status` падал бы с UnicodeEncodeError
+# кириллицы нет вовсе. Без этого `tunnelvpn status` падал бы с UnicodeEncodeError
 # вместо того, чтобы показать состояние. errors='replace' страхует и на
 # экзотических кодовых страницах: лучше вопросительные знаки, чем исключение.
 if hasattr(sys.stdout, "reconfigure"):
@@ -61,7 +61,7 @@ def _check_text(t):
 
 def _print_status(st):
     up = st.get("up")
-    print(f"DualVPN {st.get('version', '?')}: "
+    print(f"TunnelVPN {st.get('version', '?')}: "
           f"{'работает' if up else 'выключен'}")
     if st.get("busy"):
         print(f"  сейчас   : {st['busy']}")
@@ -104,7 +104,7 @@ def _call(op, **payload):
         return ipc.call(op, **payload)
     except ipc.NotRunning as exc:
         print(exc)
-        print("поставить службу: dualvpn service install (от администратора)")
+        print("поставить службу: tunnelvpn service install (от администратора)")
         sys.exit(1)
 
 
@@ -136,7 +136,7 @@ def main(argv=None):
         return 0
 
     if cmd in ("version", "-v", "--version"):
-        print(f"DualVPN {paths.version()}")
+        print(f"TunnelVPN {paths.version()}")
         # Где ищем бинарники — по этим строкам build.ps1 проверяет сборку.
         # MISSING латиницей: вывод читает PowerShell, кодировки там разные.
         for f in (paths.SINGBOX, paths.WINTUN):
@@ -176,7 +176,7 @@ def main(argv=None):
         # процесс с правами через ShellExecuteEx (runas) и ждёт результат
         # в файле — сам процесс интерактивно ничего не показывает.
         if len(argv) < 4:
-            print("использование: dualvpn admin-op ОП ФАЙЛ-ЗАПРОСА ФАЙЛ-ОТВЕТА")
+            print("использование: tunnelvpn admin-op ОП ФАЙЛ-ЗАПРОСА ФАЙЛ-ОТВЕТА")
             return 1
         op, payload_file, result_file = argv[1], argv[2], argv[3]
         import json
@@ -231,7 +231,7 @@ def main(argv=None):
 
     if cmd == "use":
         if len(argv) < 3:
-            print("укажи туннель и конфиг: dualvpn use home nl-1")
+            print("укажи туннель и конфиг: tunnelvpn use home nl-1")
             return 1
         r = _call("set-active", tunnel=argv[1], name=argv[2])
         if not r.get("ok"):
@@ -242,7 +242,7 @@ def main(argv=None):
 
     if cmd in ("enable", "disable"):
         if len(argv) < 2:
-            print(f"укажи туннель: dualvpn {cmd} work")
+            print(f"укажи туннель: tunnelvpn {cmd} work")
             return 1
         r = _call("set-enabled", tunnel=argv[1], on=cmd == "enable")
         if not r.get("ok"):
@@ -253,7 +253,7 @@ def main(argv=None):
 
     if cmd == "profile":
         if len(argv) < 2:
-            print("укажи имя: dualvpn profile nl-1")
+            print("укажи имя: tunnelvpn profile nl-1")
             return 1
         r = _call("set-profile", profile=argv[1])
         if not r.get("ok"):
@@ -269,7 +269,7 @@ def main(argv=None):
         return 0
 
     print(f"неизвестная команда: {cmd}")
-    print("см. dualvpn help")
+    print("см. tunnelvpn help")
     return 1
 
 

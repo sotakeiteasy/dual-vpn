@@ -2,8 +2,8 @@
 
 import re
 
-from dualvpn import service
-from dualvpn.service import Core
+from tunnelvpn import service
+from tunnelvpn.service import Core
 
 
 def test_штамп_с_миллисекундами(monkeypatch, tmp_path):

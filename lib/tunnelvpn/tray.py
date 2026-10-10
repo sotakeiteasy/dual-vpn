@@ -35,9 +35,9 @@ WINDOW_SHOW_WAIT = 5.0
 WARM_AFTER = 10.0
 # Сколько второй запуск ждёт, пока первый трей начнёт слушать «покажи окно».
 OPEN_SIGNAL_WAIT = 2.0
-# Задача автозапуска трея (dualvpn.iss: RegisterTrayTask) и сколько ярлык
+# Задача автозапуска трея (tunnelvpn.iss: RegisterTrayTask) и сколько ярлык
 # ждёт трей, запущенный ею: планировщик и импорт pystray — несколько секунд.
-TRAY_TASK = "DualVPN Tray"
+TRAY_TASK = "TunnelVPN Tray"
 TASK_OPEN_WAIT = 15.0
 
 # Пределы полей NOTIFYICONDATA с завершающим нулём. pystray их не обрезает:
@@ -225,23 +225,23 @@ class Tray:
     def _title(self):
         st = self.status
         if not st:
-            return "DualVPN — служба не отвечает"
+            return "TunnelVPN — служба не отвечает"
         if st.get("busy"):
-            return f"DualVPN — {st['busy']}…"
+            return f"TunnelVPN — {st['busy']}…"
         if not st.get("up"):
             err = st.get("last_error")
-            return "DualVPN — выключен" + (f" ({err})" if err else "")
+            return "TunnelVPN — выключен" + (f" ({err})" if err else "")
         main = tunnels.by_kind(st.get("tunnels") or [], "personal")
         name = main["name"] if main else "основной"
         who = st.get("profile") or name
         exit_ip = st.get("exit_ip") or "—"
         if st.get("out") == "direct":
-            return f"DualVPN — запасной выход напрямую: «{name}» не работает"
+            return f"TunnelVPN — запасной выход напрямую: «{name}» не работает"
         if st.get("exit_state") == "leak":
-            return f"DualVPN — УТЕЧКА, виден адрес провайдера ({exit_ip})"
+            return f"TunnelVPN — УТЕЧКА, виден адрес провайдера ({exit_ip})"
         if not main:
-            return "DualVPN — работает · всё остальное напрямую"
-        return f"DualVPN — работает · {who} · выход {exit_ip}"
+            return "TunnelVPN — работает · всё остальное напрямую"
+        return f"TunnelVPN — работает · {who} · выход {exit_ip}"
 
     # -------------------------------------------------------------- меню
 
@@ -576,27 +576,27 @@ class Tray:
         import sys
 
         if getattr(sys, "frozen", False):
-            # sys.executable здесь — сам трей (DualVPN-Tray.exe). У портативной
+            # sys.executable здесь — сам трей (TunnelVPN-Tray.exe). У портативной
             # версии это же имя exe одно на всё, и у него есть ветка "window" —
             # ею и пользуемся. У установленной версии трей и окно — разные
-            # exe, и окно живёт в соседнем dualvpn.exe.
+            # exe, и окно живёт в соседнем tunnelvpn.exe.
             name = os.path.basename(sys.executable).lower()
-            if name == "dualvpn-portable.exe":
+            if name == "tunnelvpn-portable.exe":
                 cmd = [sys.executable, "window"]
             else:
-                sibling = os.path.join(os.path.dirname(sys.executable), "dualvpn.exe")
+                sibling = os.path.join(os.path.dirname(sys.executable), "tunnelvpn.exe")
                 if not os.path.isfile(sibling):
                     # Раньше здесь тихо запускали сам трей ещё раз — снаружи
                     # это выглядело как «нажал Окно, а появился второй значок».
                     # Явное сообщение лучше молчаливого дубля: причина обычно —
-                    # антивирус, унёсший dualvpn.exe в карантин при установке.
-                    self._notify("не найден dualvpn.exe рядом с программой — "
+                    # антивирус, унёсший tunnelvpn.exe в карантин при установке.
+                    self._notify("не найден tunnelvpn.exe рядом с программой — "
                                  "переустанови приложение или проверь карантин "
                                  "антивируса")
                     return
                 cmd = [sibling, "window"]
         else:
-            cmd = [sys.executable, "-m", "dualvpn.cli", "window"]
+            cmd = [sys.executable, "-m", "tunnelvpn.cli", "window"]
         cmd += ["--resident"] + (["--hidden"] if hidden else [])
 
         # Раньше вывод окна уходил в никуда: при падении (например, из-за
@@ -681,7 +681,7 @@ class Tray:
         if self.icon is None:
             return
         try:
-            self.icon.notify(_clip(text, INFO_MAX), "DualVPN")
+            self.icon.notify(_clip(text, INFO_MAX), "TunnelVPN")
         except Exception:
             # Уведомления есть не во всех сборках Windows; молчать тут можно —
             # ошибка всё равно видна в подписи значка и в окне.
@@ -694,7 +694,7 @@ class Tray:
 
         _dark_menus()
         self.icon = pystray.Icon(
-            "dualvpn", _icon_image("off"), f"DualVPN {paths.version()}",
+            "tunnelvpn", _icon_image("off"), f"TunnelVPN {paths.version()}",
             menu=self._menu())
         self._hook_menu()
         self._start_window(background)
@@ -1135,6 +1135,6 @@ def run(background=False):
     Tray().run(background)
     # Значок закрыт — процесс обязан закончиться. Обычный выход ждёт все
     # недемонические потоки, а их может оставить COM диалога выбора файла или
-    # pywin32; тогда DualVPN-Tray.exe остался бы висеть без значка, и снять
+    # pywin32; тогда TunnelVPN-Tray.exe остался бы висеть без значка, и снять
     # его можно было бы только из диспетчера задач. Уборка уже сделана в on_quit.
     os._exit(0)

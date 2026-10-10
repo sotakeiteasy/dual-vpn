@@ -10,7 +10,7 @@ import types
 
 import pytest
 
-from dualvpn import buildconfig, paths, probe, service, tunnel, tunnels
+from tunnelvpn import buildconfig, paths, probe, service, tunnel, tunnels
 
 CONF = """[Interface]
 PrivateKey = cHJpdmF0ZS1rZXktcHJpdmF0ZS1rZXktcHJpdmF0ZS0=

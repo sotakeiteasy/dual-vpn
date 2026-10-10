@@ -8,7 +8,7 @@
 
 import pytest
 
-from dualvpn import buildconfig, ipc
+from tunnelvpn import buildconfig, ipc
 
 
 # ---------------------------------------------------- кому что разрешено

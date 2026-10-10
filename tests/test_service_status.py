@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from dualvpn import buildconfig, paths, probe, service, tunnels
+from tunnelvpn import buildconfig, paths, probe, service, tunnels
 
 
 class _Tunnel:

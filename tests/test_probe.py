@@ -12,7 +12,7 @@ import urllib.request
 
 import pytest
 
-from dualvpn import probe
+from tunnelvpn import probe
 
 
 def _wait(cond, timeout=2.0):

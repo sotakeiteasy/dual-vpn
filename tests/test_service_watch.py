@@ -10,7 +10,7 @@ import types
 
 import pytest
 
-from dualvpn import buildconfig, probe, service, tunnel
+from tunnelvpn import buildconfig, probe, service, tunnel
 
 OFFICE = (12, "192.168.19.1")
 HOME = (7, "192.168.0.1")

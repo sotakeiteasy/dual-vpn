@@ -15,8 +15,8 @@ import types
 
 import pytest
 
-from dualvpn import buildconfig, paths, service, tunnels
-from dualvpn.service import Core
+from tunnelvpn import buildconfig, paths, service, tunnels
+from tunnelvpn.service import Core
 
 WG = "[Interface]\nPrivateKey = x\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = y\n"
 
@@ -587,7 +587,7 @@ def test_списки_разбираются_а_непонятое_возвра�
 
 
 def test_длинный_список_отклоняется_целиком(core, monkeypatch):
-    monkeypatch.setattr("dualvpn.service.MAX_RULES", 2)
+    monkeypatch.setattr("tunnelvpn.service.MAX_RULES", 2)
 
     r = core._set_tunnel("work", {"include": "a.ru b.ru c.ru"})
 

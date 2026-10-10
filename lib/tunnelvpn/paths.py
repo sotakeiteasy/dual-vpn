@@ -4,8 +4,8 @@
 обновлении, поэтому конфиги, журнал владения и состояние обязаны жить снаружи —
 иначе обновление стирало бы их вместе со старой версией.
 
-    код    C:\\Program Files\\DualVPN        (в разработке — корень репозитория)
-    данные C:\\ProgramData\\DualVPN
+    код    C:\\Program Files\\TunnelVPN      (в разработке — корень репозитория)
+    данные C:\\ProgramData\\TunnelVPN
 
 Данные лежат в ProgramData, а не в профиле пользователя, потому что писать в них
 должна служба под LocalSystem, а читать — трей под обычным пользователем.
@@ -20,7 +20,7 @@ import re
 import sys
 
 # BASE — где лежит сам exe (или корень репозитория при запуске из исходников).
-# Из lib/dualvpn/paths.py до корня — два уровня вверх.
+# Из lib/tunnelvpn/paths.py до корня — два уровня вверх.
 if getattr(sys, "frozen", False):
     BASE = os.path.dirname(sys.executable)
 else:
@@ -33,11 +33,11 @@ else:
 # собой и не находила: там лежит только сам exe.
 BUNDLE = getattr(sys, "_MEIPASS", BASE)
 
-# DUALVPN_DATA перекрывает раскладку. Этим пользуются и прогоны из исходников,
+# TUNNELVPN_DATA перекрывает раскладку. Этим пользуются и прогоны из исходников,
 # и портативная версия: она кладёт данные рядом с exe, а не в ProgramData,
 # чтобы папку можно было унести целиком вместе с конфигами.
-DATA = os.environ.get("DUALVPN_DATA") or os.path.join(
-    os.environ.get("ProgramData", r"C:\ProgramData"), "DualVPN"
+DATA = os.environ.get("TUNNELVPN_DATA") or os.path.join(
+    os.environ.get("ProgramData", r"C:\ProgramData"), "TunnelVPN"
 )
 
 CONF = os.path.join(DATA, "conf")
@@ -67,13 +67,13 @@ SINGBOX = os.path.join(BIN, "sing-box.exe")
 WINTUN = os.path.join(BIN, "wintun.dll")
 
 # Вёрстка окна. В onedir-сборке PyInstaller 6+ данные (--add-data) лежат в
-# BUNDLE\dualvpn\ui — это подпапка _internal, а НЕ там же, где сам exe, и уж
+# BUNDLE\tunnelvpn\ui — это подпапка _internal, а НЕ там же, где сам exe, и уж
 # точно не там, куда указывает __file__ у модуля window.py: в частности,
 # window.py брал путь через __file__ раньше, и в собранном виде промахивался
 # мимо index.html — окно падало ещё до показа, а трей тихо принимал это за
 # «процесс не открылся» и на следующем клике перезапускал сам себя.
-UI_DIR = (os.path.join(BUNDLE, "dualvpn", "ui") if getattr(sys, "frozen", False)
-          else os.path.join(BASE, "lib", "dualvpn", "ui"))
+UI_DIR = (os.path.join(BUNDLE, "tunnelvpn", "ui") if getattr(sys, "frozen", False)
+          else os.path.join(BASE, "lib", "tunnelvpn", "ui"))
 
 CONFIG_JSON = os.path.join(RUN, "config.json")
 STATUS_JSON = os.path.join(STATE, "status.json")
@@ -93,9 +93,9 @@ TUN_IP = "172.19.0.1"
 # Второй адрес той же /30: его sing-box отдаёт системе как DNS туннеля.
 TUN_DNS = "172.19.0.2"
 
-SERVICE_NAME = "DualVPN"
-SERVICE_DISPLAY = "DualVPN"
-PIPE_NAME = r"\\.\pipe\DualVPN"
+SERVICE_NAME = "TunnelVPN"
+SERVICE_DISPLAY = "TunnelVPN"
+PIPE_NAME = r"\\.\pipe\TunnelVPN"
 
 
 def ensure_dirs():

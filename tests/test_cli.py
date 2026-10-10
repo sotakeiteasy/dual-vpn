@@ -6,7 +6,7 @@
 
 import pytest
 
-from dualvpn import cli
+from tunnelvpn import cli
 
 STATUS = {"tunnels": [
     {"id": "work", "name": "Работа", "mode": "list", "active": "corp",

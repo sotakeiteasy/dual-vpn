@@ -5,7 +5,7 @@
 человек мог набрать по-своему.
 """
 
-from dualvpn import window
+from tunnelvpn import window
 
 
 def test_читается_обычный_файл():

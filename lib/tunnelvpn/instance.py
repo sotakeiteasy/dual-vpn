@@ -1,6 +1,6 @@
-"""Один трей на сеанс и сигналы между процессами DualVPN.
+"""Один трей на сеанс и сигналы между процессами TunnelVPN.
 
-Ярлык в меню «Пуск» запускает DualVPN-Tray.exe каждый раз заново. Раньше
+Ярлык в меню «Пуск» запускает TunnelVPN-Tray.exe каждый раз заново. Раньше
 каждый такой запуск ставил ещё один значок; теперь второй запуск находит
 первый по именованному мьютексу, просит его показать окно и выходит.
 
@@ -15,11 +15,11 @@ import ctypes
 import threading
 import time
 
-TRAY_MUTEX = "Local\\DualVPN-Tray"
+TRAY_MUTEX = "Local\\TunnelVPN-Tray"
 # Трею: «покажи окно» — так второй запуск ярлыка открывает панель.
-TRAY_OPEN = "Local\\DualVPN-Tray-Open"
+TRAY_OPEN = "Local\\TunnelVPN-Tray-Open"
 # Прогретому окну: «покажись».
-WINDOW_SHOW = "Local\\DualVPN-Window-Show"
+WINDOW_SHOW = "Local\\TunnelVPN-Window-Show"
 
 ERROR_ALREADY_EXISTS = 183
 ERROR_ACCESS_DENIED = 5
@@ -27,7 +27,7 @@ ERROR_FILE_NOT_FOUND = 2
 EVENT_MODIFY_STATE = 0x0002
 SYNCHRONIZE = 0x00100000
 SDDL_REVISION_1 = 1
-# Событие трея: трей работает от администратора, а ярлык запускает DualVPN-Tray.exe
+# Событие трея: трей работает от администратора, а ярлык запускает TunnelVPN-Tray.exe
 # от обычного пользователя. Без этого дескриптора событие получает DACL
 # администратора и высокую метку целостности, и обычный процесс его не откроет.
 # Сигналить (EVENT_MODIFY_STATE) — интерактивному пользователю, метка — средняя.

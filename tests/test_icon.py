@@ -1,4 +1,4 @@
-"""Значок DualVPN: один ico на exe, установщик и окно из исходников."""
+"""Значок TunnelVPN: один ico на exe, установщик и окно из исходников."""
 
 import pytest
 
@@ -6,11 +6,11 @@ pytest.importorskip("PIL")
 
 from PIL import Image  # noqa: E402
 
-from dualvpn import icon  # noqa: E402
+from tunnelvpn import icon  # noqa: E402
 
 
 def test_ico_несёт_все_размеры_от_16_до_256(tmp_path):
-    path = icon.write_ico(str(tmp_path / "DualVPN.ico"))
+    path = icon.write_ico(str(tmp_path / "TunnelVPN.ico"))
     with Image.open(path) as img:
         sizes = img.info["sizes"]
     assert sizes == {(s, s) for s in icon.SIZES}
@@ -24,7 +24,7 @@ def test_значок_сплошной_зелёный_без_точки_в_це�
 
 
 def test_значок_трея_включённого_сплошной_зелёный():
-    from dualvpn import tray
+    from tunnelvpn import tray
 
     img = tray._icon_image("up")
     assert img.getpixel((32, 32)) == tray.COLORS["up"]

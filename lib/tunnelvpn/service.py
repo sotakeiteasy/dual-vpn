@@ -191,7 +191,7 @@ class Core:
     """Логика службы, отделённая от обвязки Windows.
 
     Отдельным классом — чтобы её можно было запустить и в консоли
-    (`dualvpn.exe run-service`) при отладке, не устанавливая службу.
+    (`tunnelvpn.exe run-service`) при отладке, не устанавливая службу.
     """
 
     def __init__(self):
@@ -1200,7 +1200,7 @@ class Core:
     @staticmethod
     def _target(data, tunnel="", kind=""):
         """Туннель команды в data: по id, затем по имени без учёта регистра
-        (`dualvpn use Работа nl-1`); без tunnel — по старому типу corp|personal.
+        (`tunnelvpn use Работа nl-1`); без tunnel — по старому типу corp|personal.
         Иначе ValueError с причиной."""
         if tunnel:
             key = str(tunnel)
@@ -1526,7 +1526,7 @@ class Core:
         return {**r, "tunnel": t["id"], "enabled": on} if r["ok"] else r
 
     def _set_profile(self, name):
-        """Профиль — активный конфиг основного туннеля (`dualvpn profile`)."""
+        """Профиль — активный конфиг основного туннеля (`tunnelvpn profile`)."""
         r = self._set_active(name, kind="personal")
         return {"ok": True, "profile": name} if r["ok"] else r
 
@@ -1845,14 +1845,14 @@ def _service_class():
     """Класс службы собираем лениво: pywin32 нужен только здесь."""
     # Класс кладём в модуль под его именем: win32serviceutil строит строку
     # класса через pickle.whichmodule, а с Python 3.14 тот проверяет, что
-    # dualvpn.service.DualVPNService существует, и иначе падают все команды
+    # tunnelvpn.service.TunnelVPNService существует, и иначе падают все команды
     # service install/remove/start/stop.
-    global DualVPNService
+    global TunnelVPNService
     import win32event
     import win32service
     import win32serviceutil
 
-    class DualVPNService(win32serviceutil.ServiceFramework):
+    class TunnelVPNService(win32serviceutil.ServiceFramework):
         _svc_name_ = paths.SERVICE_NAME
         _svc_display_name_ = paths.SERVICE_DISPLAY
         _svc_description_ = ("Два туннеля WireGuard одновременно: рабочий и "
@@ -1891,7 +1891,7 @@ def _service_class():
             self.core.start()
             win32event.WaitForSingleObject(self.wait_stop, win32event.INFINITE)
 
-    return DualVPNService
+    return TunnelVPNService
 
 
 def run_in_console():
@@ -1899,7 +1899,7 @@ def run_in_console():
     import time
     core = Core()
     core.start()
-    print(f"DualVPN {paths.version()}: служба работает в консоли, Ctrl+C — выход")
+    print(f"TunnelVPN {paths.version()}: служба работает в консоли, Ctrl+C — выход")
     try:
         while True:
             time.sleep(1)

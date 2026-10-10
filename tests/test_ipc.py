@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from dualvpn import ipc
+from tunnelvpn import ipc
 
 
 class _WinError(Exception):

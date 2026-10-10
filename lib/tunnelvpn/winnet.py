@@ -363,7 +363,10 @@ def flush_dns():
 # тогда NXDOMAIN окончателен сразу. Правило касается лишь корп-доменов,
 # остальные имена идут как раньше.
 
-NRPT_COMMENT = "DualVPN"
+NRPT_COMMENT = "TunnelVPN"
+# Комментарий версий до переименования: правило упавшей старой службы иначе
+# висело бы вечно, и корп-домены шли бы на мёртвый DNS туннеля.
+LEGACY_NRPT_COMMENT = "DualVPN"
 
 _DOMAIN_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
 
@@ -372,7 +375,7 @@ def nrpt_namespaces(domains):
     """Домены из конфига → суффиксы NRPT вида '.corp.example'.
 
     Имя уходит в системное правило DNS, поэтому всё, что не похоже на
-    домен, отбрасываем: домены приходят из site.env, который правит
+    домен, отбрасываем: домены приходят из tunnels.json, который правит
     пользователь, и мусор из него не должен дойти до резолвера.
     """
     out = []
@@ -437,14 +440,15 @@ def nrpt_set(domains, server):
 
 
 def nrpt_clear():
-    """Снимает наши правила — по комментарию, чужие NRPT не трогаем.
+    """Снимает наши правила — по комментарию (и старому тоже),
+    чужие NRPT не трогаем.
 
     False — WMI не справился: правило могло остаться.
     """
     rules = _nrpt_call("Get")
     if rules is None:
         return False
-    ours = [r.Name for r in rules if r.Comment == NRPT_COMMENT]
+    ours = [r.Name for r in rules if r.Comment in (NRPT_COMMENT, LEGACY_NRPT_COMMENT)]
     return all([_nrpt_call("Remove", Name=name, Force=True) is not None
                 for name in ours])
 
@@ -460,7 +464,10 @@ def nrpt_clear():
 # Правило брандмауэра делает то же самое обратимо и мгновенно, а снятие
 # правила возвращает всё как было.
 
-V6_RULE = "DualVPN-block-IPv6"
+V6_RULE = "TunnelVPN-block-IPv6"
+# Имя правила до переименования: снимается вместе с новым, иначе после
+# аварийной смерти старой службы IPv6 остался бы запрещён насовсем.
+LEGACY_V6_RULE = "DualVPN-block-IPv6"
 
 # Весь глобальный IPv6. Не '::/0': брандмауэр такую запись не принимает
 # («префиксы адресов недопустимы»), правило не создавалось вовсе, а ошибку
@@ -504,7 +511,7 @@ def v6_block(uplink_index):
         fw = _firewall()
         rule = win32com.client.Dispatch("HNetCfg.FWRule")
         rule.Name = V6_RULE
-        rule.Description = "Пока поднят туннель DualVPN. Снимается при выключении."
+        rule.Description = "Пока поднят туннель TunnelVPN. Снимается при выключении."
         rule.Direction = 2                    # исходящие
         rule.Action = 0                       # запретить
         rule.RemoteAddresses = V6_GLOBAL
@@ -526,17 +533,18 @@ def v6_unblock():
         fw = _firewall()
         # Remove снимает одно правило с этим именем; дублей могло накопиться
         # несколько, поэтому — пока находится.
-        for _ in range(20):
-            if not _has_rule(fw):
-                return
-            fw.Rules.Remove(V6_RULE)
+        for name in (V6_RULE, LEGACY_V6_RULE):
+            for _ in range(20):
+                if not _has_rule(fw, name):
+                    break
+                fw.Rules.Remove(name)
     except Exception as exc:                               # noqa: BLE001
         _fail(f"брандмауэр: правило IPv6 не снято: {exc}")
 
 
-def _has_rule(fw):
+def _has_rule(fw, name=V6_RULE):
     try:
-        fw.Rules.Item(V6_RULE)
+        fw.Rules.Item(name)
         return True
     except Exception:                                      # noqa: BLE001
         return False

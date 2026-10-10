@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from dualvpn import tray
+from tunnelvpn import tray
 
 NONE = frozenset()
 
@@ -87,7 +87,7 @@ def test_без_основного_подсказка_всё_остальное_
     app = tray.Tray.__new__(tray.Tray)
     app.status = _up(_work(), exit_ip="5.6.7.8", exit_state="direct")
 
-    assert app._title() == "DualVPN — работает · всё остальное напрямую"
+    assert app._title() == "TunnelVPN — работает · всё остальное напрямую"
 
 
 @pytest.mark.parametrize("t, name", [
