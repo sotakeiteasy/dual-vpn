@@ -490,8 +490,9 @@ def _match(nets, domains):
     return match
 
 
-def tunnel_rule(nets, domains, ex_nets, ex_domains, outbound):
-    """Правило основного процесса для туннеля «по списку»; None — пускать нечего.
+def tunnel_rule(nets, domains, ex_nets, ex_domains):
+    """Что туннель «по списку» забирает — правило его rule-set; None — пускать
+    нечего.
 
     ip_cidr и domain_suffix в одном правиле sing-box объединяет через «или».
     Исключение — отрицание внутри «и»: соединение не вырезается из подсети, а
@@ -503,10 +504,15 @@ def tunnel_rule(nets, domains, ex_nets, ex_domains, outbound):
         return None
     exclude = _match(ex_nets, ex_domains)
     if not exclude:
-        return {**match, "outbound": outbound}
+        return match
     return {"type": "logical", "mode": "and",
-            "rules": [match, {**exclude, "invert": True}],
-            "outbound": outbound}
+            "rules": [match, {**exclude, "invert": True}]}
+
+
+def rule_set(rule):
+    """Содержимое локального rule-set: одно правило или пусто. Пустой не
+    совпадает ни с чем — правило со ссылкой на него ничего не забирает."""
+    return {"version": RULE_SET_VERSION, "rules": [rule] if rule else []}
 
 
 def off_endpoint(domains, host):
@@ -567,6 +573,8 @@ def dns_section(by_tunnel, public_detour):
     """Серверы и правила DNS: домены туннеля — в его DNS, остальное — 8.8.8.8.
 
     by_tunnel — [(id, адрес DNS, домены)] туннелей «по списку» с DNS в .conf.
+    Домены — в rule-set names-<id>: их, как и правила маршрута, sing-box
+    перечитывает с диска сам.
     DNS туннеля спрашиваем по TCP. По UDP sing-box держит к нему один сокет
     через туннель; ответы на нём терялись (больше половины запросов шли
     3–10 с), и новый сокет sing-box открывал только по таймауту — клиент
@@ -574,13 +582,10 @@ def dns_section(by_tunnel, public_detour):
     пакета — повтор через доли секунды, а не таймаут всего запроса.
     """
     servers, rules = [], []
-    for tid, server, domains in by_tunnel:
+    for tid, server, _domains in by_tunnel:
         servers.append({"type": "tcp", "tag": dns_tag(tid),
                         "server": server, "detour": socks_tag(tid)})
-        # Пустой domain_suffix sing-box считает совпадением со всем: без
-        # доменов любое имя уходило бы в DNS туннеля.
-        if domains:
-            rules.append({"domain_suffix": domains, "server": dns_tag(tid)})
+        rules.append({"rule_set": [names_tag(tid)], "server": dns_tag(tid)})
     # Публичный DNS идёт тем же выходом, что и трафик: упал основной туннель —
     # переключатель OUT_TAG уводит в direct и его. Иначе без основного не
     # резолвилось бы ни одно имя, и запасной выход был бы бесполезен. Без
@@ -612,6 +617,23 @@ def socks_tag(tid):
 
 def dns_tag(tid):
     return f"dns-{tid}"
+
+
+# Что забирает туннель «по списку», лежит не в основном конфиге, а в двух
+# локальных rule-set: rules-<id> — для маршрута, names-<id> — домены для его
+# DNS. Файл rule-set sing-box перечитывает сам, когда тот меняется, — tun при
+# этом не падает. Для DNS — отдельный и только с доменами: rule-set с ip_cidr
+# в правиле DNS sing-box 1.14 при перечитывании отвергает и молча оставляет
+# старые правила (проверено на 1.14.2-lx.11).
+def rules_tag(tid):
+    return f"rules-{tid}"
+
+
+def names_tag(tid):
+    return f"names-{tid}"
+
+
+RULE_SET_VERSION = 3
 
 
 # Выход для всего, что не забрали туннели «по списку» и не локальная сеть:
@@ -706,6 +728,21 @@ def trial_config(ep, link):
     return cfg
 
 
+def rule_set_json(tag):
+    """Путь к файлу rule-set. Префикс тега не даёт совпасть с config.json и
+    боковыми tunnel-<id>.json рядом."""
+    return os.path.join(paths.RUN, f"{tag}.json")
+
+
+def rule_set_rules(main_cfg, tag):
+    """Правила rule-set из файла, на который ссылается основной конфиг; нет
+    ссылки или файла — []."""
+    for rs in main_cfg.get("route", {}).get("rule_set", []):
+        if rs.get("tag") == tag and rs.get("path"):
+            return read_json(rs["path"]).get("rules", [])
+    return []
+
+
 def side_link(main_cfg, tid):
     """Порт и логин socks бокового процесса из основного конфига, иначе None."""
     for ob in main_cfg.get("outbounds", []):
@@ -756,16 +793,17 @@ def tunnel_domains(main_cfg):
     names = []
     for rule in main_cfg.get("dns", {}).get("rules", []):
         if rule.get("server", "").startswith(prefix):
-            names += rule.get("domain_suffix", [])
+            for tag in rule.get("rule_set", []):
+                for inner in rule_set_rules(main_cfg, tag):
+                    names += inner.get("domain_suffix", [])
     return names
 
 
 def tunnel_nets(main_cfg, tid):
     """Подсети, которые основной конфиг пускает в туннель (без исключений)."""
-    for rule in main_cfg.get("route", {}).get("rules", []):
-        if rule.get("outbound") == socks_tag(tid):
-            match = rule["rules"][0] if rule.get("type") == "logical" else rule
-            return match.get("ip_cidr", [])
+    for rule in rule_set_rules(main_cfg, rules_tag(tid)):
+        match = rule["rules"][0] if rule.get("type") == "logical" else rule
+        return match.get("ip_cidr", [])
     return []
 
 
@@ -817,7 +855,7 @@ def _summary(t, ep, nets, domains, dns):
     return lines
 
 
-def build(data, confs, out_path, side_path=None, log=print):
+def build(data, confs, out_path, side_path=None, log=print, set_path=None):
     """Основной конфиг и по боковому на туннель. Возвращает [(id, имя)]
     собранных по порядку файла.
 
@@ -825,7 +863,16 @@ def build(data, confs, out_path, side_path=None, log=print):
     без конфига и выключенный пропускаются: пустой слот не держит остальные.
     """
     side_path = side_path or side_json
-    config, sides, built, report = assemble(data, confs, log)
+    config, sides, sets, built, report = assemble(data, confs, log)
+    if set_path:
+        # Сборка в сторону (--out): rule-set в state\run\ работающий
+        # sing-box перечитал бы на лету.
+        for rs in config["route"].get("rule_set", []):
+            rs["path"] = set_path(rs["tag"])
+    # rule-set — раньше основного: `sing-box check` и старт без файла
+    # отказывают.
+    for tag, rs in sets.items():
+        write_json((set_path or rule_set_json)(tag), rs)
     write_json(out_path, config)
     for tid, side in sides.items():
         write_json(side_path(tid), side)
@@ -837,8 +884,8 @@ def build(data, confs, out_path, side_path=None, log=print):
 
 
 def assemble(data, confs, log=print, links=None, api=None, resolve=True):
-    """(основной конфиг, {id: боковой конфиг}, [(id, имя)], строки сводки) без
-    записи на диск.
+    """(основной конфиг, {id: боковой конфиг}, {тег: rule-set}, [(id, имя)],
+    строки сводки) без записи на диск.
 
     links — {id: связь socks} и api — clash_api работающего запуска: с ними
     основной конфиг выходит тем же, если туннели не менялись. resolve=False —
@@ -895,7 +942,7 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
     #   SB_CORP_*                      туннелям «по списку», см. corp_diagnostics
     stack = os.environ.get("SB_STACK", "gvisor")
 
-    rules, dns_tunnels, report = [], [], []
+    rules, dns_tunnels, report, sets = [], [], [], {}
     for t, conf, ep in built:
         # Какой трафик пустить в туннель, решает основной процесс. С AllowedIPs
         # из файла endpoint отбрасывал бы домены и адреса из «пускать»,
@@ -907,19 +954,23 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
             inc_nets, domains = split_entries(t["include"], v6)
             nets = _unique(allowed_nets(conf, v6) + inc_nets)
             ex_nets, ex_domains = split_entries(t["exclude"], v6)
-            rule = tunnel_rule(nets, domains, ex_nets, ex_domains,
-                               socks_tag(t["id"]))
-            if rule:
-                rules.append(rule)
-            else:
+            rule = tunnel_rule(nets, domains, ex_nets, ex_domains)
+            if not rule:
                 log(f"  [{t['id']}] «{t['name']}»: пускать нечего — ни подсетей "
                     f"в AllowedIPs, ни записей в списке")
+            # Правило в основном конфиге есть и с пустым rule-set: что
+            # забирает туннель, меняет файл, а не основной конфиг.
+            sets[rules_tag(t["id"])] = rule_set(rule)
+            rules.append({"rule_set": [rules_tag(t["id"])],
+                          "outbound": socks_tag(t["id"])})
             # DNS туннеля: из [Interface] DNS его .conf, иначе не поднимаем.
             servers = conf_dns(conf)
             if servers:
                 host = conf["peer"]["endpoint"].rpartition(":")[0]
                 dns = (t["id"], servers[0], off_endpoint(domains, host))
                 dns_tunnels.append(dns)
+                sets[names_tag(t["id"])] = rule_set(
+                    {"domain_suffix": dns[2]} if dns[2] else None)
         report += _summary(t, ep, nets, domains, dns)
 
     # Локальная сеть — напрямую, не в туннель. Без этого запросы к соседним
@@ -992,22 +1043,28 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
             "default_domain_resolver": PUBLIC_DNS_TAG,
         },
     }
+    if sets:
+        config["route"]["rule_set"] = [
+            {"type": "local", "tag": tag, "format": "source",
+             "path": rule_set_json(tag)} for tag in sets]
 
     sides = {t["id"]: side_config(ep, links[t["id"]], level) for t, _, ep in built}
-    return config, sides, [(t["id"], t["name"]) for t, _, _ in built], report
+    return (config, sides, sets, [(t["id"], t["name"]) for t, _, _ in built],
+            report)
 
 
 def _drop_stale_sides(keep):
-    """Боковые конфиги туннелей, которых больше нет, — с диска: в них
-    приватные ключи."""
+    """Боковые конфиги и rule-set туннелей, которых больше нет, — с диска:
+    в боковых приватные ключи."""
     try:
         names = os.listdir(paths.RUN)
     except OSError:
         return
     for f in names:
-        if (f.startswith("tunnel-") and f.endswith(".json")
-                and f[len("tunnel-"):-len(".json")] not in keep):
-            _remove(os.path.join(paths.RUN, f))
+        for prefix in ("tunnel-", rules_tag(""), names_tag("")):
+            if (f.startswith(prefix) and f.endswith(".json")
+                    and f[len(prefix):-len(".json")] not in keep):
+                _remove(os.path.join(paths.RUN, f))
 
 
 def drop_legacy():
@@ -1045,14 +1102,15 @@ def main(log=print):
         sys.exit(f"sing-box уже работает (pid {pid}) — конфиг не трогаю.\n"
                  f"Останови его (`vpn stop`) или пересобери в другой файл:\n"
                  f"  python3 {os.path.relpath(__file__, BASE)} --out /tmp/test.json")
-    side_path = None
+    side_path = set_path = None
     if "--out" in sys.argv:
         out_path = sys.argv[sys.argv.index("--out") + 1]
         stem = os.path.splitext(out_path)[0]
         side_path = lambda tid: f"{stem}.{tid}.json"
+        set_path = lambda tag: f"{stem}.{tag}.json"
 
     data, confs = sources()
-    built = build(data, confs, out_path, side_path, log)
+    built = build(data, confs, out_path, side_path, log, set_path)
     if side_path is None:
         _drop_stale_sides([tid for tid, _ in built])
         drop_legacy()

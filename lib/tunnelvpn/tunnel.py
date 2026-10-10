@@ -716,11 +716,16 @@ class Tunnel:
             data, confs = buildconfig.sources()
             # Имена пиров не резолвим: в основном конфиге адресов пиров нет,
             # а резолвить всех заново незачем — только сменившихся, ниже.
-            config, sides, _, _ = buildconfig.assemble(
+            config, sides, sets, _, _ = buildconfig.assemble(
                 data, confs, self.log, links, _api_link(running), resolve=False)
         except SystemExit:
             return None
         if json.loads(json.dumps({**config, "log": None})) != {**running, "log": None}:
+            return None
+        # Что забирают туннели «по списку», лежит в rule-set, а не в основном
+        # конфиге: сменилось оно — пока тоже полный.
+        if any(json.loads(json.dumps(rs)) != buildconfig.read_json(
+                buildconfig.rule_set_json(tag)) for tag, rs in sets.items()):
             return None
         stamps = {tid: _conf_stamp(path) for tid, path in confs.items()}
         main = tunnels.main_tunnel(data)

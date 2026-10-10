@@ -135,12 +135,22 @@ def test_без_wmi_правило_не_ставится_и_это_видно(mo
 
 
 def test_домены_для_nrpt_берутся_из_правил_dns_туннелей(tmp_path, monkeypatch):
+    sets = {"names-other": ["чужой.example"],
+            "names-work": ["corp.example", "intra.example"],
+            "names-lab": [".lab.example"]}
+    for tag, domains in sets.items():
+        (tmp_path / f"{tag}.json").write_text(json.dumps(
+            {"version": 3, "rules": [{"domain_suffix": domains}]}), encoding="utf-8")
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"dns": {"rules": [
-        {"domain_suffix": ["чужой.example"], "server": "dns"},
-        {"domain_suffix": ["corp.example", "intra.example"], "server": "dns-work"},
-        {"domain_suffix": [".lab.example"], "server": "dns-lab"},
-    ]}}), encoding="utf-8")
+    cfg.write_text(json.dumps({
+        "route": {"rule_set": [
+            {"type": "local", "tag": tag, "path": str(tmp_path / f"{tag}.json")}
+            for tag in sets]},
+        "dns": {"rules": [
+            {"rule_set": ["names-other"], "server": "dns"},
+            {"rule_set": ["names-work"], "server": "dns-work"},
+            {"rule_set": ["names-lab"], "server": "dns-lab"},
+        ]}}), encoding="utf-8")
     monkeypatch.setattr(paths, "CONFIG_JSON", str(cfg))
 
     assert Tunnel._corp_domains() == ["corp.example", "intra.example", ".lab.example"]

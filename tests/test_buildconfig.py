@@ -134,28 +134,26 @@ def test_ipv6_из_списка_остаётся_при_v6_на_tun():
 
 
 def test_правило_без_исключений_одно_условие_или():
-    rule = buildconfig.tunnel_rule(["10.0.0.0/8"], ["corp.example"], [], [],
-                                   "socks-work")
-    assert rule == {"ip_cidr": ["10.0.0.0/8"], "domain_suffix": ["corp.example"],
-                    "outbound": "socks-work"}
+    rule = buildconfig.tunnel_rule(["10.0.0.0/8"], ["corp.example"], [], [])
+    assert rule == {"ip_cidr": ["10.0.0.0/8"], "domain_suffix": ["corp.example"]}
 
 
 def test_исключение_это_отрицание_внутри_и():
     """/32 внутри /16 из AllowedIPs раньше не исключался: SB_CORP_EXCLUDE
     выкидывал только подсети, целиком лежащие в исключении."""
     rule = buildconfig.tunnel_rule(["10.10.0.0/16"], [], ["10.10.5.9/32"],
-                                   ["git.corp.example"], "socks-work")
+                                   ["git.corp.example"])
 
     assert rule == {"type": "logical", "mode": "and", "rules": [
         {"ip_cidr": ["10.10.0.0/16"]},
         {"ip_cidr": ["10.10.5.9/32"], "domain_suffix": ["git.corp.example"],
-         "invert": True}],
-        "outbound": "socks-work"}
+         "invert": True}]}
 
 
 def test_пускать_нечего_правила_нет():
     """Правило без условий sing-box считает совпадением со всем."""
-    assert buildconfig.tunnel_rule([], [], ["10.0.0.1/32"], [], "socks-x") is None
+    assert buildconfig.tunnel_rule([], [], ["10.0.0.1/32"], []) is None
+    assert buildconfig.rule_set(None) == {"version": 3, "rules": []}
 
 
 @pytest.mark.parametrize("host, kept", [
@@ -445,15 +443,16 @@ def test_dns_туннеля_по_tcp_через_его_socks():
                           "server": "10.0.0.53", "detour": "socks-work"}
     assert servers[1] == {"type": "udp", "tag": "dns", "server": "8.8.8.8",
                           "detour": "out"}
-    assert rules == [{"domain_suffix": ["corp.example"], "server": "dns-work"}]
+    assert rules == [{"rule_set": ["names-work"], "server": "dns-work"}]
 
 
-def test_без_доменов_правила_dns_нет():
+def test_без_доменов_rule_set_dns_пустой(build, tmp_path):
     """Пустой domain_suffix sing-box считает совпадением со всем: любое имя
-    уходило в корп-DNS — проверено живьём на 1.14.2-lx.11."""
-    servers, rules = buildconfig.dns_section([("work", "10.0.0.53", [])], "out")
-    assert servers[0]["tag"] == "dns-work"
-    assert rules == []
+    уходило в корп-DNS — проверено живьём на 1.14.2-lx.11. Пустой rule-set не
+    совпадает ни с чем."""
+    build([_tunnel("work", "list", ["10.20.0.0/16"]), THREE[2]])
+
+    assert _load(tmp_path / "names-work.json") == {"version": 3, "rules": []}
 
 
 def test_без_основного_туннеля_публичный_dns_напрямую():
@@ -556,16 +555,43 @@ def test_порядок_правил_списки_локальная_сеть_м
     assert main["route"]["rules"] == [
         {"action": "sniff"},
         {"protocol": "dns", "action": "hijack-dns"},
+        {"rule_set": ["rules-work"], "outbound": "socks-work"},
+        {"rule_set": ["rules-lab"], "outbound": "socks-lab"},
+        {"ip_cidr": buildconfig.LOCAL_NETS, "outbound": "direct"},
+        {"ip_cidr": ["198.51.100.7/32"], "outbound": "direct"},
+    ]
+
+
+def test_что_забирает_туннель_лежит_в_его_rule_set(build, tmp_path):
+    """Файл rule-set sing-box перечитывает сам — основной конфиг от списков
+    туннеля не зависит."""
+    main, _ = build(THREE)
+
+    assert main["route"]["rule_set"] == [
+        {"type": "local", "tag": tag, "format": "source",
+         "path": str(tmp_path / f"{tag}.json")}
+        for tag in ("rules-work", "names-work", "rules-lab")]
+    assert _load(tmp_path / "rules-work.json") == {"version": 3, "rules": [
         {"type": "logical", "mode": "and", "rules": [
             {"ip_cidr": ["10.10.0.0/16", "192.168.77.0/24"],
              "domain_suffix": ["corp.example", ".intra.example"]},
             {"ip_cidr": ["10.10.5.9/32"], "domain_suffix": ["git.corp.example"],
-             "invert": True}],
-         "outbound": "socks-work"},
-        {"ip_cidr": ["172.20.0.0/16", "203.0.113.9/32"], "outbound": "socks-lab"},
-        {"ip_cidr": buildconfig.LOCAL_NETS, "outbound": "direct"},
-        {"ip_cidr": ["198.51.100.7/32"], "outbound": "direct"},
-    ]
+             "invert": True}]}]}
+    assert _load(tmp_path / "rules-lab.json") == {"version": 3, "rules": [
+        {"ip_cidr": ["172.20.0.0/16", "203.0.113.9/32"]}]}
+
+
+def test_пускать_нечего_правило_есть_rule_set_пустой(build, tmp_path):
+    """Пустой rule-set не совпадает ни с чем; правило в основном конфиге
+    остаётся, чтобы список менялся без перезапуска основного процесса."""
+    texts = dict(CONFS, lab=CORP.replace("AllowedIPs = 10.10.0.0/16, 192.168.77.0/24",
+                                         "AllowedIPs = 0.0.0.0/0"))
+    items = [THREE[0], _tunnel("lab", "list"), THREE[2]]
+
+    main, _ = build(items, texts=texts)
+
+    assert {"rule_set": ["rules-lab"], "outbound": "socks-lab"} in main["route"]["rules"]
+    assert _load(tmp_path / "rules-lab.json") == {"version": 3, "rules": []}
 
 
 def test_остальное_через_основной_с_запасным_direct(build):
@@ -589,8 +615,7 @@ def test_dns_только_у_туннелей_по_списку_с_dns_в_conf(b
          "detour": "socks-work"},
         {"type": "udp", "tag": "dns", "server": "8.8.8.8", "detour": "out"},
     ]
-    assert main["dns"]["rules"] == [
-        {"domain_suffix": ["corp.example", ".intra.example"], "server": "dns-work"}]
+    assert main["dns"]["rules"] == [{"rule_set": ["names-work"], "server": "dns-work"}]
     assert main["dns"]["final"] == "dns"
     assert main["route"]["default_domain_resolver"] == "dns"
 
@@ -686,9 +711,9 @@ def _again(main, tmp_path, texts):
     data = tunnels.validate({"tunnels": THREE})
     confs = {tid: _write(tmp_path, f"{tid}-2.conf", text) for tid, text in texts.items()}
     links = {tid: buildconfig.side_link(main, tid) for tid in buildconfig.side_ids(main)}
-    config, sides, _, _ = buildconfig.assemble(
+    config, sides, sets, _, _ = buildconfig.assemble(
         data, confs, lambda line: None, links, tunnel._api_link(main), resolve=False)
-    return json.loads(json.dumps(config)), sides
+    return json.loads(json.dumps(config)), sides, sets
 
 
 def test_другой_конфиг_основного_туннеля_основной_процесс_не_меняет(build, tmp_path):
@@ -697,20 +722,22 @@ def test_другой_конфиг_основного_туннеля_основ�
     texts = dict(CONFS, home=PERSONAL_AWG.replace("203.0.113.5", "nl-2.example")
                  .replace("cHVibGljLXBlcnNvbmFs", "cHVibGljLW5sLTI="))
 
-    again, sides = _again(main, tmp_path, texts)
+    again, sides, _ = _again(main, tmp_path, texts)
 
     assert again == main
     # Пира резолвит Tunnel._swap_side — только у сменившегося туннеля.
     assert sides["home"]["endpoints"][0]["peers"][0]["address"] == "nl-2.example"
 
 
-def test_другие_подсети_туннеля_по_списку_меняют_основной_процесс(build, tmp_path):
+def test_другие_подсети_туннеля_по_списку_меняют_только_rule_set(build, tmp_path):
     main, _ = build(THREE)
     texts = dict(CONFS, work=CORP.replace("192.168.77.0/24", "192.168.78.0/24"))
 
-    again, _ = _again(main, tmp_path, texts)
+    again, _, sets = _again(main, tmp_path, texts)
 
-    assert again != main
+    assert again == main
+    assert sets["rules-work"] != _load(tmp_path / "rules-work.json")
+    assert sets["rules-lab"] == _load(tmp_path / "rules-lab.json")
     assert buildconfig.tunnel_dns(main) == {"work": "10.0.0.53"}
     assert buildconfig.tunnel_domains(main) == ["corp.example", ".intra.example"]
     assert buildconfig.tunnel_nets(main, "work") == ["10.10.0.0/16", "192.168.77.0/24"]
@@ -767,7 +794,7 @@ def test_собирает_туннели_из_tunnels_json(state):
     assert buildconfig.side_ids(main) == ["work", "home"]
     assert (state / "tunnel-work.json").exists()
     assert (state / "tunnel-home.json").exists()
-    rule = next(r for r in main["route"]["rules"] if r.get("outbound") == "socks-work")
+    [rule] = buildconfig.rule_set_rules(main, "rules-work")
     assert rule["rules"][0]["domain_suffix"] == ["corp.example"]
     assert rule["rules"][1] == {"ip_cidr": ["10.10.5.9/32"], "invert": True}
     assert _by_tag(main["outbounds"], "out")["default"] == "socks-home"
@@ -823,14 +850,32 @@ def test_испорченный_tunnels_json_это_внятная_ошибка(
 
 
 def test_лишние_боковые_конфиги_удаляются(state):
-    """В них приватные ключи туннелей, которых больше нет."""
+    """В них приватные ключи туннелей, которых больше нет. rule-set ушедших
+    туннелей — туда же."""
     state.mkdir(parents=True)
-    (state / "tunnel-old.json").write_text("{}", encoding="utf-8")
+    for name in ("tunnel-old.json", "rules-old.json", "names-old.json"):
+        (state / name).write_text("{}", encoding="utf-8")
 
     buildconfig.main(log=lambda line: None)
 
     assert sorted(p.name for p in state.iterdir()) == [
-        "config.json", "tunnel-home.json", "tunnel-work.json"]
+        "config.json", "names-work.json", "rules-work.json",
+        "tunnel-home.json", "tunnel-work.json"]
+
+
+def test_сборка_в_сторону_rule_set_рядом_а_не_в_run(state, tmp_path, monkeypatch):
+    """--out — пересборка при работающем sing-box: rule-set в state\\run\\ он
+    перечитал бы на лету."""
+    out = tmp_path / "test.json"
+    monkeypatch.setattr(buildconfig.sys, "argv", ["buildconfig", "--out", str(out)])
+
+    buildconfig.main(log=lambda line: None)
+
+    assert list(state.iterdir()) == []
+    main = _load(out)
+    assert {rs["path"] for rs in main["route"]["rule_set"]} == {
+        str(tmp_path / "test.rules-work.json"), str(tmp_path / "test.names-work.json")}
+    assert buildconfig.tunnel_domains(main) == ["corp.example"]
 
 
 def test_собранные_конфиги_из_открытого_state_удаляются(state):

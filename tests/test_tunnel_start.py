@@ -588,13 +588,13 @@ def live(env, monkeypatch):
     tun, build, seen = env
     assert tun.start() == ""
     running = buildconfig.read_json(paths.CONFIG_JSON)
-    seen.update(asked=[], main_cfg=running, peer="203.0.113.30")
+    seen.update(asked=[], main_cfg=running, sets={}, peer="203.0.113.30")
 
     def assemble(data, confs, log, links, api, resolve):
         seen["asked"].append({"links": links, "resolve": resolve})
         sides = {tid: {"endpoints": [{"peers": [{"address": f"{tid}.example"}]}]}
                  for tid in confs}
-        return seen["main_cfg"], sides, [], []
+        return seen["main_cfg"], sides, seen["sets"], [], []
 
     def peer_host(host, _tag, _log):
         if not seen["peer"]:
@@ -686,9 +686,10 @@ def test_смена_уровня_журнала_без_полного_перез
     level = {"level": "debug", "timestamp": True}
 
     def assemble(*args, **kw):
-        main, sides, built, report = inner(*args, **kw)
+        main, sides, sets, built, report = inner(*args, **kw)
         return ({**main, "log": level},
-                {tid: {**side, "log": level} for tid, side in sides.items()}, built, report)
+                {tid: {**side, "log": level} for tid, side in sides.items()},
+                sets, built, report)
 
     tunnel.buildconfig.assemble = assemble
     main, work, home = tun.proc, _side(tun, "work").proc, tun.main.proc
@@ -704,6 +705,19 @@ def test_смена_уровня_журнала_без_полного_перез
     assert all(buildconfig.read_json(buildconfig.side_json(tid))["log"] == level
                for tid in ("work", "home"))
     assert tun.reload_sides() == []
+
+
+def test_сменился_rule_set_нужен_полный_перезапуск(live):
+    """Основной конфиг тот же, но туннель «по списку» забирает другое."""
+    tun, seen = live
+    rs = buildconfig.rule_set({"ip_cidr": ["10.20.0.0/16"]})
+    buildconfig.write_json(buildconfig.rule_set_json("rules-work"), rs)
+    seen["sets"] = {"rules-work": rs}
+
+    assert tun.reload_sides() == []
+
+    seen["sets"] = {"rules-work": buildconfig.rule_set({"ip_cidr": ["10.30.0.0/16"]})}
+    assert tun.reload_sides() is None
 
 
 def test_испорченный_tunnels_json_нужен_полный_перезапуск(live):

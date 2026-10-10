@@ -172,14 +172,20 @@ def run_dir(tmp_path, monkeypatch):
     """Собранные конфиги в state\\run\\: рабочий «по списку» и личный основной."""
     monkeypatch.setattr(paths, "RUN", str(tmp_path))
     monkeypatch.setattr(paths, "CONFIG_JSON", str(tmp_path / "config.json"))
+    sets = {"rules-work": {"ip_cidr": ["10.10.0.0/16"]},
+            "names-work": {"domain_suffix": ["corp.example"]}}
+    for tag, rule in sets.items():
+        buildconfig.write_json(buildconfig.rule_set_json(tag), buildconfig.rule_set(rule))
     (tmp_path / "config.json").write_text(json.dumps({
         "outbounds": [
             {"type": "socks", "tag": "socks-work", "password": "секрет"},
             {"type": "socks", "tag": "socks-home", "password": "секрет"},
             {"type": "selector", "tag": "out", "default": "socks-home",
              "outbounds": ["socks-home", "direct"]}],
-        "route": {"rules": [{"ip_cidr": ["10.10.0.0/16"], "outbound": "socks-work"}]},
-        "dns": {"rules": [{"domain_suffix": ["corp.example"], "server": "dns-work"}]},
+        "route": {"rules": [{"rule_set": ["rules-work"], "outbound": "socks-work"}],
+                  "rule_set": [{"type": "local", "tag": tag, "format": "source",
+                                 "path": buildconfig.rule_set_json(tag)} for tag in sets]},
+        "dns": {"rules": [{"rule_set": ["names-work"], "server": "dns-work"}]},
     }), encoding="utf-8")
     for tid, extra in (("work", {}), ("home", {"jc": 4})):
         buildconfig.write_json(buildconfig.side_json(tid), {"endpoints": [{
