@@ -629,11 +629,56 @@ def test_одна_запись_у_двух_туннелей_отказ(core):
     assert _tunnel("work")["include"] == []
 
 
-def test_вложенный_домен_не_дубль(core):
+def test_вложенный_домен_дубль_по_суффиксу(core):
     core._add_tunnel("Лаб", "list")
     core._set_tunnel("t1", {"include": "a.ru"})
 
-    assert core._set_tunnel("work", {"include": "x.a.ru"})["ok"]
+    r = core._set_tunnel("work", {"include": "x.a.ru"})
+
+    # domain_suffix «a.ru» забирает и x.a.ru: ушёл бы в тот туннель, что выше в файле.
+    # Одна причина на пересечение: не ещё и «a.ru из «Лаб» … убери его здесь».
+    assert not r["ok"] and [p["text"] for p in r["problems"]] == [
+        "«x.a.ru» из «Работа» уже идёт через «Лаб» — убери его здесь или впиши "
+        "туда в «не пускать»"]
+    assert _tunnel("work")["include"] == []
+
+
+def test_домен_шире_чужого_тоже_дубль(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "x.a.ru"})
+
+    assert not core._set_tunnel("work", {"include": "a.ru"})["ok"]
+    assert not core._set_tunnel("work", {"include": "*.a.ru"})["ok"]
+
+
+def test_только_поддомены_пересекаются_с_доменом(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "*.a.ru"})
+
+    assert not core._set_tunnel("work", {"include": "a.ru"})["ok"]
+
+
+def test_похожий_хвост_без_точки_не_дубль(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "a.ru"})
+
+    assert core._set_tunnel("work", {"include": "ba.ru b.ru"})["ok"]
+
+
+def test_вложенный_домен_проходит_через_не_пускать_другого(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "a.ru", "exclude": "x.a.ru"})
+
+    assert core._set_tunnel("work", {"include": "x.a.ru y.x.a.ru"})["ok"]
+
+
+def test_не_пускать_только_поддомены_не_выпускает_сам_домен(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "a.ru", "exclude": "*.x.a.ru"})
+
+    # Исключены только поддомены x.a.ru: сам x.a.ru «Лаб» по-прежнему забирает.
+    assert not core._set_tunnel("work", {"include": "x.a.ru"})["ok"]
+    assert core._set_tunnel("work", {"include": "*.x.a.ru"})["ok"]
 
 
 def test_адрес_в_сетях_конфига_другого_туннеля_только_через_его_не_пускать(core):
@@ -649,6 +694,15 @@ def test_адрес_в_сетях_конфига_другого_туннеля_�
     # Убрать исключение назад — снова дубль, уже со стороны «Работы».
     r = core._set_tunnel("work", {"exclude": ""})
     assert not r["ok"] and _tunnel("work")["exclude"] == ["10.53.1.0/24"]
+
+
+def test_подсеть_с_вынесенным_в_свой_не_пускать_не_дубль(core):
+    core._add_tunnel("Лаб", "list")
+    core._set_tunnel("t1", {"include": "10.53.1.5"})
+
+    # 10.53.1.5 «Работа» не забирает: у неё он идёт дальше по правилам — в «Лаб».
+    assert core._set_tunnel("work", {"include": "10.53.0.0/16",
+                                     "exclude": "10.53.1.0/24"})["ok"]
 
 
 def test_подсеть_шире_чужой_тоже_дубль(core):
@@ -686,8 +740,8 @@ def test_все_дубли_полями_а_не_первый(core):
     assert not r["ok"]
     texts = [p["text"] for p in r["problems"]]
     assert {p["field"] for p in r["problems"]} == {"include"} and len(texts) == 2
-    assert texts[0] == "«a.ru» уже в «Лаб»"
-    assert "«10.53.1.5/32»" in texts[1] and "«Лаб»" in texts[1]
+    assert texts[0] == "«a.ru» уже в «Лаб» (конфиг lab)"
+    assert "«10.53.1.5/32»" in texts[1] and "«Лаб» (конфиг lab)" in texts[1]
     assert all(t in r["error"] for t in texts)
     assert _tunnel("work")["include"] == []
 

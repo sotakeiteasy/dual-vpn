@@ -161,28 +161,65 @@ def _taken(a, b, out):
     return not any(x.version == inner.version and inner.subnet_of(x) for x in out)
 
 
-def _clash(t, other, conf):
+def _domains(entries):
+    """[(домен, только поддомены)] из записей списка; подсети пропускаются.
+
+    Как split_entries для sing-box: «x.su» — сам домен и поддомены, «*.x.su» —
+    только поддомены.
+    """
+    return [(e[2:], True) if e.startswith("*.") else (e, False)
+            for e in entries if not _nets([e])]
+
+
+def _covers(x, y):
+    """Все ли имена доменной записи y попадают под запись x."""
+    (xd, x_sub), (yd, y_sub) = x, y
+    return (xd == yd and (y_sub or not x_sub)) or yd.endswith("." + xd)
+
+
+def _domain_taken(a, b, out):
+    """Забирает ли доменная запись b имена записи a, не вынесенные в «не
+    пускать» out."""
+    # Имена либо вложены, либо не пересекаются: общая часть — меньшая запись.
+    if _covers(b, a):
+        inner = a
+    elif _covers(a, b):
+        inner = b
+    else:
+        return False
+    return not any(_covers(x, inner) for x in out)
+
+
+def _clash(t, other, conf, conf_name=""):
     """[(запись, причина)] записей «пускать» туннеля t, которые уже
     забирает other; [] — не забирает.
 
     Порядок туннелей на маршрут не влияет (решение #16), а sing-box берёт
     первое совпавшее правило: запись, которую забирают два туннеля «по
     списку», ушла бы в тот, что выше в файле. Забирает — та же запись в его
-    «пускать» или пересечение с его подсетями (AllowedIPs конфига conf и
-    «пускать»), не вынесенное там в «не пускать». Все записи, а не первая:
-    окно показывает их под полем разом, а не по одной на каждое «Сохранить».
+    «пускать», пересечение с его подсетями (AllowedIPs конфига conf и
+    «пускать») или доменами по суффиксу (a.ru забирает x.a.ru), не вынесенное
+    в «не пускать» ни там, ни в t: исключённое одним идёт дальше и достаётся
+    другому. Все записи, а не первая: окно показывает их под полем
+    разом, а не по одной на каждое «Сохранить». conf_name — имя активного
+    конфига other: в тексте видно, какой из его конфигов забирает запись.
     """
     nets = _nets(other["include"])
     if conf:
         nets += _nets(buildconfig.allowed_nets(conf, v6=True))
-    out = _nets(other["exclude"])
+    out = _nets(other["exclude"] + t["exclude"])
+    domains = _domains(other["include"])
+    out_domains = _domains(other["exclude"] + t["exclude"])
+    where = f"«{other['name']}»" + (f" (конфиг {conf_name})" if conf_name else "")
     found = []
     for entry in t["include"]:
         if entry in other["include"]:
-            found.append((entry, f"«{entry}» уже в «{other['name']}»"))
-        elif any(_taken(a, b, out) for a in _nets([entry]) for b in nets):
+            found.append((entry, f"«{entry}» уже в {where}"))
+        elif (any(_taken(a, b, out) for a in _nets([entry]) for b in nets)
+              or any(_domain_taken(a, b, out_domains)
+                     for a in _domains([entry]) for b in domains)):
             found.append((entry, f"«{entry}» из «{t['name']}» уже идёт через "
-                                 f"«{other['name']}» — убери его здесь или впиши "
+                                 f"{where} — убери его здесь или впиши "
                                  f"туда в «не пускать»"))
     return found
 
@@ -1710,6 +1747,7 @@ class Core:
         файле не менялся. Изменённые — первыми: одна и та же запись у двух
         туннелей — одна причина, словами листа изменённого («уже в «Лаб»»)."""
         confs = {t["id"]: c for t, c in self._list_confs(data)}
+        in_use = self._in_use(data)
         ids = {t["id"] for t in changed}
         lists = sorted((t for t in data["tunnels"] if t["mode"] == "list"),
                        key=lambda t: t["id"] not in ids)
@@ -1718,7 +1756,13 @@ class Core:
             for other in lists:
                 if other is t or not {t["id"], other["id"]} & ids:
                     continue
-                for entry, why in _clash(t, other, confs.get(other["id"])):
+                # Неизменённый t — только против AllowedIPs изменённого: «пускать»
+                # пары уже сверены с его стороны, а вторая причина на то же
+                # пересечение (x.a.ru и a.ru) звала бы убрать чужую запись.
+                if t["id"] not in ids:
+                    other = {**other, "include": []}
+                for entry, why in _clash(t, other, confs.get(other["id"]),
+                                         in_use[other["id"]]):
                     key = (frozenset((t["id"], other["id"])), entry)
                     if key not in seen:
                         seen.add(key)
