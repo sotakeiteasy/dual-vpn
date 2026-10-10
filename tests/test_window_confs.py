@@ -85,6 +85,34 @@ def test_команды_плитки_уходят_администратору_�
     assert "failed" not in [fn for fn, _ in shown]
 
 
+def test_проверка_конфига_без_прав_статус_раньше_отпускания(monkeypatch):
+    api, admin, shown = _api(monkeypatch, [])
+    calls = []
+    monkeypatch.setattr(ipc, "call", lambda op, **kw: calls.append((op, kw)) or
+                        {"ok": True, "status": {}})
+    arg = {"tunnel": "home", "name": "de-2"}
+
+    api._test_config(arg)
+
+    # test-config в USER_OPS: ↻ не спрашивает UAC.
+    assert calls[0] == ("test-config", arg)
+    assert admin == []
+    # Иначе testDone перерисовал бы плитку прошлым статусом.
+    assert [fn for fn, _ in shown] == ["render", "testDone"]
+    assert shown[-1] == ("testDone", arg)
+
+
+def test_отказ_проверки_виден_и_кнопка_отпускается(monkeypatch):
+    api, _, shown = _api(monkeypatch, [])
+    monkeypatch.setattr(ipc, "call", lambda op, **_kw: {"ok": True, "status": {}}
+                        if op == "status" else {"ok": False, "error": "нет конфига x.conf"})
+
+    api._test_config({"tunnel": "home", "name": "x"})
+
+    assert ("failed", "нет конфига x.conf") in shown
+    assert shown[-1] == ("testDone", {"tunnel": "home", "name": "x"})
+
+
 def test_галочка_журнала_отпускается_и_при_отказе(monkeypatch):
     api, admin, shown = _api(monkeypatch, [{"ok": False, "error": "отменено"}])
 

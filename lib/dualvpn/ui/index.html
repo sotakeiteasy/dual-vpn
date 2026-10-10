@@ -122,9 +122,13 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
 .tile-add { flex: none; padding: 0; border: none; background: none; color: var(--accent);
             font-size: 13px; }
 .tile-add:hover:not(:disabled) { background: none; text-decoration: underline; }
-.tile-menu { flex: none; width: 24px; padding: 0; line-height: 18px; color: var(--dim);
-             background: none; border: none; border-radius: 5px; font-size: 15px; }
-.tile-menu:hover { background: var(--pressed); color: var(--text); }
+.tile-menu, .tile-test { flex: none; width: 24px; padding: 0; color: var(--dim);
+                         background: none; border: none; border-radius: 5px; }
+.tile-menu { line-height: 18px; font-size: 15px; }
+.tile-test { height: 18px; }
+.tile-menu:hover, .tile-test:hover:not(:disabled) { background: var(--pressed); color: var(--text); }
+.tile-test svg { width: 13px; height: 13px; display: block; margin: auto; }
+.tile-test.spin svg { animation: check-spin .9s linear infinite; }
 .emptyrow { padding: 2px 3px; color: var(--dim); }
 
 #rowmenu { position: fixed; z-index: 20; background: var(--panel); padding: 4px;
@@ -333,11 +337,20 @@ let VERBOSE_PENDING = false;
 let CHECKING = false;  // идёт проверка туннелей по кнопке или при открытии
 // id туннелей этой проверки, чей ответ ещё не пришёл: быстрый не ждёт молчащего.
 let CHECK_LEFT = new Set();
+// Проверки конфигов по ↻, чей ответ ещё не пришёл: «id/имя». Статус покажет
+// checking только со следующим опросом — без этого кнопка молчала бы секунды.
+const TESTING = new Set();
+// seq проверки туннеля на момент ↻: у выбранного конфига живого VPN итог теста
+// виден, пока туннель не проверили заново, — потом свежее его проверка.
+const TESTED = {};
 let RULES = null;      // туннель открытого листа «Туннелирование», списки — сохранённые
 
 // В окне туннель зовётся своим конфигом (решение #12), имя туннеля — запасное.
 const tname = t => t.active || t.name;
 const hasConf = t => !!(t.confs || []).length;
+const testKey = (id, name) => `${id}/${name}`;
+const testOf = (t, name) => (t.tests || {})[name];
+const testing = (t, name) => TESTING.has(testKey(t.id, name)) || !!(testOf(t, name) || {}).checking;
 
 // Рестарт нельзя ждать сравнением с желаемым состоянием: жмут его при поднятом
 // туннеле, и «уже как надо» получается сразу. Ждём полный цикл: упал и поднялся.
@@ -475,20 +488,29 @@ function render(s) {
 
 // Плитка: [цвет, подпись]. Без VPN мерить нечем — показываем, как туннель
 // отработал в прошлый раз: сломанный заменяют до включения, а не после.
-// Серым: зелёная «выключен · работал» читалась как «работает».
+// Серым: зелёная «выключен · работал» читалась как «работает». Проверка
+// конфига (↻, после добавления) свежее прошлого раза — тогда её итог.
 function tileState(t, s, checking, direct) {
   if (!hasConf(t)) return ['warn', 'нет конфига'];
-  if (!s.up) return t.last === 'error' ? ['bad', 'выключен · раньше не работал']
+  const name = t.active || t.confs[0];
+  const test = testOf(t, name);
+  if (testing(t, name)) return ['warn', 'проверяю…'];
+  if (!s.up) return test ? testState(test, 'выключен · ')
+                  : t.last === 'error' ? ['bad', 'выключен · раньше не работал']
                   : t.last === 'up' ? ['off', 'выключен · раньше работал'] : ['off', 'выключен'];
+  // Итог ↻ на живом VPN — пока туннель не проверили заново.
+  const fresh = test && t.seq === TESTED[testKey(t.id, name)] ? testState(test, '') : null;
   if (t.mode === 'all') {
     if (direct) return ['bad', 'не работает · выход напрямую'];
     if (checking(t)) return ['warn', 'проверяю…'];
     if (s.exit_state === 'leak') return ['bad', 'мимо туннеля'];
+    if (fresh) return fresh;
     if (t.check === 'up') return ['ok', `через туннель ${t.answer || ''}`.trim()];
     if (t.check === 'error') return ['bad', 'не работает'];
     return ['warn', 'проверяю…'];
   }
   if (checking(t)) return ['warn', 'проверяю…'];
+  if (fresh) return fresh;
   if (t.check === 'up') return ['ok', `отвечает ${t.answer || ''}`.trim()];
   // Сервер отвечает, а домен из «пускать» его DNS не знает: правила от другой сети.
   if (t.check === 'rules') return ['warn',
@@ -496,6 +518,26 @@ function tileState(t, s, checking, direct) {
   if (t.check === 'error') return ['bad', 'молчит'];
   if (t.check === 'none') return ['off', 'не с чем проверить: ни DNS в конфиге, ни домена в «пускать»'];
   return ['warn', 'проверяю…'];
+}
+
+// Итог проверки конфига (Core._test_conf): отвечает ли его сервер — без VPN,
+// у запасного или по ↻. prefix — чем плитка была бы без теста.
+function testState(r, prefix) {
+  const a = r.answer || '';
+  if (r.result === 'up') return ['ok', `${prefix}проверен: работает${a ? ', ' + a : ''}`];
+  if (r.result === 'rules') return ['warn',
+    `${prefix}сервер отвечает · «${a}» через него не открывается — проверь туннелирование`];
+  if (r.result === 'error') return ['bad', `${prefix}проверен: не работает${a ? ' — ' + a : ''}`];
+  if (r.result === 'none') return ['off',
+    `${prefix}не с чем проверить: ни DNS в конфиге, ни домена в «пускать»`];
+  return ['off', `${prefix}проверить не удалось`];
+}
+
+// Запасной: кружок пустой — выбора нет, цвет и текст — от теста, если был.
+function spareState(t, name) {
+  const test = testOf(t, name);
+  if (testing(t, name)) return ['warn', 'запасной · проверяю…'];
+  return test ? testState(test, 'запасной · ') : ['', 'запасной'];
 }
 
 function records(n) {
@@ -517,6 +559,14 @@ function tileHtml(t, name, mark, state, pick, role) {
   // Туннель без конфига: правила оставили — плитка зовёт добавить файл в него.
   const add = hasConf(t) ? ''
     : ` · <button class="tile-add" data-add-to="${esc(t.id)}">Добавить…</button>`;
+  const busy = name && testing(t, name);
+  const test = !name ? '' : `
+      <button class="tile-test${busy ? ' spin' : ''}" data-test="${esc(t.id)}" data-name="${esc(name)}"
+              title="Проверить конфиг" aria-label="Проверить конфиг"${busy ? ' disabled' : ''}>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/>
+        </svg></button>`;
   return `
     <div class="card tile${pick ? ' pick' : ''}" data-id="${esc(t.id)}" data-name="${esc(name)}">
       <span class="tile-mark ${mark}"></span>
@@ -524,7 +574,7 @@ function tileHtml(t, name, mark, state, pick, role) {
         <div class="tile-name">${esc(name || t.name)}</div>
         <div class="tile-state ${cls}">${esc(text)}${add}</div>
         ${role ? `<div class="tile-role">${esc(role)}</div>` : ''}
-      </div>
+      </div>${test}
       <button class="tile-menu" data-menu="${esc(t.id)}" data-name="${esc(name)}"
               title="Действия" aria-label="Действия">⋯</button>
     </div>`;
@@ -558,7 +608,7 @@ function renderTiles(s, checking, direct) {
       ? [t.active, ...t.confs.filter(c => c !== t.active)] : t.confs;
     confs.forEach(c => tiles.push(c === t.active
       ? tileHtml(t, c, st[0], st, false, tileRole(t))
-      : tileHtml(t, c, 'spare', ['', 'запасной'], true)));
+      : tileHtml(t, c, 'spare', spareState(t, c), true)));
   });
   setTiles('tiles', tiles.join(''), tiles.length);
 }
@@ -942,6 +992,9 @@ document.getElementById('pane-tunnels').addEventListener('click', e => {
   if (mb) { tileMenu(mb.dataset.menu, mb.dataset.name, mb); return; }
   const add = e.target.closest('[data-add-to]');
   if (add) { send('add_config', {tunnel: add.dataset.addTo}); return; }
+  // Раньше выбора: ↻ лежит на плитке запасного, и клик выбрал бы его.
+  const tb = e.target.closest('[data-test]');
+  if (tb) { testStart(tb.dataset.test, tb.dataset.name); return; }
   // Посреди перезапуска выбор подождёт: команда ушла бы в середину цикла.
   const tile = e.target.closest('.tile.pick');
   if (tile && !busyNow(LAST) && !LAST.busy)
@@ -966,6 +1019,19 @@ function checkSides(s, left) {
   render(s);
 }
 function checkDone() { CHECKING = false; CHECK_LEFT = new Set(); render(LAST); }
+
+// ↻ на плитке: проверка одного конфига, VPN не трогает. Ответ службы ждёт
+// итога, сам итог страница берёт из статуса (tunnels[].tests).
+function testStart(id, name) {
+  const t = (LAST.tunnels || []).find(x => x.id === id);
+  if (!t || testing(t, name)) return;
+  TESTING.add(testKey(id, name));
+  TESTED[testKey(id, name)] = t.seq;
+  render(LAST);
+  send('test_config', {tunnel: id, name});
+}
+// И при отказе службы: кнопка не должна застрять.
+function testDone(a) { TESTING.delete(testKey(a.tunnel, a.name)); render(LAST); }
 
 // Сообщаем Python, что страница поднялась: на этом держится сквозной тест —
 // он проверяет всю цепочку от ресурса в бандле до моста обратно.
