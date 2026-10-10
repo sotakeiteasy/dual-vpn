@@ -88,6 +88,18 @@ def test_без_канала_окно_сообщает_стоит_ли_служ�
     assert shown == [("render", {"up": False, "no_service": True, "daemon": False})]
 
 
+def test_портативная_без_канала_не_просит_ставить_службу(monkeypatch):
+    monkeypatch.setattr(ipc, "call", _no_pipe)
+    monkeypatch.setattr(window.portable, "is_portable", lambda: True)
+    monkeypatch.setattr(window, "_service_installed", lambda: False)
+    api, shown = window.Api({}), []
+    monkeypatch.setattr(api, "js", lambda fn, arg=None: shown.append((fn, arg)))
+
+    api.refresh()
+
+    assert shown == [("render", {"up": False, "no_service": True, "portable": True})]
+
+
 def _save_rules(monkeypatch, up, reply=None):
     """Сохранить правила туннеля; вернуть команды службе и вызовы страницы."""
     ops, admin, shown = [], [], []

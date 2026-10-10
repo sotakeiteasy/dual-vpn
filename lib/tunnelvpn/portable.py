@@ -23,6 +23,14 @@ import sys
 # Каталоги данных до переименования в TunnelVPN: встретив их, забираем целиком.
 DATA_NAME, LEGACY_DATA_NAME = "TunnelVPN-Data", "DualVPN-Data"
 LOCAL_NAME, LEGACY_LOCAL_NAME = "TunnelVPN", "DualVPN"
+# Имя exe портативной сборки (installer/tunnelvpn.spec), в нижнем регистре.
+EXE_NAME = "tunnelvpn-portable.exe"
+
+
+def is_portable():
+    """Процесс — портативная сборка: службы нет, ядро живёт в процессе трея,
+    окно — тот же exe с командой window."""
+    return os.path.basename(sys.executable).lower() == EXE_NAME
 
 
 def _adopt(legacy, path):

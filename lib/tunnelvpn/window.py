@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from . import instance, ipc, paths, tunnels
+from . import instance, ipc, paths, portable, tunnels
 
 POLL_EVERY = 2.0
 # Сколько ждём отчёта страницы о готовности. Не дождались — WebView2 не
@@ -357,8 +357,13 @@ class Api:
         try:
             st = ipc.call("status").get("status", {})
         except ipc.NotRunning:
-            self.js("render", {"up": False, "no_service": True,
-                                "daemon": _service_installed()})
+            # У портативной службы нет и не будет: канал держит её трей, и
+            # «Нужна установка» звала бы ставить то, что ей не нужно.
+            if portable.is_portable():
+                self.js("render", {"up": False, "no_service": True, "portable": True})
+            else:
+                self.js("render", {"up": False, "no_service": True,
+                                    "daemon": _service_installed()})
             return
         self.js("render", st)
         if full:

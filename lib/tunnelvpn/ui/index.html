@@ -14,14 +14,16 @@ document.write(`<link rel="stylesheet" href="app.css${location.search}">`);
 <body>
 <svg id="sprite" aria-hidden="true">
   <!-- Статусы: форма различает их и без цвета. -->
-  <symbol id="i-ok" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.6" fill="currentColor"/></symbol>
+  <symbol id="i-ok" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.6" fill="currentColor" stroke="none"/></symbol>
   <symbol id="i-err" viewBox="0 0 16 16"><path d="m4.6 4.6 6.8 6.8m0-6.8-6.8 6.8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
-  <symbol id="i-warn" viewBox="0 0 16 16"><path fill="currentColor" fill-rule="evenodd" d="M8 1.6 15.2 14H.8ZM7.2 5.8v4.4h1.6V5.8Zm0 5.6v1.6h1.6v-1.6Z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path fill="currentColor" stroke="none" fill-rule="evenodd" d="M8 1.6 15.2 14H.8ZM7.2 5.8v4.4h1.6V5.8Zm0 5.6v1.6h1.6v-1.6Z"/></symbol>
   <symbol id="i-off" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.8" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
   <symbol id="i-unset" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.513 2.513"/></symbol>
   <symbol id="i-busy" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.8" fill="none" stroke="currentColor" stroke-width="1.8" opacity=".28"/><path d="M8 3.2A4.8 4.8 0 0 1 12.8 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
-  <!-- Действия: контур 1.6, цвет — от кнопки. -->
-  <g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Действия: контур 1.6, цвет — от кнопки. Контур задаёт .ic в app.css:
+       атрибуты предков <symbol> в копию <use> не наследуются. У статусов
+       выше свои fill и stroke. -->
+  <g>
     <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.6v3h-3"/></symbol>
     <symbol id="i-restart" viewBox="0 0 16 16"><path d="M2.8 7a5.3 5.3 0 0 1 9.4-2.6M13.2 9a5.3 5.3 0 0 1-9.4 2.6M12.6 1.8v2.8H9.8M3.4 14.2v-2.8h2.8"/></symbol>
     <symbol id="i-power" viewBox="0 0 16 16"><path d="M8 1.8v5.6M4.4 4a5.2 5.2 0 1 0 7.2 0"/></symbol>
@@ -49,7 +51,7 @@ document.write(`<link rel="stylesheet" href="app.css${location.search}">`);
 </svg>
 
 <header id="bar">
-  <nav id="tabs" role="tablist" aria-label="Разделы">
+  <nav id="tabs" class="seg" role="tablist" aria-label="Разделы">
     <button class="tab" role="tab" data-tab="tunnels" aria-selected="true">Туннели</button>
     <button class="tab" role="tab" data-tab="log" aria-selected="false">Журнал</button>
     <button class="tab" role="tab" data-tab="settings" aria-selected="false">Настройки</button>
@@ -77,7 +79,7 @@ document.write(`<link rel="stylesheet" href="app.css${location.search}">`);
   const mock = /[?&]mock=/.test(q) && !window.pywebview
     ? `<script src="dev/mock-api.js${q}"><\/script>` : '';
   // Порядок важен: core — первым, main (шлёт ready) — последним.
-  const parts = ['core', 'main'];
+  const parts = ['core', 'model', 'topbar', 'main'];
   document.write(mock + parts.map(p => `<script src="js/${p}.js${q}"><\/script>`).join(''));
 }
 </script>

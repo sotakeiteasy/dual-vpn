@@ -35,7 +35,9 @@
   --r-xs: 4px; --r-s: 6px; --r-m: 10px; --r-l: 14px; --r-pill: 999px;
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
   --hit: 32px;                       /* кликабельная зона кнопки-иконки */
+  --hit-s: 26px;                     /* малая кнопка: сегмент, действие в панели */
   --ic: 16px;
+  --ic-s: 14px;                      /* значок внутри текста: пилюля */
 
   --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --mono: "Cascadia Mono", Consolas, monospace;
@@ -82,7 +84,8 @@ body {
 code, .mono { font-family: var(--mono); }
 code { font-size: .92em; background: var(--raised); padding: 1px var(--sp-1); border-radius: var(--r-xs); }
 
-.ic { width: var(--ic); height: var(--ic); flex: none; display: block; }
+.ic { width: var(--ic); height: var(--ic); flex: none; display: block;
+      fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* Тонкие тёмные полосы прокрутки; прокрутка не утекает в окно. */
@@ -160,7 +163,7 @@ body.kbd :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
 /* Сегментированный контрол — вкладки и чипы-фильтры. */
 .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--r-s);
        background: var(--card); border: 1px solid var(--line); }
-.seg > button { height: 26px; padding: 0 var(--sp-3); border-radius: var(--r-xs);
+.seg > button { height: var(--hit-s); padding: 0 var(--sp-3); border-radius: var(--r-xs);
                 color: var(--dim); font-size: var(--fs-m); font-weight: 500;
                 transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
 .seg > button:hover { color: var(--text); }
@@ -188,6 +191,75 @@ body.kbd :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
 #bar { display: grid; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4) 0; }
 #tabs { justify-self: start; }
 #panes { min-height: 0; display: grid; }
+
+/* -------------------------------------------------------------- топ-бар */
+/* Три строки постоянной высоты: заголовок с кнопками, под ними во всю
+   ширину — пояснение и выход. Строка выхода без адреса прячется
+   visibility — место за ней остаётся. */
+#top {
+  container: top / inline-size;
+  position: relative; overflow: hidden;
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+  gap: 0 var(--sp-3); padding: var(--sp-3) var(--sp-4);
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-l);
+}
+/* Неон статуса — заливкой из угла на ::before, без анимации тени. */
+#top::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(60% 140% at 0 0, color-mix(in srgb, var(--st) 12%, transparent), transparent 70%);
+}
+#top > * { position: relative; }
+.top-title { margin: 0; font-size: var(--fs-l); font-weight: 600; line-height: 1.4; }
+.top-actions { grid-column: 3; grid-row: 1; }
+.top-sub, .top-exit { grid-column: 2 / -1; }
+.top-sub { color: var(--dim); font-size: var(--fs-m); }
+.top-exit { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0;
+            color: var(--dim); font-size: var(--fs-m); }
+.top-exit .mono { color: var(--text); flex: 0 1 auto; }
+.top-exit .top-place { flex: 0 2 auto; }
+.top-exit .link { flex: none; }
+.top-exit.vacant { visibility: hidden; }
+.top-actions { display: flex; align-items: center; gap: var(--sp-2); }
+.top-install code { font-size: var(--fs-m); padding: var(--sp-1) var(--sp-2); }
+
+/* Узкое окно: вспомогательные кнопки — значками с подсказкой, у главной
+   подпись остаётся; у пилюли — только числа. */
+@container top (max-width: 900px) {
+  .cbtn { width: var(--hit); padding: 0; }
+  .cbtn .lbl { display: none; }
+}
+@container top (max-width: 1200px) {
+  .pill .lbl { display: none; }
+}
+
+/* Пилюля проблем: цвет — по худшей. */
+.pill {
+  display: inline-flex; align-items: center; gap: var(--sp-2); flex: none;
+  height: var(--hit); padding: 0 var(--sp-2) 0 var(--sp-3); border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--st) 10%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--st) 45%, transparent);
+  font-size: var(--fs-m); font-weight: 500; white-space: nowrap;
+  transition: transform var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+.pill:hover { background: color-mix(in srgb, var(--st) 18%, var(--card)); }
+.pill:active { transform: scale(.97); }
+.pill .cnt { display: inline-flex; align-items: center; gap: var(--sp-1); }
+.pill .cnt .ic { color: var(--st); width: var(--ic-s); height: var(--ic-s); }
+.pill .chev { color: var(--dim); transform: rotate(90deg); transition: transform var(--t-mid) var(--ease); }
+.pill[aria-expanded="true"] .chev { transform: rotate(-90deg); }
+
+/* Панель проблем: группы по туннелю, у каждой — что не так и что сделать. */
+.probs { width: min(440px, calc(100vw - 16px)); display: flex; flex-direction: column; gap: var(--sp-2);
+         padding: var(--sp-2); }
+.probs-group { display: grid; gap: var(--sp-1); }
+.probs-where { margin: 0; padding: var(--sp-1) var(--sp-2) 0; color: var(--dim);
+               font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.prob { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--sp-2); align-items: start;
+        padding: var(--sp-2); border-radius: var(--r-s); background: var(--raised); }
+.prob .orb { margin-top: 2px; }
+.prob-text { font-size: var(--fs-m); overflow-wrap: anywhere; }
+.prob-fix { color: var(--dim); font-size: var(--fs-s); }
+.btn.sm { height: var(--hit-s); padding: 0 var(--sp-2); font-size: var(--fs-s); }
 .pane { min-height: 0; grid-area: 1 / 1; }
 
 /* ----------------------------------------------------------- всплывающее */

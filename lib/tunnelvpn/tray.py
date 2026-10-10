@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 
-from . import instance, ipc, paths, tunnels, window
+from . import instance, ipc, paths, portable, tunnels, window
 from .icon import TRAY, rgba
 from .icon import tray as tray_image
 
@@ -591,8 +591,7 @@ class Tray:
             # версии это же имя exe одно на всё, и у него есть ветка "window" —
             # ею и пользуемся. У установленной версии трей и окно — разные
             # exe, и окно живёт в соседнем tunnelvpn.exe.
-            name = os.path.basename(sys.executable).lower()
-            if name == "tunnelvpn-portable.exe":
+            if portable.is_portable():
                 cmd = [sys.executable, "window"]
             else:
                 sibling = os.path.join(os.path.dirname(sys.executable), "tunnelvpn.exe")
