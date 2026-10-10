@@ -421,6 +421,53 @@ def test_выбор_конфига_туннеля(core):
     assert not r["ok"] and "c.conf" in r["error"] and _active("work") == "b"
 
 
+def test_туннель_по_списку_выключается_и_включается(core):
+    """Флаг в tunnels.json: переживает перезагрузку службы."""
+    _put("work", "corp.conf")
+
+    assert core._set_enabled("work", False) == {"ok": True, "tunnel": "work",
+                                                 "enabled": False}
+    assert _tunnel("work")["enabled"] is False and _files("work") == ["corp.conf"]
+    assert core._set_enabled("Работа", True)["enabled"] is True
+    assert _tunnel("work")["enabled"] is True
+
+
+def test_основной_флагом_не_выключается(core):
+    """Основной выключает «Всё остальное напрямую» — set-tunnel {mode: list}."""
+    r = core._set_enabled("home", False)
+
+    assert not r["ok"] and "напрямую" in r["error"]
+    assert _tunnel("home")["enabled"] is True
+
+
+@pytest.mark.parametrize("on", [None, 0, "false"])
+def test_вкл_выкл_только_true_или_false(core, on):
+    """Строка «false» из канала — не False: молча включённый туннель хуже отказа."""
+    r = core._set_enabled("work", on)
+
+    assert not r["ok"] and _tunnel("work")["enabled"] is True
+
+
+def test_вкл_выкл_через_handle(core):
+    r = core.handle("set-enabled", {"tunnel": "work", "on": False}, is_admin=False)
+
+    assert r["ok"] and _tunnel("work")["enabled"] is False
+
+
+def test_выключенный_не_становится_основным(core):
+    """Выключил человек — повышение после ухода основного его не включает."""
+    nl = {"id": "t1", "name": "nl", "mode": "list", "enabled": False}
+    fi = {"id": "t2", "name": "fi", "mode": "list"}
+    tunnels.save({"tunnels": [HOME, nl, fi]})
+    for tid, name in (("home", "de"), ("t1", "nl"), ("t2", "fi")):
+        _put(tid, name + ".conf", FULL)
+
+    assert core._remove_tunnel("home")["ok"]
+
+    assert [_tunnel(i)["mode"] for i in ("t1", "t2")] == ["list", "all"]
+    assert _tunnel("t1")["enabled"] is False
+
+
 # ------------------------------------------------- команды tunnels.json
 
 def test_новый_туннель_получает_свободный_id(core):

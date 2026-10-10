@@ -33,7 +33,7 @@ def clean_conf():
 
 def _tunnel(**over):
     t = {"id": "work", "name": "Работа", "mode": "list", "active": "",
-         "include": [], "exclude": []}
+         "enabled": True, "include": [], "exclude": []}
     t.update(over)
     return t
 
@@ -177,6 +177,27 @@ def test_чужая_версия_отказ():
         tunnels.validate(_data(version=2))
 
 
+def test_флаг_включён_по_умолчанию():
+    """tunnels.json прошлых версий флага не знает: его туннели работали."""
+    raw = _tunnel()
+    del raw["enabled"]
+    assert tunnels.validate(_data(raw))["tunnels"][0]["enabled"] is True
+
+
+def test_флаг_только_true_или_false():
+    with pytest.raises(ValueError, match="enabled"):
+        tunnels.validate(_data(_tunnel(enabled="false")))
+    t = tunnels.validate(_data(_tunnel(enabled=False)))["tunnels"][0]
+    assert t["enabled"] is False
+
+
+def test_основной_всегда_включён():
+    """Выключенный «по списку» стал основным — он включён: выключает основной
+    «Всё остальное напрямую», а не флаг."""
+    t = tunnels.validate(_data(_tunnel(mode="all", enabled=False)))["tunnels"][0]
+    assert t["enabled"] is True
+
+
 def test_лишние_поля_не_сохраняются():
     saved = tunnels.save(_data(_tunnel(lishnee="x"), lishnee="y"))
     assert "lishnee" not in saved
@@ -254,10 +275,10 @@ def test_переезд_нынешней_установки():
         "version": 1, "log_level": "debug",
         "tunnels": [
             {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
-             "include": ["corp.example"],
+             "enabled": True, "include": ["corp.example"],
              "exclude": ["198.51.100.7/32", "203.0.113.9/32"]},
             {"id": "home", "name": "Личный", "mode": "all", "active": "nl-1",
-             "include": [], "exclude": []},
+             "enabled": True, "include": [], "exclude": []},
         ],
     }
     assert tunnels.load() == data

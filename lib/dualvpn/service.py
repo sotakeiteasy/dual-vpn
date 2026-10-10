@@ -327,6 +327,8 @@ class Core:
             return self._set_profile(payload.get("profile", ""))
         if op == "set-active":
             return self._set_active(payload.get("name", ""), tunnel=tid)
+        if op == "set-enabled":
+            return self._set_enabled(tid, payload.get("on"))
         if op == "list-profiles":
             return {"ok": True, "profiles": self._profiles(), "corp": self._corp()}
         if op == "check":
@@ -403,7 +405,7 @@ class Core:
         # такой туннель «по списку» можно вернуть в основной (move-config).
         in_use = self._in_use(data)
         st["tunnels"] = [{"id": t["id"], "name": t["name"], "mode": t["mode"],
-                          "active": t["active"],
+                          "active": t["active"], "enabled": t["enabled"],
                           "confs": tunnels.list_confs(t["id"]),
                           "rules": len(t["include"]) + len(t["exclude"]),
                           "full": _conf_full(t["id"], in_use[t["id"]])}
@@ -1475,6 +1477,27 @@ class Core:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "tunnel": t["id"], "active": name}
 
+    def _set_enabled(self, tunnel, on):
+        """Включает или выключает туннель «по списку»: сборка выключенный
+        пропускает, конфиги и правила остаются. На живой VPN переносит apply
+        отправителя, как после set-active и правки правил. Основной так не
+        выключается: «Всё остальное напрямую»."""
+        if not isinstance(on, bool):
+            return {"ok": False, "error": "on должен быть true или false"}
+        try:
+            data, t = self._load_target(tunnel)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        if t["mode"] != "list":
+            return {"ok": False, "error": f"«{t['name']}» — основной: его выключает "
+                                           f"«Всё остальное напрямую»"}
+        if t["enabled"] == on:
+            return {"ok": True, "tunnel": t["id"], "enabled": on}
+        t["enabled"] = on
+        r = self._save_tunnels(data, f"туннель {t['id']} "
+                                     f"{'включён' if on else 'выключен'}")
+        return {**r, "tunnel": t["id"], "enabled": on} if r["ok"] else r
+
     def _set_profile(self, name):
         """Профиль — активный конфиг основного туннеля (`dualvpn profile`)."""
         r = self._set_active(name, kind="personal")
@@ -1629,7 +1652,8 @@ class Core:
         if tunnels.main_tunnel(data) is not None:
             return None
         for t in data["tunnels"]:
-            if t is not skip and self._idle_full(data, t):
+            # Выключенный — тоже выбор человека: основным его не включаем.
+            if t is not skip and t["enabled"] and self._idle_full(data, t):
                 t["mode"] = "all"
                 return t
         return None

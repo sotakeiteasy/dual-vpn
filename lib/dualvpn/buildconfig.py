@@ -761,10 +761,12 @@ def running_pid():
 
 def sources():
     """(туннели, {id: путь к активному .conf}) для сборки из tunnels.json.
-    Испорченный файл или неоднозначный активный конфиг — sys.exit с причиной."""
+    Испорченный файл или неоднозначный активный конфиг — sys.exit с причиной.
+    У выключенного туннеля — None: его выбор конфига сборку не держит."""
     try:
         data = tunnels.load()
-        return data, {t["id"]: tunnels.active_conf(t) for t in data["tunnels"]}
+        return data, {t["id"]: tunnels.active_conf(t) if t["enabled"] else None
+                      for t in data["tunnels"]}
     except ValueError as exc:
         sys.exit(str(exc))
 
@@ -793,7 +795,7 @@ def build(data, confs, out_path, side_path=None, log=print):
     собранных по порядку файла.
 
     data — tunnels.validate(); confs — {id: путь к активному .conf}. Туннель
-    без конфига пропускается: пустой слот не держит остальные.
+    без конфига и выключенный пропускаются: пустой слот не держит остальные.
     """
     side_path = side_path or side_json
     config, sides, built, report = assemble(data, confs, log)
@@ -819,6 +821,9 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
     built = []                       # (туннель, разобранный .conf, endpoint)
     for t in data["tunnels"]:
         path = confs.get(t["id"])
+        if not t["enabled"]:
+            log(f"  [{t['id']}] «{t['name']}»: выключен, туннель пропускаю")
+            continue
         if not path:
             log(f"  [{t['id']}] «{t['name']}»: конфига нет, туннель пропускаю")
             continue
@@ -832,6 +837,8 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
         # затрагивает: там значение берётся из файла.
         built.append((t, conf, endpoint(conf, ep_tag(t["id"]), 1280, log,
                                         resolve)))
+    if not built and any(not t["enabled"] for t in data["tunnels"]):
+        sys.exit("включённого туннеля с конфигом нет — включи туннель или добавь .conf")
     if not built:
         sys.exit("ни у одного туннеля нет конфига — добавь .conf")
     main = next((b for b in built if b[0]["mode"] == "all"), None)

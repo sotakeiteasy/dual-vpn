@@ -584,6 +584,36 @@ def test_туннель_без_конфига_пропускается(build, tm
     assert any("«Work»: конфига нет" in line for line in lines)
 
 
+def test_выключенный_туннель_пропускается(build):
+    """Ни процесса, ни правила, ни DNS: его трафик идёт как без него."""
+    items = [dict(THREE[0], enabled=False), *THREE[1:]]
+
+    main, sides = build(items)
+
+    assert list(sides) == ["lab", "home"]
+    assert not any(o["tag"] == "socks-work" for o in main["outbounds"])
+    assert not any("dns-work" == s["tag"] for s in main["dns"]["servers"])
+    assert [r.get("outbound") for r in main["route"]["rules"][2:]] == [
+        "socks-lab", "direct", "direct"]
+
+
+def test_все_включённые_без_конфига_причина_про_выключенные(tmp_path):
+    data = tunnels.validate({"tunnels": [dict(THREE[0], enabled=False), THREE[2]]})
+    with pytest.raises(SystemExit, match="включи туннель"):
+        buildconfig.build(data, {"work": _write(tmp_path, "w.conf", CORP)},
+                          str(tmp_path / "c.json"), log=lambda line: None)
+
+
+def test_выбор_конфига_выключенного_сборку_не_держит(monkeypatch):
+    """Несколько конфигов без выбора — отказ сборки, но не у выключенного."""
+    data = tunnels.validate({"tunnels": [dict(THREE[0], enabled=False), THREE[2]]})
+    monkeypatch.setattr(tunnels, "load", lambda: data)
+    monkeypatch.setattr(tunnels, "active_conf",
+                        lambda t: "home.conf" if t["id"] == "home" else 1 / 0)
+
+    assert buildconfig.sources() == (data, {"work": None, "home": "home.conf"})
+
+
 def test_ни_одного_конфига_это_ошибка(tmp_path):
     data = tunnels.validate({"tunnels": THREE})
     with pytest.raises(SystemExit, match="ни у одного туннеля нет конфига"):

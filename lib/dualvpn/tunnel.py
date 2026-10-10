@@ -1023,12 +1023,14 @@ def _conf_stamp(path):
 
 
 def _stamps():
-    """{id: метка активного .conf} по tunnels.json; испорчен — пусто."""
+    """{id: метка активного .conf} включённых туннелей по tunnels.json;
+    испорчен — пусто."""
     try:
         data = tunnels.load()
     except ValueError:
         return {}
-    return {t["id"]: _conf_stamp(tunnels.active_conf(t)) for t in data["tunnels"]}
+    return {t["id"]: _conf_stamp(tunnels.active_conf(t))
+            for t in data["tunnels"] if t["enabled"]}
 
 
 def _api_link(main_cfg):

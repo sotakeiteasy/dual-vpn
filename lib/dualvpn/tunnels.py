@@ -7,12 +7,17 @@
     {"version": 1, "log_level": "info",
      "tunnels": [
        {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
+        "enabled": true,
         "include": ["corp.example"], "exclude": ["198.51.100.7/32"]},
        {"id": "home", "name": "Личный", "mode": "all", "active": "nl-1",
-        "include": [], "exclude": []}]}
+        "enabled": true, "include": [], "exclude": []}]}
 
 Режим list — через туннель идёт только то, что в его списках и AllowedIPs;
 all — весь остальной трафик. all может быть не больше чем у одного.
+
+enabled — выключить туннель «по списку», не теряя его конфигов и правил:
+сборка его пропускает. Основной так не выключается: «Всё остальное
+напрямую» — это его режим list, а запасные — его конфиги, кроме active.
 
 id и имя конфига приходят через канал службы, у которой права SYSTEM, и
 становятся путями на диске. Поэтому всё, что пришло снаружи, проверяется
@@ -131,7 +136,12 @@ def _check_tunnel(raw):
         if not isinstance(active, str):
             raise ValueError(f"туннель {tid}: active должен быть строкой")
         check_name(active)
-    tunnel = {"id": tid, "name": name, "mode": mode, "active": active}
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"туннель {tid}: enabled должен быть true или false")
+    # У основного флага нет: стал основным выключенный «по списку» — включён.
+    tunnel = {"id": tid, "name": name, "mode": mode, "active": active,
+              "enabled": enabled or mode == "all"}
     tunnel["include"] = _check_list(raw, "include")
     tunnel["exclude"] = _check_list(raw, "exclude")
     return tunnel

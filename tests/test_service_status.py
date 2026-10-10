@@ -108,13 +108,14 @@ def test_статус_отдаёт_туннели_без_их_правил(monke
     core = _core(monkeypatch, up=False)
     _quiet(monkeypatch, core)
     _with_tunnels(monkeypatch, {"id": "work", "name": "Работа", "mode": "list",
-                                "active": "corp", "include": ["corp.example"]})
+                                "active": "corp", "include": ["corp.example"],
+                                "enabled": False})
     monkeypatch.setattr(service.tunnels, "list_confs",
                         lambda tid: ["corp", "old"] if tid == "work" else [])
 
     assert core._status()["tunnels"] == [
         {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
-         "confs": ["corp", "old"], "rules": 1, "full": False,
+         "enabled": False, "confs": ["corp", "old"], "rules": 1, "full": False,
          "check": "", "answer": "", "seq": 0, "last": "", "checking": False,
          "tests": {}}]
 
