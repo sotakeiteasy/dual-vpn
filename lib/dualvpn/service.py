@@ -270,7 +270,7 @@ class Core:
             # красным, пока его не включили руками. Повторы сторож тратит, только
             # когда шлюз появился, — то есть ждёт сеть.
             threading.Thread(target=self._do_start,
-                             kwargs={"retries": RECONNECT_TRIES},
+                             kwargs={"retries": RECONNECT_TRIES, "wake": True},
                              daemon=True).start()
 
     def shutdown(self):
@@ -318,7 +318,7 @@ class Core:
         if op == "howto":
             return {"ok": True, "howto": self._howto(is_admin)}
         if op == "start":
-            return self._do_start(payload.get("profile", ""))
+            return self._do_start(payload.get("profile", ""), wake=True)
         if op == "stop":
             return self._do_stop()
         if op == "apply":
@@ -645,12 +645,14 @@ class Core:
             pass
         return cls._singbox_cached
 
-    def _do_start(self, profile="", reconnect=False, retries=0):
+    def _do_start(self, profile="", reconnect=False, retries=0, wake=False):
         """Поднимает туннель. reconnect — сначала снять текущий: без этого
         start принял бы живой процесс за «уже работает» и ничего не сделал.
         retries — сколько повторов взвести, если не поднимется. Взводим под
         замком: иначе переподключение, заставшее «Выключить» человека, потом
-        включило бы VPN обратно."""
+        включило бы VPN обратно. wake — «Включить» человека или автозапуск:
+        ничего не включено — включить всё (_wake_all). apply его не ставит:
+        выключенный последним туннель включился бы обратно."""
         if not self.lock.acquire(blocking=False):
             return {"ok": False, "error": f"уже идёт: {self.busy or 'операция'}"}
         try:
@@ -668,7 +670,8 @@ class Core:
                 self._flush_paths()
                 self.tunnel.stop()
             began = time.monotonic()
-            err = self.tunnel.start(profile)
+            err = self._wake_all() if wake else ""
+            err = err or self.tunnel.start(profile)
             took = time.monotonic() - began
             self.last_error = err
             if err:
@@ -695,6 +698,30 @@ class Core:
             self._probe_now()
             self.busy = ""
             self.lock.release()
+
+    def _wake_all(self):
+        """Нет включённого туннеля с конфигом — включает все «по списку», а
+        основного нет — им становится первый полный без «пускать» (_promote;
+        решение пользователя 10.10.2026). Есть хоть один — флаги как
+        сохранены. '' или текст ошибки записи; испорченный файл скажет start."""
+        try:
+            data = tunnels.load()
+        except ValueError:
+            return ""
+        if any(t["enabled"] and tunnels.list_confs(t["id"]) for t in data["tunnels"]):
+            return ""
+        off = [t for t in data["tunnels"] if not t["enabled"]]
+        if not off:
+            return ""
+        for t in off:
+            t["enabled"] = True
+        up = self._promote(data)
+        r = self._save_tunnels(data, "включённых туннелей нет — включаю все «по списку»: "
+                                     + ", ".join(t["id"] for t in off))
+        if not r["ok"]:
+            return f"флаги туннелей не записать: {r['error']}"
+        self._log_promoted(up)
+        return ""
 
     def _apply(self):
         """Правка конфигов — на живой VPN (решение #14): перезапуск только
@@ -1647,7 +1674,8 @@ class Core:
         tunnels.json полный конфиг «по списку» без «пускать», кроме skip:
         иначе он так и не вёз бы ничего. Остальные такие — как есть. Вызывать
         до tunnels.save, только если основной был и ушёл этой командой: «Всё
-        остальное напрямую» — выбор человека, его не отменяем. Новый основной
+        остальное напрямую» — выбор человека, его не отменяем. Исключение —
+        _wake_all: «Включить», когда не включено ничего. Новый основной
         или None — в журнал его пишет вызвавший, после записи файла."""
         if tunnels.main_tunnel(data) is not None:
             return None

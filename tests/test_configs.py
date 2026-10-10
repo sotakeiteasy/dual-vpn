@@ -10,6 +10,8 @@
 
 import os
 import shutil
+import threading
+import types
 
 import pytest
 
@@ -466,6 +468,91 @@ def test_выключенный_не_становится_основным(core)
 
     assert [_tunnel(i)["mode"] for i in ("t1", "t2")] == ["list", "all"]
     assert _tunnel("t1")["enabled"] is False
+
+
+# ------------------------------------------- «Включить» и флаги туннелей
+
+class _Up:
+    """Туннель-заглушка: start помнит флаги и режимы, с которыми собирал бы."""
+
+    def __init__(self):
+        self.seen = []
+
+    def start(self, _profile):
+        self.seen.append({t["id"]: (t["mode"], t["enabled"])
+                          for t in tunnels.load()["tunnels"]})
+        return ""
+
+    def stop(self):
+        pass
+
+    def out_now(self):
+        return ""
+
+
+@pytest.fixture
+def up(core):
+    core.lock = threading.Lock()
+    core.busy = ""
+    core.tunnel = _Up()
+    core.prober = types.SimpleNamespace(set=lambda **_: None, probe_fast=lambda: None)
+    return core
+
+
+def _off(*items):
+    return [{**t, "enabled": False} for t in items]
+
+
+def test_включить_идёт_по_сохранённым_флагам(up):
+    """Основной с конфигом включён: выключенный человеком «по списку» так и
+    остаётся — верхняя кнопка его флаг не трогает."""
+    tunnels.save({"tunnels": [*_off(WORK), HOME]})
+    _put("work", "corp.conf")
+    _put("home", "nl.conf", FULL)
+
+    assert up.handle("start", {}, is_admin=False) == {"ok": True}
+
+    assert up.tunnel.seen == [{"work": ("list", False), "home": ("all", True)}]
+
+
+def test_ничего_не_включено_включить_включает_все_и_первый_основной(up):
+    """Решение 10.10.2026: все «по списку» включаются, основным становится
+    первый полный без «пускать». С «пускать» — не основной, даже первый."""
+    corp = {**WORK, "include": ["corp.example"]}
+    nl = {"id": "t1", "name": "nl", "mode": "list"}
+    fi = {"id": "t2", "name": "fi", "mode": "list"}
+    tunnels.save({"tunnels": _off(corp, nl, fi)})
+    for tid, name in (("work", "corp"), ("t1", "nl"), ("t2", "fi")):
+        _put(tid, name + ".conf", FULL)
+
+    assert up.handle("start", {}, is_admin=False) == {"ok": True}
+
+    assert up.tunnel.seen == [{"work": ("list", True), "t1": ("all", True),
+                               "t2": ("list", True)}]
+    assert any("«nl» без «пускать» стал основным" in x for x in up.logged)
+
+
+def test_ничего_не_включено_при_основном_без_конфига(up):
+    """Основной без конфига ничего не везёт: «по списку» включаются, а нового
+    основного нет — основной уже есть."""
+    tunnels.save({"tunnels": [*_off(WORK), HOME]})
+    _put("work", "corp.conf", FULL)
+
+    assert up.handle("start", {}, is_admin=False) == {"ok": True}
+
+    assert up.tunnel.seen == [{"work": ("list", True), "home": ("all", True)}]
+
+
+def test_перезапуск_после_правки_флаги_не_трогает(up):
+    """apply зовёт _do_start без wake: выключенный последним туннель не
+    включается обратно тем же перезапуском."""
+    tunnels.save({"tunnels": _off(WORK)})
+    _put("work", "corp.conf")
+
+    up._do_start()
+
+    assert up.tunnel.seen == [{"work": ("list", False)}]
+
 
 
 # ------------------------------------------------- команды tunnels.json
