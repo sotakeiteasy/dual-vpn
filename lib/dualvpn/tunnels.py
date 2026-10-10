@@ -298,6 +298,12 @@ def migrate(log=print):
 
     work_confs = list_confs("work")
     home_confs = list_confs("home")
+    if not (env or work_confs or home_confs):
+        # Свежая установка: пустые «Работа» и «Личный» были бы той же парой,
+        # от которой ушло окно, — туннели появятся с первым конфигом.
+        data = save(empty())
+        log("→ conf\\tunnels.json создан пустым: переносить нечего")
+        return data
     profile = _current_profile()
     if profile not in home_confs:
         profile = home_confs[0] if len(home_confs) == 1 else ""

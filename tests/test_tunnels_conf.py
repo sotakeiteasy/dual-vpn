@@ -288,11 +288,17 @@ def test_повторный_переезд_ничего_не_меняет():
 
 
 def test_переезд_без_site_env_и_конфигов():
-    """Свежая установка: два пустых слота, как пара в окне до сих пор."""
+    """Свежая установка: туннелей нет, пока не добавлен первый конфиг."""
     data = tunnels.migrate(log=lambda _: None)
-    assert [(t["id"], t["mode"], t["active"]) for t in data["tunnels"]] == [
-        ("work", "list", ""), ("home", "all", "")]
-    assert data["log_level"] == "info"
+    assert data == tunnels.empty()
+    assert tunnels.load() == data
+    assert tunnels.migrate(log=lambda _: None) is None
+
+
+def test_переезд_одного_site_env_создаёт_слоты():
+    _site('CORP_DOMAINS="corp.example"\n')
+    data = tunnels.migrate(log=lambda _: None)
+    assert [t["id"] for t in data["tunnels"]] == ["work", "home"]
 
 
 def test_без_профиля_берётся_единственный_личный():
@@ -328,6 +334,7 @@ def test_оборванный_переезд_доделывается():
 
 
 def test_файл_переезда_читается_как_json_с_кириллицей():
+    _site(SITE_ENV)
     tunnels.migrate(log=lambda _: None)
     with open(paths.TUNNELS_JSON, encoding="utf-8") as fh:
         assert "Работа" in fh.read()

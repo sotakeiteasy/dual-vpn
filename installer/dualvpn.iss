@@ -299,11 +299,37 @@ begin
     Confirm := False;
 end;
 
+// Служба, которую сняли, пока чужой процесс держал её дескриптор, остаётся
+// помеченной на удаление до перезагрузки: «service install» поверх неё падает
+// с 1072, а [Run] код не проверяет — установка «удалась» без службы.
+function ServicePendingDelete: Boolean;
+var
+  Flag: Cardinal;
+begin
+  Result := RegQueryDWordValue(HKLM64, 'SYSTEM\CurrentControlSet\Services\{#MyName}',
+                               'DeleteFlag', Flag) and (Flag = 1);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   SmPyd, Old: String;
+  I: Integer;
 begin
   StopEverything;
+
+  // Дескриптор мог держать только что убитый трей — даём Windows дочистить.
+  for I := 1 to 20 do
+  begin
+    if not ServicePendingDelete then
+      Break;
+    Sleep(500);
+  end;
+  if ServicePendingDelete then
+  begin
+    Result := 'Windows ещё не удалила прежнюю службу {#MyName}: её держит другая программа. ' +
+              'Перезагрузи компьютер и запусти установку снова.';
+    Exit;
+  end;
 
   // Версии до 0.2.7 писали в журнал событий, и служба журнала держит
   // servicemanager.pyd загруженным до перезагрузки: перезаписать его нельзя,

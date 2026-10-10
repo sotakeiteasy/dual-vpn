@@ -655,6 +655,20 @@ def _source_icon():
         return None
 
 
+def _page_url(index):
+    """Путь страницы с меткой её версии: обновлённая сборка — новый адрес.
+
+    pywebview отдаёт страницу своим сервером на постоянном порту (без
+    private_mode), и его no-store теряется: bottle.static_file возвращает
+    свой ответ с одним Last-Modified. WebView2 по эвристике брал index.html
+    из дискового кэша storage_path — после обновления окно было прежним.
+    """
+    try:
+        return f"{index}?v={os.stat(index).st_mtime_ns}"
+    except OSError:
+        return index
+
+
 def _storage_path():
     """Своя папка данных WebView2, отдельная для прав администратора.
 
@@ -739,7 +753,7 @@ def open_window(resident=False, hidden=False):
     index = os.path.join(paths.UI_DIR, "index.html")
 
     holder["window"] = webview.create_window(
-        f"DualVPN {paths.version()}", index,
+        f"DualVPN {paths.version()}", _page_url(index),
         # Спрятанным создаётся и видимое окно: покажет его Api.reveal.
         js_api=api, width=1040, height=720, min_size=(880, 560), hidden=True,
         # Тот же фон, что --bg в index.html: иначе до загрузки страницы окно

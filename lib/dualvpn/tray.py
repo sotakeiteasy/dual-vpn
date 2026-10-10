@@ -173,16 +173,41 @@ class Tray:
             pass                                           # окно уже закрыто
 
     def _sync_menu(self, _wparam=0, _lparam=0):
-        """Перестройка меню по статусу. Только в потоке значка и не при
-        открытом меню: закрытие меню само позовёт её ещё раз."""
-        if self._menu_open or self.icon is None:
+        """Перестройка меню по статусу. Только в потоке значка.
+
+        Открытое меню пересоздать нельзя: TrackPopupMenuEx держит его HMENU.
+        Тот же набор туннелей — подписи и доступность правятся на месте (VPN
+        поднялся при открытом меню — пункты оживают сразу); иной — после
+        закрытия меню, оно само позовёт эту функцию ещё раз."""
+        if self.icon is None:
             return
         sig = self._menu_sig()
-        if sig != self._last_menu_sig:
-            self._last_menu_sig = sig
-            # Порядок tunnels.json, как в окне: на маршрут он не влияет (решение #16).
-            self._menu_ids = tuple(t["id"] for t in self.status.get("tunnels") or [])
-            self.icon.update_menu()
+        if sig == self._last_menu_sig:
+            return
+        # Порядок tunnels.json, как в окне: на маршрут он не влияет (решение #16).
+        ids = tuple(t["id"] for t in self.status.get("tunnels") or [])
+        if self._menu_open:
+            if ids == self._menu_ids and self._patch_menu():
+                self._last_menu_sig = sig
+            return
+        self._last_menu_sig = sig
+        self._menu_ids = ids
+        self.icon.update_menu()
+
+    def _patch_menu(self):
+        """Подписи и доступность пунктов открытого HMENU по статусу.
+        False — меню нет, править нечего."""
+        import pystray
+
+        handle = self.icon._menu_handle
+        if not handle:
+            return False
+        for pos, item in enumerate(self.icon.menu):
+            if item is not pystray.Menu.SEPARATOR:
+                _set_item_state(handle[0], pos, item.text, item.enabled)
+        self._paint_dots()
+        _redraw_menus(self.icon._hwnd)
+        return True
 
     def _refresh_icon(self):
         if self.icon is None:
@@ -818,6 +843,18 @@ def _set_item_bitmap(hmenu, pos, hbmp):
     _win_api()[0](hmenu, pos, True, ctypes.byref(info))
 
 
+def _set_item_state(hmenu, pos, text, enabled):
+    """Подпись и доступность пункта; картинку слева не трогает."""
+    import ctypes
+    from pystray._util import win32
+
+    info = win32.MENUITEMINFO(cbSize=ctypes.sizeof(win32.MENUITEMINFO),
+                              fMask=win32.MIIM_STRING | win32.MIIM_STATE,
+                              dwTypeData=text,
+                              fState=0 if enabled else win32.MFS_DISABLED)
+    _win_api()[0](hmenu, pos, True, ctypes.byref(info))
+
+
 def _redraw_menus(hwnd):
     """Перерисовать открытые меню потока значка: Windows сама не узнаёт,
     что картинка пункта сменилась. Окно меню — класс #32768."""
@@ -1014,6 +1051,18 @@ def _relaunch_elevated():
         None, "runas", sys.executable, subprocess.list2cmdline(args), None, 1)
 
 
+def _bring_up():
+    """Ярлык, заставший трей закрытым, запускает программу целиком: «Закрыть»
+    опустило туннель, и без этого после ярлыка оставалось жать «Включить».
+    Поднятый или поднимающийся (автозапуск службы) туннель не трогаем."""
+    try:
+        st = ipc.call("status").get("status", {})
+        if not st.get("up") and not st.get("busy"):
+            ipc.call("start", profile="")
+    except ipc.NotRunning:
+        pass                       # службы нет — значок покажет красным
+
+
 def run(background=False):
     if already_running(background):
         return
@@ -1027,9 +1076,14 @@ def run(background=False):
                 return
             instance.allow_foreground()
             if instance.signal(instance.TRAY_OPEN, wait=TASK_OPEN_WAIT):
+                # Трей задачи думает, что это вход в систему (--background):
+                # туннель поднимает ярлык, start обычному пользователю можно.
+                _bring_up()
                 return
         _relaunch_elevated()
         return
+    if not background:
+        threading.Thread(target=_bring_up, daemon=True).start()
     Tray().run(background)
     # Значок закрыт — процесс обязан закончиться. Обычный выход ждёт все
     # недемонические потоки, а их может оставить COM диалога выбора файла или
