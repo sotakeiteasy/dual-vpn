@@ -27,6 +27,10 @@ installer/Output/
 lib/tunnelvpn/ui/icons/
 *.ico
 
+# Предпросмотр окна через Playwright: его снимки и рабочая папка MCP.
+lib/tunnelvpn/ui/dev/screenshots/
+.playwright-mcp/
+
 # Локальные индексы инструментов разработки — у каждого свои, в репозитории
 # им не место.
 .tokensave/

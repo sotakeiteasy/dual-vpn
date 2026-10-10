@@ -706,11 +706,18 @@ def _page_url(index):
     private_mode), и его no-store теряется: bottle.static_file возвращает
     свой ответ с одним Last-Modified. WebView2 по эвристике брал index.html
     из дискового кэша storage_path — после обновления окно было прежним.
+    Метка — по самому свежему файлу вёрстки: страница передаёт её app.css и
+    js/*.js, иначе из кэша пришли бы они.
     """
-    try:
-        return f"{index}?v={os.stat(index).st_mtime_ns}"
-    except OSError:
-        return index
+    stamps = []
+    for dirpath, dirnames, filenames in os.walk(os.path.dirname(index)):
+        dirnames[:] = [d for d in dirnames if d != "dev"]
+        for f in filenames:
+            try:
+                stamps.append(os.stat(os.path.join(dirpath, f)).st_mtime_ns)
+            except OSError:
+                pass
+    return f"{index}?v={max(stamps)}" if stamps else index
 
 
 def _storage_path():
@@ -799,7 +806,8 @@ def open_window(resident=False, hidden=False):
     holder["window"] = webview.create_window(
         f"TunnelVPN {paths.version()}", _page_url(index),
         # Спрятанным создаётся и видимое окно: покажет его Api.reveal.
-        js_api=api, width=1040, height=720, min_size=(880, 560), hidden=True,
+        # 720×520: карточки в одну колонку, кнопки шапки — значками с подсказкой.
+        js_api=api, width=1040, height=720, min_size=(720, 520), hidden=True,
         # Тот же фон, что --bg в index.html: иначе до загрузки страницы окно
         # белое и мигает на открытии.
         background_color="#101012")

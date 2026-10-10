@@ -1,0 +1,275 @@
+/* Тема одна, тёмная, по палитре AmneziaVPN. Все цвета, радиусы, тени,
+   длительности и отступы — здесь; компоненты берут только переменные.
+   Поверхности выводятся из фона через color-mix. Контраст статусов посчитан
+   на фоне карточки (--card ≈ #1c1c1e): текст ≥ 4.5:1, кроме --off — он только
+   для значков, у текста свой --off-text. */
+:root {
+  color-scheme: dark;
+  --bg:        #101012;
+  --white:     #fff;
+  --black:     #000;
+  --card:      color-mix(in srgb, var(--white) 5%, var(--bg));
+  --raised:    color-mix(in srgb, var(--white) 8%, var(--bg));
+  --hover:     color-mix(in srgb, var(--white) 11%, var(--bg));
+  --pressed:   color-mix(in srgb, var(--white) 14%, var(--bg));
+  --field:     color-mix(in srgb, var(--black) 25%, var(--bg));
+  --line:      color-mix(in srgb, var(--white) 9%, transparent);
+  --line-strong: color-mix(in srgb, var(--white) 18%, transparent);
+  --text:      #f4f4f6;
+  --dim:       #9a9aa6;
+
+  --ok:        #3df5a7;   /* 12.0:1 — точка со свечением */
+  --err:       #ff5c7a;   /*  5.7:1 — крест */
+  --warn:      #ffd23f;   /* 11.8:1 — треугольник */
+  --busy:      #5ac8fa;   /*  9.0:1 — кольцо-спиннер */
+  --off:       #6b6b76;   /*  3.2:1 — только значки: пустое кольцо */
+  --off-text:  #9a9aa6;   /*  6.1:1 */
+  --unset:     #e8e8ee;   /* 13.9:1 — пунктирное кольцо */
+  /* Бренд Amnezia. Только главная кнопка, рамка фокуса и бейдж AWG —
+     статус им не обозначается никогда, иначе спутался бы с --warn. */
+  --accent:    #fbb26a;   /*  9.5:1 */
+  --on-accent: #0e0e11;
+  --scrim:     color-mix(in srgb, var(--black) 58%, transparent);
+  --glass:     color-mix(in srgb, var(--raised) 86%, transparent);
+
+  --r-xs: 4px; --r-s: 6px; --r-m: 10px; --r-l: 14px; --r-pill: 999px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+  --hit: 32px;                       /* кликабельная зона кнопки-иконки */
+  --ic: 16px;
+
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, monospace;
+  --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-b: 14px; --fs-l: 16px; --fs-xl: 20px;
+
+  --ease: cubic-bezier(.32, .72, 0, 1);
+  --t-fast: 120ms; --t-mid: 200ms; --t-slow: 280ms;
+
+  --shadow-pop:   0 12px 32px color-mix(in srgb, var(--black) 55%, transparent);
+  --shadow-sheet: 0 24px 64px color-mix(in srgb, var(--black) 65%, transparent);
+  --glow: 0 0 10px 1px;              /* + цвет статуса: свечение орба и карточки */
+
+  --z-tip: 60; --z-toast: 50; --z-drop: 45; --z-sheet: 40; --z-pop: 30;
+}
+
+/* Цвет статуса — одной переменной: компонент берёт var(--st). */
+.st-ok    { --st: var(--ok); }
+.st-err   { --st: var(--err); }
+.st-warn  { --st: var(--warn); }
+.st-busy  { --st: var(--busy); }
+.st-off   { --st: var(--off); }
+.st-unset { --st: var(--unset); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --t-fast: 0ms; --t-mid: 0ms; --t-slow: 0ms; }
+}
+
+/* ------------------------------------------------------------------ база */
+* { box-sizing: border-box; }
+/* Без !important атрибут hidden проигрывает display:flex у самого элемента. */
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; background: var(--bg); }
+body {
+  font: var(--fs-b)/1.45 var(--sans);
+  color: var(--text);
+  display: grid; grid-template-rows: auto 1fr; height: 100vh;
+  overflow: hidden;                      /* прокручиваются панели, не окно */
+  -webkit-user-select: none; user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+#sprite, .offscreen { position: fixed; width: 0; height: 0; overflow: hidden; opacity: 0; }
+/* Значения выделяются и копируются; остальной интерфейс — нет. */
+.val, input, textarea, code, .mono { -webkit-user-select: text; user-select: text; }
+code, .mono { font-family: var(--mono); }
+code { font-size: .92em; background: var(--raised); padding: 1px var(--sp-1); border-radius: var(--r-xs); }
+
+.ic { width: var(--ic); height: var(--ic); flex: none; display: block; }
+.ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* Тонкие тёмные полосы прокрутки; прокрутка не утекает в окно. */
+.scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
+          scrollbar-color: var(--line-strong) transparent; }
+
+/* --------------------------------------------------------------- кнопки */
+button {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0;
+  cursor: pointer;
+}
+button:disabled { cursor: default; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  height: var(--hit); padding: 0 var(--sp-3); border-radius: var(--r-s);
+  background: var(--raised); border: 1px solid var(--line);
+  font-weight: 500; white-space: nowrap; flex: none;
+  transition: transform var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+.btn:hover:not(:disabled) { background: var(--hover); }
+.btn:active:not(:disabled) { transform: scale(.97); background: var(--pressed); }
+.btn:disabled { opacity: .45; }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+.btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 86%, var(--white)); }
+.btn.danger { color: var(--err); }
+.btn.danger.solid { background: var(--err); color: var(--on-accent); border-color: transparent; }
+.btn.ghost { background: none; border-color: transparent; }
+.btn.ghost:hover:not(:disabled) { background: var(--hover); }
+.btn .spin { display: none; }
+.btn.working .spin { display: block; animation: spin .9s linear infinite; }
+.btn.working .ic:not(.spin) { display: none; }
+
+/* Кнопка-иконка: зона 32×32, сам значок — 16. */
+.ibtn {
+  width: var(--hit); height: var(--hit); flex: none; border-radius: var(--r-s);
+  display: inline-grid; place-items: center; color: var(--dim);
+  transition: transform var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease),
+              color var(--t-fast) var(--ease);
+}
+.ibtn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.ibtn:active:not(:disabled) { transform: scale(.94); }
+.ibtn:disabled { opacity: .4; }
+.ibtn.working .ic { animation: spin .9s linear infinite; }
+
+.link { color: var(--accent); font-size: var(--fs-m); }
+.link:hover { text-decoration: underline; }
+
+/* Фокус — только с клавиатуры (body.kbd): при показе окна WebView2 сам ставит
+   фокус на первую кнопку, и рамка висела бы без всякой клавиатуры. */
+:focus { outline: none; }
+body.kbd :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes rise-in { from { opacity: 0; transform: translateY(8px); } }
+@keyframes pop-in { from { opacity: 0; transform: scale(.96); } }
+
+/* ------------------------------------------------------------ переключатель */
+.switch {
+  position: relative; width: 36px; height: 20px; flex: none; border-radius: var(--r-pill);
+  background: var(--pressed); border: 1px solid var(--line-strong);
+  transition: background-color var(--t-mid) var(--ease);
+}
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--dim);
+  transition: transform var(--t-mid) var(--ease), background-color var(--t-mid) var(--ease);
+}
+.switch[aria-checked="true"] { background: color-mix(in srgb, var(--ok) 30%, var(--raised)); border-color: transparent; }
+.switch[aria-checked="true"]::after { transform: translateX(16px); background: var(--ok); }
+.switch:disabled { opacity: .45; }
+.switch.pending::after { animation: pulse 1s var(--ease) infinite alternate; }
+@keyframes pulse { to { opacity: .35; } }
+
+/* Сегментированный контрол — вкладки и чипы-фильтры. */
+.seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--r-s);
+       background: var(--card); border: 1px solid var(--line); }
+.seg > button { height: 26px; padding: 0 var(--sp-3); border-radius: var(--r-xs);
+                color: var(--dim); font-size: var(--fs-m); font-weight: 500;
+                transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
+.seg > button:hover { color: var(--text); }
+.seg > button[aria-selected="true"], .seg > button[aria-pressed="true"] { background: var(--pressed); color: var(--text); }
+
+/* ------------------------------------------------------------ орб статуса */
+/* Форма — значок из спрайта, цвет — --st. Свечение на ::after с готовой
+   тенью: анимируется только его opacity. */
+.orb { position: relative; width: 16px; height: 16px; flex: none; color: var(--st, var(--off)); }
+.orb .ic { width: 100%; height: 100%; position: relative; }
+.orb::after {
+  content: ""; position: absolute; inset: 3px; border-radius: 50%;
+  box-shadow: var(--glow) var(--st, transparent); opacity: 0;
+  transition: opacity var(--t-mid) var(--ease);
+}
+.orb.st-ok::after { opacity: .9; }
+.orb.st-busy .ic { animation: spin 1s linear infinite; }
+.orb.big { width: 22px; height: 22px; }
+@media (prefers-reduced-motion: reduce) {
+  .orb.st-busy .ic, .btn.working .spin, .ibtn.working .ic { animation-duration: 3s; }
+  .switch.pending::after { animation: none; }
+}
+
+/* ----------------------------------------------------------- шапка, вкладки */
+#bar { display: grid; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4) 0; }
+#tabs { justify-self: start; }
+#panes { min-height: 0; display: grid; }
+.pane { min-height: 0; grid-area: 1 / 1; }
+
+/* ----------------------------------------------------------- всплывающее */
+/* Меню, поповер и подсказка — маленькие поверхности: только на них
+   backdrop-filter. */
+.pop {
+  position: fixed; z-index: var(--z-pop); min-width: 200px; max-width: min(420px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px); padding: var(--sp-1);
+  background: var(--glass); backdrop-filter: blur(16px) saturate(1.3);
+  border: 1px solid var(--line-strong); border-radius: var(--r-m);
+  box-shadow: var(--shadow-pop);
+  animation: pop-in var(--t-mid) var(--ease);
+  transform-origin: var(--origin, top right);
+}
+.pop.leaving { opacity: 0; transition: opacity var(--t-fast) var(--ease); }
+.menu { display: flex; flex-direction: column; }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: var(--sp-1) var(--sp-2); }
+.menu [role="menuitem"] {
+  display: flex; align-items: center; gap: var(--sp-2); text-align: left;
+  min-height: var(--hit); padding: 0 var(--sp-3); border-radius: var(--r-s); white-space: nowrap;
+}
+.menu [role="menuitem"] .ic { color: var(--dim); }
+.menu [role="menuitem"]:hover, .menu [role="menuitem"]:focus-visible { background: var(--hover); outline: none; }
+.menu [role="menuitem"].danger, .menu [role="menuitem"].danger .ic { color: var(--err); }
+.menu [role="menuitem"]:disabled { opacity: .45; }
+
+#tip {
+  position: fixed; z-index: var(--z-tip); max-width: 360px; pointer-events: none;
+  padding: var(--sp-1) var(--sp-2); border-radius: var(--r-s);
+  background: var(--glass); backdrop-filter: blur(12px);
+  border: 1px solid var(--line-strong); box-shadow: var(--shadow-pop);
+  font-size: var(--fs-s); line-height: 1.4; white-space: pre-line;
+  animation: fade-in var(--t-fast) var(--ease);
+}
+
+/* ------------------------------------------------------------- уведомления */
+#toasts {
+  position: fixed; z-index: var(--z-toast); right: var(--sp-4); bottom: var(--sp-4);
+  display: flex; flex-direction: column; align-items: flex-end; gap: var(--sp-2);
+  pointer-events: none; max-width: min(420px, calc(100vw - 32px));
+}
+.toast {
+  pointer-events: auto; display: flex; gap: var(--sp-2); align-items: flex-start;
+  padding: var(--sp-2) var(--sp-3); border-radius: var(--r-m);
+  background: var(--raised); border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-pop); font-size: var(--fs-m); cursor: pointer;
+  animation: rise-in var(--t-mid) var(--ease);
+}
+.toast .orb { margin-top: 2px; }
+.toast.leaving { opacity: 0; transform: translateY(4px);
+                 transition: opacity var(--t-mid) var(--ease), transform var(--t-mid) var(--ease); }
+
+/* ------------------------------------------------------------------- листы */
+#layer-sheet:empty { display: none; }
+.scrim {
+  position: fixed; inset: 0; z-index: var(--z-sheet); background: var(--scrim);
+  display: grid; place-items: end center; padding: var(--sp-6) var(--sp-4) 0;
+  animation: fade-in var(--t-slow) var(--ease);
+}
+.sheet {
+  width: min(640px, 100%); max-height: calc(100vh - 48px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--card); border: 1px solid var(--line-strong); border-bottom: 0;
+  border-radius: var(--r-l) var(--r-l) 0 0; box-shadow: var(--shadow-sheet);
+  animation: sheet-in var(--t-slow) var(--ease);
+}
+.sheet.wide { width: min(820px, 100%); }
+.sheet.ask { width: min(480px, 100%); }
+@keyframes sheet-in { from { transform: translateY(32px); opacity: 0; } }
+.scrim.leaving { opacity: 0; transition: opacity var(--t-mid) var(--ease); }
+.scrim.leaving .sheet { transform: translateY(24px); transition: transform var(--t-mid) var(--ease); }
+.sheet-head { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-5);
+              border-bottom: 1px solid var(--line); }
+.sheet-head h2 { flex: 1; margin: 0; font-size: var(--fs-l); font-weight: 600; }
+.sheet-body { padding: var(--sp-4) var(--sp-5); min-height: 0; }
+.sheet-body p { margin: 0 0 var(--sp-3); }
+.sheet-body p:last-child { margin-bottom: 0; }
+.sheet-body .note { color: var(--dim); font-size: var(--fs-m); }
+.sheet-foot { display: flex; gap: var(--sp-2); align-items: center; padding: var(--sp-3) var(--sp-5);
+              border-top: 1px solid var(--line); flex-wrap: wrap; }
+.sheet-foot .grow { flex: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet, .pop, .toast { animation-name: fade-in; }
+}

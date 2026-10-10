@@ -439,7 +439,7 @@ tunnelvpn service console     логика службы прямо в консо
 | служба, канал, права | Python 3.14, pywin32: служба под LocalSystem, именованный канал с проверкой прав вызывающего |
 | сеть Windows | маршруты, интерфейсы, NRPT — WMI (`root/StandardCimv2`), брандмауэр — COM (`HNetCfg`); PowerShell не запускается |
 | трей | pystray, значок рисуется Pillow; кружки в пунктах меню — WinAPI |
-| окно | pywebview 6 + pythonnet → WebView2 (есть в Windows 10/11); вёрстка — один `ui/index.html` на чистых HTML, CSS и JS, без фреймворков |
+| окно | pywebview 6 + pythonnet → WebView2 (есть в Windows 10/11); вёрстка — `ui/index.html`, `ui/app.css` и `ui/js/*.js` по разделам, на чистых HTML, CSS и JS, без фреймворков и сборщиков |
 | стиль | одна тёмная тема по палитре AmneziaVPN (`AmneziaStyle.qml`): фон `#101012`, акцент `#fbb26a`; оттенки выводятся через `color-mix`; шрифты Segoe UI Variable и Cascadia Mono; тёмный заголовок окна |
 | сборка | PyInstaller (три exe), Inno Setup (установщик), GitHub Actions (тесты на каждый push, сборка и релиз по тегу `v*`) |
 
@@ -472,7 +472,8 @@ lib/tunnelvpn/
   tray.py           значок в трее
   window.py         окно на WebView2, мост к вёрстке
   cli.py            консольное управление
-  ui/index.html     вёрстка окна
+  ui/               вёрстка окна: index.html, app.css, js/ по разделам;
+                    dev/ — мок моста для предпросмотра, в сборку не идёт
 installer/
   tunnelvpn.spec    PyInstaller
   tunnelvpn.iss     Inno Setup: служба, права на данные, задача трея, переезд с DualVPN

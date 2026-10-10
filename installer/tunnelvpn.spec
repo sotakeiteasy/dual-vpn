@@ -57,9 +57,21 @@ def version_info(description, filename):
             VarFileInfo([VarStruct("Translation", [0x0409, 1200])]),
         ])
 
-# Путь внутри сборки — тот, где его ищет paths.UI_DIR во frozen.
-datas = [
-    (os.path.join(ROOT, "lib", "tunnelvpn", "ui"), "tunnelvpn/ui"),
+def ui_datas():
+    """Вёрстка окна по файлу, без ui/dev: там мок моста и скриншоты
+    предпросмотра, в сборке им делать нечего. Путь внутри сборки — тот, где
+    его ищет paths.UI_DIR во frozen."""
+    ui = os.path.join(ROOT, "lib", "tunnelvpn", "ui")
+    out = []
+    for dirpath, dirnames, filenames in os.walk(ui):
+        dirnames[:] = [d for d in dirnames if d != "dev"]
+        rel = os.path.relpath(dirpath, ui).replace(os.sep, "/")
+        dest = "tunnelvpn/ui" if rel == "." else f"tunnelvpn/ui/{rel}"
+        out += [(os.path.join(dirpath, f), dest) for f in filenames]
+    return out
+
+
+datas = ui_datas() + [
     (os.path.join(ROOT, "VERSION"), "."),
 ]
 
