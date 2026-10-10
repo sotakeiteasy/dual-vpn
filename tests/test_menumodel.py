@@ -6,7 +6,20 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib", "scripts"))
 
+import i18n  # noqa: E402
 from menumodel import menu_model  # noqa: E402
+
+_LANG = i18n.LANG
+
+
+def setUpModule():
+    # Ожидания ниже — русские; на машине с английской системой язык иначе
+    # определился бы английским.
+    i18n.LANG = "ru"
+
+
+def tearDownModule():
+    i18n.LANG = _LANG
 
 IDLE = {"phase": "idle", "step": "", "busy": False, "error": "", "error_log": []}
 UP = {"tun": "utun7", "r_low": True, "exit_ip": "188.241.219.116",

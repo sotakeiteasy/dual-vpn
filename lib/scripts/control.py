@@ -26,6 +26,8 @@ import re
 import threading
 import time
 
+from i18n import t
+
 IDLE = "idle"
 STARTING = "starting"
 STOPPING = "stopping"
@@ -234,7 +236,7 @@ class Controller:
         try:
             err = body()
         except Exception as e:           # операция не имеет права залипнуть
-            err = f"внутренняя ошибка: {e}"
+            err = t(f"внутренняя ошибка: {e}", f"internal error: {e}")
         with self._lock:
             self.phase = IDLE
             self.step = ""
@@ -258,7 +260,7 @@ class Controller:
         self.on_change()
 
     def _do_start(self):
-        self._set_step("запускаю службу…")
+        self._set_step(t("запускаю службу…", "starting the service…"))
         t0 = self.clock()
         # Старая причина к новой попытке отношения не имеет. Если стереть не
         # вышло (чужой владелец файла), отсечёт проверка по времени ниже.
@@ -269,7 +271,7 @@ class Controller:
         if err:
             return err
 
-        self._set_step("поднимаю туннель…")
+        self._set_step(t("поднимаю туннель…", "bringing the tunnel up…"))
         seen = False
         gone_at = None
         while self.clock() - t0 < self.START_TIMEOUT:
@@ -296,14 +298,16 @@ class Controller:
                 # перед самым выходом.
                 elif now - gone_at >= self.GONE_GRACE and (seen or now - t0 > 2 * self.GONE_GRACE):
                     return (self.ops.last_error(since=t0)
-                            or "служба завершилась, не подняв туннель — причина в логе")
+                            or t("служба завершилась, не подняв туннель — причина в логе",
+                                 "the service exited without bringing the tunnel up — see the log"))
             self.sleep(self.poll)
 
         # Полуподнятое состояние хуже выключенного: маршруты могли встать,
         # а трафик не идёт. Убираем за собой и говорим, что не вышло.
-        self._set_step("не поднялся — убираю…")
+        self._set_step(t("не поднялся — убираю…", "didn't come up — cleaning up…"))
         self._stop_and_wait()
-        return f"туннель не поднялся за {int(self.START_TIMEOUT)} с"
+        n = int(self.START_TIMEOUT)
+        return t(f"туннель не поднялся за {n} с", f"the tunnel didn't come up in {n} s")
 
     def _do_stop(self):
         # Раз выключили руками, старая причина отказа больше не актуальна.
@@ -311,7 +315,7 @@ class Controller:
         return self._stop_and_wait()
 
     def _stop_and_wait(self):
-        self._set_step("выключаю…")
+        self._set_step(t("выключаю…", "turning off…"))
         t0 = self.clock()
         err = self.ops.stop()
         if err:
@@ -323,11 +327,13 @@ class Controller:
                 return ""
             elapsed = self.clock() - t0
             if elapsed >= self.STOP_TIMEOUT:
-                return (f"не выключился за {int(self.STOP_TIMEOUT)} с — "
-                        f"посмотри лог, возможно, остались маршруты")
+                n = int(self.STOP_TIMEOUT)
+                return t(f"не выключился за {n} с — посмотри лог, возможно, остались маршруты",
+                         f"didn't turn off in {n} s — check the log, routes may be left over")
             if elapsed >= self.STOP_ESCALATE and not escalated:
                 escalated = True
-                self._set_step("служба не выходит — убираю напрямую…")
+                self._set_step(t("служба не выходит — убираю напрямую…",
+                                 "the service won't exit — cleaning up directly…"))
                 self.log("управление: служба не вышла сама, уборка напрямую")
                 err = self.ops.stop_direct()
                 if err:
@@ -337,5 +343,5 @@ class Controller:
     def _do_restart(self):
         err = self._stop_and_wait()
         if err:
-            return f"перезапуск: не выключился — {err}"
+            return t(f"перезапуск: не выключился — {err}", f"restart: didn't turn off — {err}")
         return self._do_start()

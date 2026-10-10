@@ -13,10 +13,12 @@
 
 import re
 
+from i18n import t
+
 BUSY_TITLE = {
-    "starting":   "Включаю…",
-    "stopping":   "Выключаю…",
-    "restarting": "Перезапускаю…",
+    "starting":   ("Включаю…", "Turning on…"),
+    "stopping":   ("Выключаю…", "Turning off…"),
+    "restarting": ("Перезапускаю…", "Restarting…"),
 }
 
 # Длина строки в меню: длиннее — меню растягивается на пол-экрана.
@@ -52,13 +54,13 @@ def menu_model(st, op):
     """
     up = is_up(st)
     actions = {"start": False, "stop": False, "restart": False, "details": False}
-    out = {"icon": "off", "title": "Выключено", "note": "", "switch": False,
+    out = {"icon": "off", "title": t("Выключено", "Off"), "note": "", "switch": False,
            "rows": [], "actions": actions}
 
     if op.get("busy"):
         phase = op.get("phase")
         out["icon"] = "busy"
-        out["title"] = BUSY_TITLE.get(phase, "Подожди…")
+        out["title"] = t(*BUSY_TITLE.get(phase, ("Подожди…", "Please wait…")))
         out["note"] = _clip(op.get("step") or "")
         # Тумблер сразу встаёт туда, куда едем, — как у системного Wi-Fi.
         out["switch"] = phase != "stopping" if phase in BUSY_TITLE else up
@@ -66,7 +68,7 @@ def menu_model(st, op):
 
     if not up and op.get("error"):
         out["icon"] = "bad"
-        out["title"] = "Не удалось включить"
+        out["title"] = t("Не удалось включить", "Couldn't turn on")
         first = op["error"].strip().splitlines()[0] if op["error"].strip() else ""
         out["note"] = _clip(first)
         actions["start"] = True
@@ -90,40 +92,46 @@ def menu_model(st, op):
     leak6 = st.get("v6_leak")
     state = st.get("exit_state")
     if leak6:
-        out["icon"], out["title"] = "bad", "Утечка IPv6"
+        out["icon"], out["title"] = "bad", t("Утечка IPv6", "IPv6 leak")
     elif state == "leak":
-        out["icon"], out["title"] = "bad", "Трафик идёт мимо туннеля"
+        out["icon"], out["title"] = "bad", t("Трафик идёт мимо туннеля",
+                                             "Traffic bypasses the tunnel")
     elif state == "down":
-        out["icon"], out["title"] = "bad", "Туннель не работает — перезапусти"
+        out["icon"], out["title"] = "bad", t("Туннель не работает — перезапусти",
+                                             "Tunnel is down — restart it")
     elif corp_pending:
-        out["icon"], out["title"] = "on", "Проверяю туннели…"
+        out["icon"], out["title"] = "on", t("Проверяю туннели…", "Checking tunnels…")
     elif corp_off:
-        out["icon"], out["title"] = "on", "Работает только личный"
+        out["icon"], out["title"] = "on", t("Работает только личный", "Only personal is on")
     elif not corp_ok:
-        out["icon"], out["title"] = "on", "Корп не отвечает"
+        out["icon"], out["title"] = "on", t("Корп не отвечает", "Corp isn't responding")
     elif state == "off":
-        out["icon"], out["title"] = "on", "Работает только корп"
+        out["icon"], out["title"] = "on", t("Работает только корп", "Only corp is on")
     else:
-        out["icon"], out["title"] = "on", "Всё работает"
+        out["icon"], out["title"] = "on", t("Всё работает", "All working")
 
     # Без адресов: в меню они только перегружали строки, а смотрят их
     # в окне. Для личного важнее, где выход, чем какой у него IP.
     place = st.get("exit_country") or ""
+    off, checking, silent = t("выключен", "off"), t("проверяю…", "checking…"), \
+        t("не отвечает", "not responding")
     if state == "tunnel":
-        personal = {"value": place or "через туннель", "ok": True}
+        personal = {"value": place or t("через туннель", "via tunnel"), "ok": True}
     elif state == "leak":
-        personal = {"value": "мимо туннеля", "ok": False}
+        personal = {"value": t("мимо туннеля", "bypassing tunnel"), "ok": False}
     elif state == "down":
-        personal = {"value": "не отвечает", "ok": False}
+        personal = {"value": silent, "ok": False}
     elif state == "off":
-        personal = {"value": "выключен", "ok": None}
+        personal = {"value": off, "ok": None}
     else:
-        personal = {"value": "проверяю…", "ok": None}
+        personal = {"value": checking, "ok": None}
     if corp_off:
-        corp = {"value": "выключен", "ok": None}
+        corp = {"value": off, "ok": None}
     elif corp_pending:
-        corp = {"value": "проверяю…", "ok": None}
+        corp = {"value": checking, "ok": None}
     else:
-        corp = {"value": "на связи" if corp_ok else "не отвечает", "ok": corp_ok}
-    out["rows"] = [{"name": "Личный", **personal}, {"name": "Корп", **corp}]
+        corp = {"value": t("на связи", "connected") if corp_ok else silent, "ok": corp_ok}
+    # Порядок строк постоянный: menubar.py берёт иконку по номеру строки.
+    out["rows"] = [{"name": t("Личный", "Personal"), **personal},
+                   {"name": t("Корп", "Corp"), **corp}]
     return out

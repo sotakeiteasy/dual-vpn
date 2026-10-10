@@ -120,6 +120,7 @@ from PyObjCTools import AppHelper  # noqa: E402
 import control                    # noqa: E402
 import loginitem                  # noqa: E402
 import tui                        # noqa: E402
+from i18n import t                # noqa: E402
 from menumodel import menu_model   # noqa: E402
 from window import Window          # noqa: E402
 
@@ -141,8 +142,13 @@ def launchctl(*args):
     # чем повесить приложение на невидимом приглашении ввести пароль.
     err = (r.stderr or r.stdout).strip()
     if "password" in err.lower() or "sudo:" in err:
-        return "нет прав: переустанови (install-daemon.sh)"
-    return err or f"launchctl вернул {r.returncode}"
+        return no_rights()
+    return err or t(f"launchctl вернул {r.returncode}", f"launchctl returned {r.returncode}")
+
+
+def no_rights():
+    return t("нет прав: переустанови (install-daemon.sh)",
+             "no permission: reinstall (install-daemon.sh)")
 
 
 def stop_tunnel():
@@ -169,10 +175,11 @@ def stop_tunnel():
         return ""
     direct = (r.stderr or r.stdout).strip()
     if "password" in direct.lower() or direct.startswith("sudo:"):
-        direct = "нет прав: переустанови (install-daemon.sh)"
+        direct = no_rights()
     # Показываем обе причины: без первой непонятно, почему вообще дошло
     # до прямой уборки.
-    return f"{err}; напрямую тоже не вышло: {direct}"
+    return t(f"{err}; напрямую тоже не вышло: {direct}",
+             f"{err}; direct cleanup failed too: {direct}")
 
 
 def stop_direct():
@@ -190,8 +197,8 @@ def stop_direct():
         return ""
     err = (r.stderr or r.stdout).strip()
     if "password" in err.lower() or err.startswith("sudo:"):
-        return "нет прав: переустанови (install-daemon.sh)"
-    return err or f"vpn stop вернул {r.returncode}"
+        return no_rights()
+    return err or t(f"vpn stop вернул {r.returncode}", f"vpn stop returned {r.returncode}")
 
 
 def daemon_running():
@@ -268,12 +275,13 @@ class App(rumps.App):
         self.menu.add(self.status_item)
         self.menu.add(rumps.separator)
         self.act = {
-            "restart": menu_item("Перезапустить", "arrow.clockwise", self.on_restart),
-            "details": menu_item("Подробнее…", "info.circle", self.on_window),
+            "restart": menu_item(t("Перезапустить", "Restart"), "arrow.clockwise",
+                                 self.on_restart),
+            "details": menu_item(t("Подробнее…", "Details…"), "info.circle", self.on_window),
         }
         for it in self.act.values():
             self.menu.add(it)
-        self.menu.add(menu_item("Открыть окно…", "macwindow", self.on_window))
+        self.menu.add(menu_item(t("Открыть окно…", "Open Window…"), "macwindow", self.on_window))
         self.menu.add(rumps.separator)
         # Сразу с настоящей подписью: rumps хранит пункты по заголовку, и
         # пустой затёр бы шапку, у которой заголовок тоже пустой.
@@ -281,7 +289,7 @@ class App(rumps.App):
         self.show_pinned()
         self.menu.add(self.login_item)
         self.menu.add(rumps.separator)
-        self.menu.add(menu_item("Выход", "power", self.on_quit))
+        self.menu.add(menu_item(t("Выход", "Quit"), "power", self.on_quit))
 
         self.window = Window(BASE, tui.STATE, log, self.ctrl, DATA)
 
@@ -294,12 +302,12 @@ class App(rumps.App):
         self.window.start_update_checks()
         self.refresh(None)
         for fn, every in ((self.refresh, REFRESH), (self.blink, BLINK)):
-            t = rumps.Timer(fn, every)
-            t.start()
+            timer = rumps.Timer(fn, every)
+            timer.start()
             # rumps ставит таймер только в обычный режим цикла, а пока меню
             # открыто, цикл крутится в режиме отслеживания — и тумблер с
             # состоянием замирали бы до закрытия меню.
-            NSRunLoop.currentRunLoop().addTimer_forMode_(t._nstimer, NSRunLoopCommonModes)
+            NSRunLoop.currentRunLoop().addTimer_forMode_(timer._nstimer, NSRunLoopCommonModes)
 
     # ------------------------------------------------------------ кнопки
     #
@@ -323,7 +331,8 @@ class App(rumps.App):
                else loginitem.disable())
         log(f"{'закрепить' if on else 'открепить'}: {err or 'готово'}")
         if err:
-            rumps.notification("DualVPN", f"не удалось {'закрепить' if on else 'открепить'}", err)
+            rumps.notification("DualVPN", t("не удалось закрепить", "couldn't pin") if on
+                               else t("не удалось открепить", "couldn't unpin"), err)
         self.show_pinned()
 
     def show_pinned(self):
@@ -345,10 +354,10 @@ class App(rumps.App):
         # Уведомление — только о своей операции, закончившейся неудачей, и
         # только если окно закрыто: в окне ошибка и так видна целиком.
         if self._was_busy and not op["busy"] and op["error"] and not self.window.visible():
-            what = {"stopping": "выключить", "restarting": "перезапустить"}.get(
-                self._was_busy, "включить")
-            rumps.notification("DualVPN", f"Не удалось {what}",
-                               op["error"].splitlines()[0])
+            what = {"stopping": t("Не удалось выключить", "Couldn't turn off"),
+                    "restarting": t("Не удалось перезапустить", "Couldn't restart")}.get(
+                self._was_busy, t("Не удалось включить", "Couldn't turn on"))
+            rumps.notification("DualVPN", what, op["error"].splitlines()[0])
         self._was_busy = op["phase"] if op["busy"] else None
         self.refresh(None)
         self.window.push()
@@ -369,7 +378,7 @@ class App(rumps.App):
             # Всё равно выходим — человек попросил именно это. Но молча уйти
             # нельзя: туннель остался поднятым, и об этом надо сказать.
             log(f"выход: выключить не вышло — {err}")
-            rumps.notification("DualVPN", "туннель остался поднятым", err)
+            rumps.notification("DualVPN", t("туннель остался поднятым", "the tunnel is still up"), err)
         rumps.quit_application()
 
     def on_window(self, _):
@@ -377,7 +386,7 @@ class App(rumps.App):
             self.window.show()
         except Exception as e:
             log(f"окно не открылось: {e}")
-            rumps.notification("DualVPN", "окно не открылось", str(e))
+            rumps.notification("DualVPN", t("окно не открылось", "couldn't open the window"), str(e))
 
     def set_icon(self, name):
         """Значок-шаблон: macOS сама красит его под панель, как соседние.
@@ -436,7 +445,8 @@ DOT_COLOR = {"on": "systemGreenColor", "bad": "systemRedColor",
 # Иконка туннеля (SF Symbols) и её цвет. Без кружка и не акцентным цветом:
 # голубые кружки как у Wi-Fi спорили со строкой состояния и тянули взгляд на
 # себя. Красной иконка становится, только когда туннель не работает.
-ROW_SYMBOL = {"Личный": "globe", "Корп": "building.2"}
+# По порядку строк menu_model — личный, корп: имена переводятся, порядок нет.
+ROW_SYMBOL = ("globe", "building.2")
 ROW_COLOR = {True: "secondaryLabelColor", False: "systemRedColor", None: "tertiaryLabelColor"}
 
 
@@ -548,7 +558,7 @@ class StatusView:
             icon.setFrameOrigin_((x, y + (self.ROW_H - self.ICON) / 2))
             icon.setContentTintColor_(getattr(NSColor, ROW_COLOR[row["ok"]])())
             img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                ROW_SYMBOL.get(row["name"], "network"), row["name"])
+                ROW_SYMBOL[i] if i < len(ROW_SYMBOL) else "network", row["name"])
             icon.setImage_(img.imageWithSymbolConfiguration_(
                 NSImageSymbolConfiguration.configurationWithPointSize_weight_(
                     self.ICON_PT, NSFontWeightRegular)))
@@ -581,7 +591,8 @@ def menu_item(title, symbol, callback):
 
 
 def pin_title(pinned):
-    return "Открепить от меню" if pinned else "Закрепить в меню"
+    return (t("Открепить от меню", "Unpin from Menu Bar") if pinned
+            else t("Закрепить в меню", "Pin to Menu Bar"))
 
 
 def set_symbol(item, symbol):

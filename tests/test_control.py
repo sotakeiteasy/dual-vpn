@@ -17,6 +17,18 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib", "scripts"))
 
 import control  # noqa: E402
+import i18n  # noqa: E402
+
+_LANG = i18n.LANG
+
+
+def setUpModule():
+    # Ожидания ниже — русские; при английской системе язык был бы английским.
+    i18n.LANG = "ru"
+
+
+def tearDownModule():
+    i18n.LANG = _LANG
 
 
 class Clock:

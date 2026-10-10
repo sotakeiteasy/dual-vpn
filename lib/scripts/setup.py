@@ -41,7 +41,8 @@ OPTIONS = {
         "NSHumanReadableCopyright": "",
     },
     # tui даёт логику проб, остальное — то, чем она пользуется.
-    "includes": ["rumps", "tui", "window", "control", "menumodel", "update", "corpconf", "loginitem", "curses",
+    "includes": ["rumps", "tui", "window", "control", "menumodel", "update", "corpconf", "loginitem", "i18n",
+                 "curses",
                  "json", "re", "subprocess", "plistlib", "shutil",
                  "PyObjCTools.AppHelper"],
     # WebKit и AppKit нужны окну; py2app сам их не находит через objc.
