@@ -498,12 +498,16 @@ class Api:
         reply = self._admin_call("set-tunnel", tunnel=arg["tunnel"], **lists)
         if not reply.get("ok"):
             # Строка состояния — под листом: отказ («a.ru уже в «Работа»»)
-            # стоит под полями, лист остаётся открытым с набранным.
-            self.js("rulesFailed", reply.get("error") or "служба отказала")
+            # стоит под полями — по problems у своего поля, лист остаётся
+            # открытым с набранным.
+            self.js("rulesFailed", {"error": reply.get("error") or "служба отказала",
+                                    "problems": reply.get("problems", [])})
             return
+        # mode — туннель без «пускать» мог стать основным: у листа одно поле.
         self.js("rulesSaved", {"include": reply.get("include", []),
                                "exclude": reply.get("exclude", []),
-                               "rejected": reply.get("rejected", {})})
+                               "rejected": reply.get("rejected", {}),
+                               "mode": reply.get("mode", "")})
         self._apply()
 
     def _load_rules(self):

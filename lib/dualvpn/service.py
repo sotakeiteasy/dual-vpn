@@ -152,34 +152,39 @@ def _nets(entries):
     return out
 
 
+def _taken(a, b, out):
+    """Забирает ли подсеть b часть подсети a, не вынесенную в «не пускать» out."""
+    if a.version != b.version or not a.overlaps(b):
+        return False
+    # Подсети либо вложены, либо не пересекаются: общая часть — меньшая.
+    inner = a if a.prefixlen >= b.prefixlen else b
+    return not any(x.version == inner.version and inner.subnet_of(x) for x in out)
+
+
 def _clash(t, other, conf):
-    """Почему запись «пускать» туннеля t уже забирает other, иначе None.
+    """[(запись, причина)] записей «пускать» туннеля t, которые уже
+    забирает other; [] — не забирает.
 
     Порядок туннелей на маршрут не влияет (решение #16), а sing-box берёт
     первое совпавшее правило: запись, которую забирают два туннеля «по
     списку», ушла бы в тот, что выше в файле. Забирает — та же запись в его
     «пускать» или пересечение с его подсетями (AllowedIPs конфига conf и
-    «пускать»), не вынесенное там в «не пускать».
+    «пускать»), не вынесенное там в «не пускать». Все записи, а не первая:
+    окно показывает их под полем разом, а не по одной на каждое «Сохранить».
     """
     nets = _nets(other["include"])
     if conf:
         nets += _nets(buildconfig.allowed_nets(conf, v6=True))
     out = _nets(other["exclude"])
+    found = []
     for entry in t["include"]:
         if entry in other["include"]:
-            return f"«{entry}» уже в «{other['name']}»"
-        for a in _nets([entry]):
-            for b in nets:
-                if a.version != b.version or not a.overlaps(b):
-                    continue
-                # Подсети либо вложены, либо не пересекаются: общая часть — меньшая.
-                inner = a if a.prefixlen >= b.prefixlen else b
-                if not any(x.version == inner.version and inner.subnet_of(x)
-                           for x in out):
-                    return (f"«{entry}» из «{t['name']}» уже идёт через "
-                            f"«{other['name']}» — убери его здесь или впиши "
-                            f"туда в «не пускать»")
-    return None
+            found.append((entry, f"«{entry}» уже в «{other['name']}»"))
+        elif any(_taken(a, b, out) for a in _nets([entry]) for b in nets):
+            found.append((entry, f"«{entry}» из «{t['name']}» уже идёт через "
+                                 f"«{other['name']}» — убери его здесь или впиши "
+                                 f"туда в «не пускать»"))
+    return found
 
 
 class Core:
@@ -1362,11 +1367,13 @@ class Core:
         self.log(f"→ из туннеля «{t['name']}» удалён конфиг {name}.conf")
         if drop_tunnel and not tunnels.list_confs(t["id"]):
             data["tunnels"].remove(t)
+            up = self._promote(data) if t["mode"] == "all" else None
             try:
                 data = tunnels.save(data)
             except (OSError, ValueError) as exc:
                 return {"ok": False, "error": f"конфиг удалён, но туннель остался: {exc}"}
             self.log(f"→ удалён туннель {t['id']}")
+            self._log_promoted(up)
             self._drop_conf_dir(t["id"])
         elif t["active"] == name:
             # Активный указывал бы на удалённый файл, и следующее «Включить»
@@ -1423,6 +1430,9 @@ class Core:
                    "active": "", "include": [], "exclude": []}
             data["tunnels"].append(dst)
         self._keep_active(dst, tunnels.list_confs(dst["id"]), name)
+        # Ушёл последний конфиг основного вместе с ним. Сам перенесённый в dst
+        # не повышается: его и вынесли из основного «по списку».
+        up = self._promote(data, skip=dst) if drop and src["mode"] == "all" else None
         moved = tunnels.conf_path(dst["id"], name)
         try:
             os.makedirs(tunnels.conf_dir(dst["id"]), exist_ok=True)
@@ -1442,6 +1452,7 @@ class Core:
                  f"({dst['id']})")
         if drop:
             self.log(f"→ удалён туннель {src['id']}")
+            self._log_promoted(up)
             self._drop_conf_dir(src["id"])
         return {"ok": True, "tunnel": dst["id"], "name": name}
 
@@ -1525,7 +1536,11 @@ class Core:
         mode all — «всё остальное через этот туннель»: прежний основной
         становится «по списку», как переключатель; list у основного — всё
         остальное напрямую. Запись, которую уже забирает другой туннель «по
-        списку», — отказ (_clash).
+        списку», — отказ с problems [{field, text}]: окно ставит их под поля.
+
+        «Пускать» стёрто у полного конфига «по списку»: 0.0.0.0/0 в списке не
+        берётся (allowed_nets), и такой туннель не вёз бы ничего. Основного нет —
+        становится им (в ответе mode); есть — отказ с его именем.
         """
         try:
             data, t = self._load_target(tunnel)
@@ -1541,14 +1556,50 @@ class Core:
         for key in ("name", "mode"):
             if key in payload:
                 t[key] = payload[key]
-        why = self._clash_of(data, changed)
-        if why:
-            return {"ok": False, "error": why}
-        r = self._save_tunnels(data, f"изменён туннель {t['id']}")
+        main = tunnels.main_tunnel(data)
+        idle = "include" in payload and self._idle_full(data, t)
+        if idle and main is None:
+            t["mode"] = "all"
+        problems = self._clash_of(data, changed)
+        if idle and main is not None:
+            problems.append({"field": "include", "text":
+                             f"основной уже есть — «{main['name']}»: без «пускать» "
+                             f"этот туннель ничего не повезёт — впиши, что пускать "
+                             f"через него, или сделай его запасным к основному"})
+        if problems:
+            return {"ok": False, "problems": problems,
+                    "error": "; ".join(p["text"] for p in problems)}
+        r = self._save_tunnels(data, f"изменён туннель {t['id']}"
+                               + (" — без «пускать» стал основным"
+                                  if idle and main is None else ""))
         # Сохранённые списки — окну: поля показывают записи в том виде, как
-        # их понял routelist, рядом с непонятыми.
+        # их понял routelist, рядом с непонятыми; mode — туннель мог стать основным.
         return ({**r, "rejected": rejected, "include": t["include"],
-                 "exclude": t["exclude"]} if r["ok"] else r)
+                 "exclude": t["exclude"], "mode": t["mode"]} if r["ok"] else r)
+
+    def _idle_full(self, data, t):
+        """Полный конфиг «по списку» с пустым «пускать»: такой не везёт ничего."""
+        return (t["mode"] == "list" and not t["include"]
+                and _conf_full(t["id"], self._in_use(data)[t["id"]]))
+
+    def _promote(self, data, skip=None):
+        """Основной ушёл (удалён или перенесён) — им становится первый по
+        tunnels.json полный конфиг «по списку» без «пускать», кроме skip:
+        иначе он так и не вёз бы ничего. Остальные такие — как есть. Вызывать
+        до tunnels.save, только если основной был и ушёл этой командой: «Всё
+        остальное напрямую» — выбор человека, его не отменяем. Новый основной
+        или None — в журнал его пишет вызвавший, после записи файла."""
+        if tunnels.main_tunnel(data) is not None:
+            return None
+        for t in data["tunnels"]:
+            if t is not skip and self._idle_full(data, t):
+                t["mode"] = "all"
+                return t
+        return None
+
+    def _log_promoted(self, t):
+        if t is not None:
+            self.log(f"→ основного нет: «{t['name']}» без «пускать» стал основным")
 
     def _make_main(self, data, t):
         """Готовит t к режиму all: конфиг должен забирать весь трафик, иначе
@@ -1564,20 +1615,26 @@ class Core:
         return [main]
 
     def _clash_of(self, data, changed):
-        """Первый дубль записи «пускать» между туннелями «по списку», где хоть
-        один из changed; None — дублей нет. Старые дубли других пар правку
-        не держат: их порядок в файле не менялся."""
+        """Все дубли записей «пускать» между туннелями «по списку», где
+        хоть один из changed, — [{field: "include", text}] для листа окна; [] —
+        дублей нет. Старые дубли других пар правку не держат: их порядок в
+        файле не менялся. Изменённые — первыми: одна и та же запись у двух
+        туннелей — одна причина, словами листа изменённого («уже в «Лаб»»)."""
         confs = {t["id"]: c for t, c in self._list_confs(data)}
-        lists = [t for t in data["tunnels"] if t["mode"] == "list"]
         ids = {t["id"] for t in changed}
+        lists = sorted((t for t in data["tunnels"] if t["mode"] == "list"),
+                       key=lambda t: t["id"] not in ids)
+        seen, texts = set(), []
         for t in lists:
             for other in lists:
                 if other is t or not {t["id"], other["id"]} & ids:
                     continue
-                why = _clash(t, other, confs.get(other["id"]))
-                if why:
-                    return why
-        return None
+                for entry, why in _clash(t, other, confs.get(other["id"])):
+                    key = (frozenset((t["id"], other["id"])), entry)
+                    if key not in seen:
+                        seen.add(key)
+                        texts.append(why)
+        return [{"field": "include", "text": w} for w in texts]
 
     def _remove_tunnel(self, tunnel):
         """Убирает туннель вместе с папкой его конфигов."""
@@ -1586,8 +1643,10 @@ class Core:
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         data["tunnels"].remove(t)
+        up = self._promote(data) if t["mode"] == "all" else None
         r = self._save_tunnels(data, f"удалён туннель {t['id']}")
         if r["ok"]:
+            self._log_promoted(up)
             self._drop_conf_dir(t["id"])
         return r
 

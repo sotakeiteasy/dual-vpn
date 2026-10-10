@@ -117,7 +117,7 @@ def test_правила_уходят_текстом_поля_а_ответ_со_
     # Только присланные поля: exclude не пришёл — служба его не трогает.
     assert admin == [("set-tunnel", {"tunnel": "work", "include": "a.ru foo_bar"})]
     assert ("rulesSaved", {"include": ["a.ru"], "exclude": [],
-                           "rejected": {"include": ["foo_bar"]}}) in shown
+                           "rejected": {"include": ["foo_bar"]}, "mode": ""}) in shown
 
 
 def test_отказ_службы_показан_в_листе_и_ничего_не_применяется(monkeypatch):
@@ -125,9 +125,19 @@ def test_отказ_службы_показан_в_листе_и_ничего_н
                                 reply={"ok": False, "error": "«a.ru» уже в «Лаб»"})
 
     # Строка состояния — под листом: отказ должен стоять в самом листе.
-    assert ("rulesFailed", "«a.ru» уже в «Лаб»") in shown
+    assert ("rulesFailed", {"error": "«a.ru» уже в «Лаб»", "problems": []}) in shown
     assert "rulesSaved" not in [fn for fn, _ in shown]
     assert "apply" not in ops
+
+
+def test_проблемы_по_полям_доходят_до_листа(monkeypatch):
+    problems = [{"field": "include", "text": "«a.ru» уже в «Лаб»"},
+                {"field": "include", "text": "основной уже есть — «Личный»"}]
+    _, _, shown = _save_rules(monkeypatch, up=True,
+                              reply={"ok": False, "error": "x", "problems": problems})
+
+    # По полям, а не одной строкой: лист красит поле и пишет причины под ним.
+    assert ("rulesFailed", {"error": "x", "problems": problems}) in shown
 
 
 def test_правка_при_выключенном_vpn_не_включает_его(monkeypatch):

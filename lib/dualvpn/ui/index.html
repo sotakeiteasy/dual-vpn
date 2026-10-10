@@ -219,9 +219,11 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase;
                   border: 1px solid var(--line); background: var(--bg); color: var(--text);
                   -webkit-user-select: text; user-select: text; }
 .field textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.field textarea.bad { border-color: var(--bad); }
 .fhint { display: block; color: var(--dim); font-size: 12px; margin-top: 3px; }
 .fnote { display: block; color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
 .fnote.warn { color: var(--warn); }
+.fnote.bad  { color: var(--bad); white-space: pre-line; }
 #sheet-foot button.danger { color: var(--bad); }
 </style>
 
@@ -930,6 +932,14 @@ function saveRules() {
 // под полем, молча ничего не пропадает.
 function rulesSaved(r) {
   if (!RULES) return;
+  // Без «пускать» и без основного полный конфиг стал основным: у листа теперь
+  // одно поле — «Мимо VPN».
+  if (r.mode && r.mode !== RULES.mode) {
+    showRules({...RULES, mode: r.mode, include: r.include || [], exclude: r.exclude || []});
+    const n = document.getElementById('n-exclude');
+    if (n) n.textContent = 'сохранено · стал основным: всё остальное идёт через него';
+    return;
+  }
   ruleKeys(RULES).forEach(k => {
     RULES[k] = r[k] || [];
     const f = document.getElementById('f-' + k), n = document.getElementById('n-' + k);
@@ -938,15 +948,30 @@ function rulesSaved(r) {
     const bad = (r.rejected || {})[k] || [];
     n.textContent = `сохранено ${RULES[k].length}` + (bad.length ? ` · не понял: ${bad.join(', ')}` : '');
     n.classList.toggle('warn', bad.length > 0);
+    n.classList.remove('bad');
+    f.classList.remove('bad');
   });
 }
 
-// Отказ set-tunnel («a.ru уже в «Работа»», отменённый UAC): лист остаётся
-// открытым с набранным, причина — под первым полем, а не под листом.
-function rulesFailed(msg) {
+// Отказ set-tunnel: лист остаётся открытым с набранным. problems (дубли, второй
+// основной) — красным у своего поля; без них (отменённый UAC) — жёлтым под первым.
+function rulesFailed(r) {
   if (!RULES) return;
-  const n = document.getElementById('n-' + ruleKeys(RULES)[0]);
-  if (n) { n.textContent = msg; n.classList.add('warn'); }
+  const keys = ruleKeys(RULES), probs = r.problems || [];
+  keys.forEach(k => {
+    const f = document.getElementById('f-' + k), n = document.getElementById('n-' + k);
+    if (!f || !n) return;
+    const mine = probs.filter(p => p.field === k).map(p => p.text);
+    f.classList.toggle('bad', mine.length > 0);
+    n.classList.toggle('bad', mine.length > 0);
+    n.classList.remove('warn');
+    n.textContent = mine.join('\n');
+  });
+  // Поля проблемы в листе нет или их не прислали — причина целиком под первым полем.
+  if (!probs.some(p => keys.includes(p.field))) {
+    const n = document.getElementById('n-' + keys[0]);
+    if (n) { n.textContent = r.error; n.classList.add('warn'); }
+  }
 }
 
 // Из файла: JSON экспорта — по полям, просто текст — в первое поле.

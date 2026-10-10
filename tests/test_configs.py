@@ -445,7 +445,8 @@ def test_списки_разбираются_а_непонятое_возвра�
 
     # Сохранённые списки — в ответе: окно показывает «сохранено N» рядом с непонятым.
     assert r == {"ok": True, "rejected": {"include": ["foo_bar"]},
-                 "include": ["a.ru", "1.2.3.4/32", "*.b.ru"], "exclude": []}
+                 "include": ["a.ru", "1.2.3.4/32", "*.b.ru"], "exclude": [],
+                 "mode": "list"}
     t = tunnels.find(tunnels.load(), "work")
     assert t["include"] == ["a.ru", "1.2.3.4/32", "*.b.ru"]
     assert t["name"] == "Офис" and t["exclude"] == []
@@ -538,6 +539,95 @@ def test_прежний_основной_со_списком_проверяет�
 
     assert not r["ok"] and "«a.ru» уже в" in r["error"]
     assert [_tunnel(i)["mode"] for i in ("work", "home", "t1")] == ["list", "all", "list"]
+
+
+def test_все_дубли_полями_а_не_первый(core):
+    core._add_tunnel("Лаб", "list")
+    _put("t1", "lab.conf", _wg("10.53.0.0/16"))
+    core._set_tunnel("t1", {"include": "a.ru"})
+
+    r = core._set_tunnel("work", {"include": "a.ru 10.53.1.5 d.ru"})
+
+    # Окно ставит их под поле разом: по одной на «Сохранить» — исправлять по кругу.
+    assert not r["ok"]
+    texts = [p["text"] for p in r["problems"]]
+    assert {p["field"] for p in r["problems"]} == {"include"} and len(texts) == 2
+    assert texts[0] == "«a.ru» уже в «Лаб»"
+    assert "«10.53.1.5/32»" in texts[1] and "«Лаб»" in texts[1]
+    assert all(t in r["error"] for t in texts)
+    assert _tunnel("work")["include"] == []
+
+
+def test_полный_без_пускать_и_без_основного_становится_основным(core):
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"]}]})
+    _put("work", "nl.conf", FULL)
+
+    r = core._set_tunnel("work", {"include": ""})
+
+    assert r["ok"] and r["mode"] == "all"
+    assert _tunnel("work")["mode"] == "all"
+
+
+def test_полный_без_пускать_при_основном_отказ_с_его_именем(core):
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"]}, HOME]})
+    _put("work", "nl.conf", FULL)
+    _put("home", "de.conf", FULL)
+
+    r = core._set_tunnel("work", {"include": ""})
+
+    assert not r["ok"]
+    assert [p["field"] for p in r["problems"]] == ["include"]
+    assert "основной уже есть — «Личный»" in r["error"]
+    assert _tunnel("work")["include"] == ["a.ru"]
+    assert [_tunnel(i)["mode"] for i in ("work", "home")] == ["list", "all"]
+
+
+def test_неполный_без_пускать_остаётся_по_списку(core):
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"]}]})
+    _put("work", "corp.conf", _wg("10.53.0.0/16"))
+
+    r = core._set_tunnel("work", {"include": ""})
+
+    # Везёт свои AllowedIPs — ему «пускать» не нужно.
+    assert r["ok"] and _tunnel("work")["mode"] == "list"
+
+
+def test_всё_остальное_напрямую_не_отменяется_повышением(core):
+    _put("home", "de.conf", FULL)
+    core._add_tunnel("Лаб", "list")
+    _put("t1", "lab.conf")
+
+    assert core._set_tunnel("home", {"mode": "list"})["ok"]
+    assert core._remove_tunnel("t1")["ok"]
+
+    assert tunnels.main_tunnel(tunnels.load()) is None
+
+
+@pytest.mark.parametrize("remove", [
+    lambda core: core._remove_tunnel("home"),
+    lambda core: core._remove_config("de", tunnel="home", drop_tunnel=True),
+])
+def test_удалён_основной_повышается_первый_полный_без_пускать(core, remove):
+    nl = {"id": "t1", "name": "nl", "mode": "list"}
+    fi = {"id": "t2", "name": "fi", "mode": "list"}
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"]}, HOME, nl, fi]})
+    for tid, name in (("work", "w"), ("home", "de"), ("t1", "nl"), ("t2", "fi")):
+        _put(tid, name + ".conf", FULL)
+
+    assert remove(core)["ok"]
+
+    # У «Работы» есть «пускать» — она туннелирует; из двух пустых — первый.
+    assert [_tunnel(i)["mode"] for i in ("work", "t1", "t2")] == ["list", "all", "list"]
+    assert any("«nl»" in line and "основным" in line for line in core.logged)
+
+
+def test_вынесенный_из_основного_не_повышается_обратно(core):
+    _put("home", "de.conf", FULL)
+
+    r = core._move_config("home", "de", "new", drop_tunnel=True)
+
+    assert r["ok"] and _ids() == ["work", r["tunnel"]]
+    assert _tunnel(r["tunnel"])["mode"] == "list"
 
 
 def test_удаление_туннеля_убирает_его_конфиги(core):
