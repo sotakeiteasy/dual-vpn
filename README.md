@@ -1,4 +1,4 @@
-# DualVPN
+# TunnelVPN
 
 Два туннеля WireGuard одновременно: рабочий и личный. Подсети рабочего конфига
 идут в один туннель, всё остальное — в другой. Под капотом
@@ -27,7 +27,7 @@
 ## Устройство
 
 ```
-lib/dualvpn/
+lib/tunnelvpn/
   paths.py          где что лежит: код, данные, бинарники
   winnet.py         маршруты, интерфейсы, IPv6, DNS — через PowerShell
   buildconfig.py    .conf → config.json для sing-box
@@ -38,11 +38,11 @@ lib/dualvpn/
   portable.py       версия без установки: то же ядро, но в своём процессе
   tray.py           значок в трее
   window.py         окно на WebView2, мост к вёрстке
-  cli.py            консольное управление (dualvpn start/stop/status/...)
+  cli.py            консольное управление (tunnelvpn start/stop/status/...)
   ui/index.html     вёрстка окна
 installer/
-  dualvpn.spec      PyInstaller: два exe, одна общая папка
-  dualvpn.iss       Inno Setup: служба, права на данные, ярлыки
+  tunnelvpn.spec    PyInstaller: два exe, одна общая папка
+  tunnelvpn.iss     Inno Setup: служба, права на данные, ярлыки
   build.ps1         сборка целиком, от окружения до установщика
 conf/               .conf-файлы и site.env, вне гита
 ```
@@ -63,18 +63,18 @@ conf/               .conf-файлы и site.env, вне гита
 
 Три способа, от простого к полному.
 
-**Портативно — один файл.** `DualVPN-Portable.exe`: ни установки, ни службы.
+**Портативно — один файл.** `TunnelVPN-Portable.exe`: ни установки, ни службы.
 Двойной клик, один раз UAC — и значок в трее. Внутри уже всё, включая sing-box
-и wintun. Конфиги и состояние кладутся в `DualVPN-Data\` рядом с exe, так что
+и wintun. Конфиги и состояние кладутся в `TunnelVPN-Data\` рядом с exe, так что
 папку можно унести целиком.
 
 Отличие одно: туннель держит сам процесс, а не служба. «Закрыть»
 в трее в обеих версиях опускает туннель, возвращает маршруты и закрывает
 значок.
 
-**Установка.** `DualVPN-<версия>-setup.exe` ставит службу, ярлыки и автозапуск.
+**Установка.** `TunnelVPN-<версия>-setup.exe` ставит службу, ярлыки и автозапуск.
 Служба переживает выход из системы и перезагрузку. Трей при входе в систему
-поднимает задача планировщика «DualVPN Tray» с наивысшими правами — без
+поднимает задача планировщика «TunnelVPN Tray» с наивысшими правами — без
 UAC. Ярлык при живом трее только открывает окно, а без трея запускает ту же
 задачу; UAC спросит, только если автозапуск при установке сняли.
 
@@ -104,12 +104,12 @@ lib\venv\Scripts\pip install -r requirements.txt
 copy \путь\к\personal.conf conf\
 copy \путь\к\wg0-corp.conf conf\
 
-set DUALVPN_DATA=%cd%
-lib\venv\Scripts\python -m dualvpn.cli service console
+set TUNNELVPN_DATA=%cd%
+lib\venv\Scripts\python -m tunnelvpn.cli service console
 ```
 
 `service console` запускает логику службы прямо в консоли, без установки —
-удобно для разработки: трей (`python -m dualvpn.cli tray`) и окно подключатся
+удобно для разработки: трей (`python -m tunnelvpn.cli tray`) и окно подключатся
 к ней так же, как к настоящей службе.
 
 ## Сборка установщика
@@ -121,19 +121,24 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 Скрипт сам создаёт окружение на Python 3.14 (окружение на другой версии
 пересоздаёт), ставит закреплённые зависимости, рисует значок и собирает:
 
-* `dist\DualVPN-Portable.exe` — портативная версия, один файл;
-* `dist\DualVPN\` — установочная пара `DualVPN-Tray.exe` (трей) и `dualvpn.exe`
+* `dist\TunnelVPN-Portable.exe` — портативная версия, один файл;
+* `dist\TunnelVPN\` — установочная пара `TunnelVPN-Tray.exe` (трей) и `tunnelvpn.exe`
   (CLI и служба);
-* `installer\Output\DualVPN-<версия>-setup.exe` — если найден
+* `installer\Output\TunnelVPN-<версия>-setup.exe` — если найден
   [Inno Setup](https://jrsoftware.org/isdl.php). Без него сборка
   останавливается на готовых exe.
 
-Установщик заводит `C:\ProgramData\DualVPN` с раздельными правами (`conf\` —
+Установщик заводит `C:\ProgramData\TunnelVPN` с раздельными правами (`conf\` —
 только SYSTEM и администраторы, там приватные ключи; `state\` — пользователям
 на чтение, оттуда трей берёт состояние; кроме `state\run\` с собранными
 конфигами sing-box — он закрыт, как `conf\`), ставит службу на автозапуск и вешает
 ей перезапуск при падении. Удаление снимает туннель, службу и задачу
 автозапуска и спрашивает, удалять ли конфиги с ключами (по умолчанию — нет).
+
+Прежнюю установку под именем DualVPN установщик видит как свою прошлую
+версию: снимает её службу, задачу и ярлыки и переносит `C:\ProgramData\DualVPN`
+в `C:\ProgramData\TunnelVPN` вместе с конфигами и ключами. Портативная версия
+так же подхватывает `DualVPN-Data\` рядом с exe.
 
 ## Конфиги
 
@@ -145,7 +150,7 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 | личный | `personal.conf`, `awg-*.conf`, `amnezia-*.conf` | WireGuard или AmneziaWG |
 
 Рабочий должен быть ровно один, личных сколько угодно — переключаются в окне
-или профилем (`dualvpn profile <имя>`). У рабочего не должно быть
+или профилем (`tunnelvpn profile <имя>`). У рабочего не должно быть
 `AllowedIPs = 0.0.0.0/0`: маршруты берутся оттуда, и он заберёт весь трафик.
 
 Рабочая сеть описывается в `conf/site.env`. Проще всего — в окне, кнопкой
@@ -180,18 +185,18 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 ## Из консоли
 
 ```
-dualvpn status              что сейчас поднято
-dualvpn start [ПРОФИЛЬ]     поднять
-dualvpn stop                опустить и откатить маршруты
-dualvpn list                туннели и их конфиги (* — активный)
-dualvpn use ТУННЕЛЬ КОНФИГ  выбрать конфиг туннеля (туннель — id или имя)
-dualvpn profile ИМЯ         выбрать конфиг основного туннеля
-dualvpn log [N]             последние строки журнала sing-box
-dualvpn version
+tunnelvpn status              что сейчас поднято
+tunnelvpn start [ПРОФИЛЬ]     поднять
+tunnelvpn stop                опустить и откатить маршруты
+tunnelvpn list                туннели и их конфиги (* — активный)
+tunnelvpn use ТУННЕЛЬ КОНФИГ  выбрать конфиг туннеля (туннель — id или имя)
+tunnelvpn profile ИМЯ         выбрать конфиг основного туннеля
+tunnelvpn log [N]             последние строки журнала sing-box
+tunnelvpn version
 
-dualvpn service install     поставить и запустить службу (от администратора)
-dualvpn service remove
-dualvpn service start|stop|restart
+tunnelvpn service install     поставить и запустить службу (от администратора)
+tunnelvpn service remove
+tunnelvpn service start|stop|restart
 ```
 
 ## Особенности
