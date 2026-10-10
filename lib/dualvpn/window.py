@@ -215,13 +215,16 @@ class Api:
             self._export_rules(arg)
         elif name == "log_level":
             # Как флажок автозапуска: чем бы ни кончился UAC, галочка на
-            # странице вернётся к настоящему уровню.
+            # странице вернётся к настоящему уровню. Но только после _apply:
+            # уровень держит основной процесс, и применение — полный перезапуск
+            # VPN. Разблокированный раньше флажок давал второй клик посреди него,
+            # и служба отвечала «уже идёт».
             try:
                 self._guard(self._admin_call("set-log-level",
                                              level="debug" if arg else "info"))
+                self._apply()
             finally:
                 self.js("logLevelDone")
-            self._apply()
         elif name == "logs":
             self._push_logs()
         elif name == "install_daemon":
