@@ -115,7 +115,8 @@ def test_статус_отдаёт_туннели_без_их_правил(monke
     assert core._status()["tunnels"] == [
         {"id": "work", "name": "Работа", "mode": "list", "active": "corp",
          "confs": ["corp", "old"], "rules": 1, "full": False,
-         "check": "", "answer": "", "seq": 0, "last": "", "checking": False}]
+         "check": "", "answer": "", "seq": 0, "last": "", "checking": False,
+         "tests": {}}]
 
 
 def test_статус_отдаёт_уровень_журнала_для_галочки_окна(monkeypatch):

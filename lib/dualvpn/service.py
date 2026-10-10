@@ -210,6 +210,10 @@ class Core:
         # Туннели, чей DNS отвечает при таймаутах: «не перезапускаю» — раз на смену
         # состояния, а не на каждую пачку таймаутов к адресу чужой сети.
         self._side_said = set()
+        # Проверки конфигов (_test_conf): запись итога и временные процессы —
+        # по одному: у каждого свой host-маршрут и json в run\.
+        self._tests_lock = threading.Lock()
+        self._trial_lock = threading.Lock()
 
     # Сколько ещё попыток поднять туннель после неудачного переподключения.
     # Команда человека (start/stop) их отменяет: он уже решил сам.
@@ -226,6 +230,9 @@ class Core:
     _back_at = 0.0
     # Когда статистику адресов снова писать в PATHS_FILE.
     _paths_at = 0.0
+    # (id туннеля, имя конфига) → {result, answer, at, stamp, checking}: итоги
+    # _test_conf. Пишется новым словарём под _tests_lock: статус читает без замка.
+    _conf_checks = {}
 
     # ---------------------------------------------------------------- лог
 
@@ -323,10 +330,15 @@ class Core:
             self.set_autostart(bool(payload.get("on")))
             return {"ok": True, "autostart": self.autostart_enabled()}
         if op == "add-config":
-            return self._add_config(payload.get("name", ""),
-                                    payload.get("text", ""),
-                                    payload.get("kind", ""), tid,
-                                    payload.get("place", ""))
+            reply = self._add_config(payload.get("name", ""),
+                                     payload.get("text", ""),
+                                     payload.get("kind", ""), tid,
+                                     payload.get("place", ""))
+            if reply.get("ok"):
+                self._test_conf(reply["tunnel"], reply["name"], wait=False)
+            return reply
+        if op == "test-config":
+            return self._test_conf(tid, payload.get("name", ""))
         if op == "remove-config":
             return self._remove_config(payload.get("name", ""),
                                        payload.get("kind", ""), tid,
@@ -344,7 +356,11 @@ class Core:
             return self._add_tunnel(payload.get("name", ""),
                                     payload.get("mode", "list"))
         if op == "set-tunnel":
-            return self._set_tunnel(tid, payload)
+            reply = self._set_tunnel(tid, payload)
+            # Итог rules зависит от домена проверки из «пускать» и режима туннеля.
+            if reply.get("ok") and ("include" in payload or "mode" in payload):
+                self._test_active(tid)
+            return reply
         if op == "remove-tunnel":
             return self._remove_tunnel(tid)
         if op == "set-log-level":
@@ -391,7 +407,8 @@ class Core:
             seq = c.get("seq", 0)
             t.update(check=c.get("result", ""), answer=c.get("answer", ""),
                      seq=seq, last=last.get(t["id"], ""),
-                     checking=st["checking"] and seq < st.get("check_seq", 0))
+                     checking=st["checking"] and seq < st.get("check_seq", 0),
+                     tests=self._tests_of(t["id"], t["confs"]))
         # Раздельное туннелирование включено, когда у рабочего туннеля
         # есть правила; иначе кнопка в окне говорит «выключено».
         work = self._kind_tunnel("corp", data)
@@ -503,6 +520,96 @@ class Core:
             # last в статусе — уже из только что записанного.
             st = self._status()
         return {"ok": True, "status": st}
+
+    # ------------------------------------------------- проверка конфига
+
+    def _tests_of(self, tid, confs):
+        """{имя: {result, answer, at, checking}} проверок конфигов туннеля tid,
+        что лежат сейчас: заменённый файл — уже не тот конфиг."""
+        out = {}
+        for (owner, name), rec in self._conf_checks.items():
+            if (owner == tid and name in confs
+                    and rec.get("stamp") == self._conf_stamp(tid, name)):
+                out[name] = {k: rec.get(k) for k in ("result", "answer", "at", "checking")}
+        return out
+
+    def _note_test(self, key, **rec):
+        """Запись проверки key: новым словарём, прежний итог — если файл тот же."""
+        with self._tests_lock:
+            old = self._conf_checks.get(key) or {}
+            base = old if old.get("stamp") == rec.get("stamp") else {}
+            self._conf_checks = {**self._conf_checks, key: {**base, **rec}}
+
+    def _test_active(self, tunnel):
+        """В фоне проверяет конфиг, с которым туннель соберётся на включении."""
+        data = self._tunnels()
+        try:
+            tid = self._target(data, tunnel)["id"]
+        except ValueError:
+            return
+        name = self._in_use(data)[tid]
+        if name:
+            self._test_conf(tid, name, wait=False)
+
+    def _test_conf(self, tunnel, name, wait=True):
+        """Проверяет конфиг name туннеля: отвечает ли его сервер, — и при
+        выключенном VPN, и для запасного. Итог — в статусе (tunnels[].tests),
+        wait — и в ответе; без wait проверка идёт в потоке, а статус уже
+        показывает checking. Имя приходит через канал от кого угодно — сверяем
+        со списком, а не склеиваем в путь."""
+        try:
+            t = self._target(self._tunnels(), tunnel)
+            if name not in tunnels.list_confs(t["id"]):
+                raise ValueError(f"нет конфига {name}.conf в туннеле «{t['name']}»")
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        key = (t["id"], name)
+        self._note_test(key, stamp=self._conf_stamp(*key), checking=True)
+        if not wait:
+            threading.Thread(target=self._finish_test, args=(t, name),
+                             daemon=True).start()
+            return {"ok": True}
+        return {"ok": True, "test": self._finish_test(t, name)}
+
+    def _finish_test(self, t, name):
+        """Проверка после _test_conf: итог в _conf_checks и в журнал, его же — наружу."""
+        key = (t["id"], name)
+        stamp = self._conf_stamp(*key)
+        try:
+            with self._trial_lock:
+                result, answer = self._run_test(t, name)
+        except Exception as exc:
+            self.log(f"!! проверка {name}.conf упала: {exc!r}")
+            result, answer = "error", "проверка упала"
+        rec = {"result": result, "answer": answer, "at": time.time()}
+        self._note_test(key, stamp=stamp, checking=False, **rec)
+        self.log(f"→ проверка {name}.conf («{t['name']}»): {result or 'нет итога'}"
+                 + (f", {answer}" if answer else ""))
+        return {**rec, "checking": False}
+
+    def _run_test(self, t, name):
+        """(итог, ответ) конфига name туннеля t.
+
+        Тот же ключ уже работает в боковом процессе — проверка этого туннеля
+        пробером: второй процесс с ним увёл бы у живого сервер. Иначе —
+        временный sing-box (Tunnel.trial). Полный — конфиг основного туннеля или с
+        0.0.0.0/0; «по списку» без DNS и домена в «пускать» — none без запуска.
+        """
+        conf = _read_conf(t["id"], name)
+        if conf is None:
+            return "error", "конфиг не читается"
+        twin = self.tunnel.side_with_key(conf["interface"].get("privatekey"))
+        if twin:
+            return self.prober.check_one(twin, self.tunnel.delay)
+        full = t["mode"] == "all" or buildconfig.is_full(conf)
+        host = probe._probe_host(t) if t["mode"] == "list" else ""
+        dns = next(iter(buildconfig.conf_dns(conf)), "")
+        if not (full or dns or host):
+            return "none", ""
+        with self.tunnel.trial(t["id"], conf) as (link, err):
+            if err:
+                return "error", err
+            return probe.trial_check(link, full, host, dns)
 
     _singbox_cached = None
 

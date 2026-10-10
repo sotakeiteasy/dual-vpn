@@ -13,11 +13,14 @@
 открывался, а сервисы адреса выхода с общего адреса VPN отвечали 429.
 """
 
+import base64
 import functools
 import json
 import os
 import re
+import socket
 import ssl
+import struct
 import threading
 import time
 import urllib.error
@@ -45,6 +48,11 @@ LEGACY_SIDES = ("corp", "personal")
 DNS_ASK_NAME = "dns.msftncsi.com"
 # Ответ DNS без A-записи: сервер ответил, но имени не знает.
 DNS_NO_ADDR = "без адреса"
+# Чем проверять полный конфиг вне VPN, как delay у clash_api (tunnel.DELAY_URL).
+TRIAL_URL = "http://cp.cloudflare.com/generate_204"
+# Ответ проверки конфига, когда ответил его DNS: адрес домена — из рабочей
+# сети, а итог читает любой (test-config — без прав).
+BY_DNS = "по DNS"
 
 
 def _probe_host(tunnel):
@@ -93,6 +101,125 @@ def _check_result(p, got, st):
     if mine.get("http"):
         return "up", f"HTTP {mine['http']}"
     return "error", ""
+
+
+def _test_result(p, got):
+    """(итог, ответ) проверки конфига «по списку» p по ответам его части got:
+    как _check_result, но без адреса в ответе и с причиной молчания."""
+    result, answer = _check_result({**p, "running": True}, {p["id"]: got}, {})
+    if result == "up" and p["dns"]:
+        answer = BY_DNS
+    elif result == "error":
+        answer = "сервер не отвечает"
+    return result, answer
+
+
+def _proxy_url(link):
+    """http-вход временного процесса с логином — адресом прокси для urllib.
+    Логин — hex, пароль — urlsafe (buildconfig.new_link): экранировать нечего."""
+    return f"http://{link['username']}:{link['password']}@127.0.0.1:{link['port']}"
+
+
+def _recv_exact(sock, size):
+    buf = b""
+    while len(buf) < size:
+        chunk = sock.recv(size - len(buf))
+        if not chunk:
+            raise OSError("соединение закрыто")
+        buf += chunk
+    return buf
+
+
+def _dns_query(name, qid):
+    """Запрос A-записи name. Домен из «пускать» бывает кириллическим —
+    в idna; неверное имя — UnicodeError (ValueError)."""
+    labels = name.rstrip(".").encode("idna").split(b".")
+    qname = b"".join(bytes([len(x)]) + x for x in labels) + b"\0"
+    return struct.pack("!HHHHHH", qid, 0x0100, 1, 0, 0, 0) + qname + struct.pack("!HH", 1, 1)
+
+
+def _skip_name(msg, at):
+    """Позиция за именем в сообщении DNS (метки или указатель сжатия)."""
+    while True:
+        size = msg[at]
+        if size >= 0xC0:
+            return at + 2
+        if size == 0:
+            return at + 1
+        at += size + 1
+
+
+def _dns_addr(reply, qid):
+    """IPv4 из ответа DNS; '' — ответ без A-записи (и NXDOMAIN); None — это
+    не ответ на наш запрос."""
+    if len(reply) < 12:
+        return None
+    rid, flags, qd, an = struct.unpack("!HHHH", reply[:8])
+    if rid != qid or not flags & 0x8000:
+        return None
+    try:
+        at = 12
+        for _ in range(qd):
+            at = _skip_name(reply, at) + 4
+        for _ in range(an):
+            at = _skip_name(reply, at)
+            rtype, _, _, size = struct.unpack("!HHIH", reply[at:at + 10])
+            at += 10
+            if rtype == 1 and size == 4:
+                return socket.inet_ntoa(reply[at:at + 4])
+            at += size
+    except (IndexError, struct.error):
+        pass                  # обрезанный хвост: сервер всё равно ответил
+    return ""
+
+
+def _dns_via_proxy(link, server, name):
+    """Адрес name от DNS server через http-вход link: CONNECT на server:53
+    и запрос по TCP. DNS_NO_ADDR — ответил без адреса; '' — молчит. sing-box
+    отвечает на CONNECT до рукопожатия, поэтому мёртвый сервер — это
+    таймаут чтения ответа."""
+    auth = base64.b64encode(f"{link['username']}:{link['password']}".encode()).decode()
+    for _ in range(CORP_TRIES):
+        qid = int.from_bytes(os.urandom(2), "big")
+        try:
+            query = _dns_query(name, qid)
+            with socket.create_connection(("127.0.0.1", link["port"]),
+                                          CORP_HTTP_TIMEOUT) as sock:
+                sock.settimeout(CORP_HTTP_TIMEOUT)
+                sock.sendall(f"CONNECT {server}:53 HTTP/1.1\r\nHost: {server}:53\r\n"
+                             f"Proxy-Authorization: Basic {auth}\r\n\r\n".encode())
+                head = b""
+                while not head.endswith(b"\r\n\r\n") and len(head) < 4096:
+                    head += _recv_exact(sock, 1)
+                if head.split(b" ", 2)[1:2] != [b"200"]:
+                    continue
+                sock.sendall(struct.pack("!H", len(query)) + query)
+                size = struct.unpack("!H", _recv_exact(sock, 2))[0]
+                ip = _dns_addr(_recv_exact(sock, size), qid)
+        except (OSError, ValueError):
+            continue
+        if ip is not None:
+            return ip or DNS_NO_ADDR
+    return ""
+
+
+def trial_check(link, full, host, dns):
+    """(итог, ответ) конфига через http-вход link временного sing-box
+    (Tunnel.trial). Полный — HTTP 204 через него; «по списку» — как живой
+    туннель (_list_part): его DNS домен проверки host или DNS_ASK_NAME, без DNS —
+    HTTPS к host. Ни того, ни другого служба не запускает (none)."""
+    proxy = _proxy_url(link)
+    if full:
+        code = Prober._http_code(TRIAL_URL, proxy)
+        if code == "204":
+            return "up", "HTTP 204"
+        return "error", f"HTTP {code}" if code else "сервер не отвечает"
+    p = {"id": "", "mode": "list", "host": host, "dns": dns}
+    if dns:
+        got = {"dns": _dns_via_proxy(link, dns, host or DNS_ASK_NAME)}
+    else:
+        got = {"http": Prober._http_code(f"https://{host}", proxy) if host else ""}
+    return _test_result(p, got)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -463,6 +590,23 @@ class Prober:
         v6 = self._get("https://api6.ipify.org", 6)
         self.set(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
 
+    def check_one(self, tid, delay):
+        """(итог, ответ) одного живого туннеля — проверка конфига, с которым
+        он работает. Основной — delay(tag) через его socks (мс или None): выход
+        проверяет общая проверка, а здесь важен сервер; «по списку» —
+        тем же, чем probe_slow. Нет в собранном конфиге — ('', '')."""
+        p = next((p for p in self.check_plan() if p["id"] == tid), None)
+        if not p or not p["running"]:
+            return "", ""
+        if p["mode"] == "all":
+            ms = delay(buildconfig.socks_tag(tid))
+            return ("up", f"{ms} мс") if ms else ("error", "сервер не отвечает")
+        got = {}
+        if p["dns"] or p["host"]:
+            how = _list_part(p)
+            got[how] = (self._slow_dns if how == "dns" else self._slow_http)(p)
+        return _test_result(p, got)
+
     def tunnel_answer(self, tid):
         """Ответ DNS туннеля tid через туннель (_slow_dns): адрес или DNS_NO_ADDR —
         сервер жив; '' — молчит или DNS у туннеля нет."""
@@ -488,8 +632,9 @@ class Prober:
         return ""
 
     @staticmethod
-    def _http_code(url):
+    def _http_code(url, proxy=""):
         """Код ответа корп-сайта. Нас устраивает любой — важно, что он есть.
+        proxy — http-вход временного sing-box (trial_check).
 
         Даже 403 значит, что до сервера дошли: без туннеля не было бы и его.
 
@@ -499,7 +644,7 @@ class Prober:
         учётных записей. Прокси не берём — сайт ходит через туннель напрямую.
         """
         opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {}),
             urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),
             _NoRedirect())
         for _ in range(CORP_TRIES):

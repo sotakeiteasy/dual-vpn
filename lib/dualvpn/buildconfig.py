@@ -668,6 +668,17 @@ def side_config(ep, link, level="info"):
     }
 
 
+def trial_config(ep, link):
+    """Конфиг проверки одного конфига вне VPN (Tunnel.trial): как у бокового,
+    но вход http — проверке хватает urllib и CONNECT, socks в стандартной
+    библиотеке нет. AllowedIPs — весь адрес, как в сборке: DNS туннеля и адрес
+    проверки бывают вне подсетей конфига."""
+    peer = {**ep["peers"][0], "allowed_ips": ["0.0.0.0/0"]}
+    cfg = side_config({**ep, "peers": [peer]}, link)
+    cfg["inbounds"][0].update(type="http", tag="http-in")
+    return cfg
+
+
 def side_link(main_cfg, tid):
     """Порт и логин socks бокового процесса из основного конфига, иначе None."""
     for ob in main_cfg.get("outbounds", []):

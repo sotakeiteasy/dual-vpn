@@ -13,6 +13,7 @@
 лечится следующим включением, а не руками.
 """
 
+import contextlib
 import ctypes
 import datetime
 import json
@@ -38,6 +39,9 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Сколько ждём, пока боковой процесс откроет socks на loopback.
 SIDE_WAIT = 15
+
+# Журнал временного процесса проверки конфига (Tunnel.trial).
+TRIAL_PREFIX = "trial"
 
 # Чем clash_api меряет выход. Только по имени: голый 1.1.1.1 sing-box
 # через selector не меряет и отвечает таймаутом даже живому туннелю.
@@ -568,6 +572,89 @@ class Tunnel:
             time.sleep(0.25)
         self._stop_side(side)
         return f"процесс «{side.title}» не открыл socks за {SIDE_WAIT}с"
+
+    def side_with_key(self, key):
+        """id работающего бокового процесса с приватным ключом key, иначе None.
+
+        Второй процесс с тем же ключом увёл бы у него сервер: WireGuard
+        отвечает туда, откуда пришёл последний пакет, и живой туннель молчал бы
+        до своего следующего пакета.
+        """
+        if self.uplink is None or not key:
+            return None
+        for side in self.sides:
+            if not side.alive():
+                continue
+            eps = buildconfig.read_json(buildconfig.side_json(side.tid)).get("endpoints")
+            if eps and eps[0].get("private_key") == key:
+                return side.tid
+        return None
+
+    @contextlib.contextmanager
+    def trial(self, tid, conf):
+        """Временный sing-box с одним конфигом conf туннеля tid — проверить
+        его, не трогая основной процесс, tun и боковые. Отдаёт (связь, '')
+        — http-вход с логином на loopback (форма buildconfig.new_link), или
+        (None, короткая причина); подробности — в журнал службы, причину
+        читает любой.
+
+        При поднятом VPN к пиру — временный host-маршрут через аплинк, как
+        у боковых: без автоопределения интерфейса пакеты ушли бы в tun. Снимается
+        только свой: уже стоявший и взятый тем временем в журнал владения —
+        остаются. В журнал владения сам не пишет: mend_peer_routes ставил бы
+        снятый заново, а забытый host-маршрут к серверу VPN через свой же
+        шлюз безвреден. Собранный json — с ключом, удаляется на выходе.
+        """
+        tag = buildconfig.ep_tag(tid)
+        try:
+            ep = buildconfig.endpoint(conf, tag, 1280, self.log)
+        except SystemExit as exc:
+            self.log(f"!! проверка [{tag}]: {exc}")
+            yield None, "конфиг не собирается"
+            return
+        if not os.path.isfile(paths.SINGBOX):
+            yield None, "нет sing-box — переустанови приложение"
+            return
+        link = buildconfig.new_link()
+        path = os.path.join(paths.RUN, f"{TRIAL_PREFIX}-{tid}.json")
+        uplink, route, proc, logfile = self.uplink, None, None, None
+        got = None, "sing-box не запустился"
+        try:
+            try:
+                paths.ensure_dirs()
+                buildconfig.write_json(path, buildconfig.trial_config(ep, link))
+                peer = ep["peers"][0]["address"]
+                if (uplink and all(c in "0123456789." for c in peer)
+                        and not winnet.routes_for(f"{peer}/32")):
+                    winnet.add_routes([(f"{peer}/32", uplink[0], uplink[1], 1)])
+                    route = peer
+                logfile = self.open_log(TRIAL_PREFIX)
+                proc = subprocess.Popen(
+                    [paths.SINGBOX, "run", "-c", path, "--disable-color"],
+                    cwd=paths.BIN, stdout=logfile, stderr=subprocess.STDOUT,
+                    creationflags=_NO_WINDOW)
+                deadline = time.time() + SIDE_WAIT
+                while proc.poll() is None and time.time() < deadline:
+                    if _port_open(link["port"]):
+                        got = link, ""
+                        break
+                    time.sleep(0.25)
+                else:
+                    self.log(f"!! проверка [{tag}]: sing-box не открыл вход: "
+                             f"{_fatal_line(logfile.name)}")
+            except OSError as exc:
+                self.log(f"!! проверка [{tag}]: {exc}")
+            yield got
+        finally:
+            _end(proc)
+            if logfile is not None:
+                logfile.close()
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            if route and route not in self._peers_owned():
+                self.del_host_ours(route, want_gw=uplink[1])
 
     def _report_side(self, side, err):
         if err:

@@ -21,11 +21,13 @@ def test_чтение_состояния_доступно_всем(op):
     assert not ipc.requires_admin(op)
 
 
-@pytest.mark.parametrize("op", ["start", "stop", "apply", "set-profile", "set-active"])
+@pytest.mark.parametrize("op", ["start", "stop", "apply", "set-profile", "set-active",
+                                "test-config"])
 def test_управление_туннелем_доступно_вошедшему(op):
     """Включить и выключить — это кнопка в трее, а не повышение прав. apply
     только применяет уже записанное администратором — не больше, чем
-    выключить и включить."""
+    выключить и включить. test-config проверяет уже лежащий конфиг и отдаёт
+    только итог."""
     assert not ipc.requires_admin(op)
 
 
