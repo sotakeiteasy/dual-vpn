@@ -115,14 +115,20 @@ def legacy_default_personal(names):
 
 
 def check_conf_text(text):
-    """Похож ли текст на конфиг WireGuard. None — да, иначе причина отказа.
+    """Соберётся ли из текста туннель. None — да, иначе причина отказа.
 
     Ловит случайно выбранный не тот файл (site.env, пустой) до того, как он
-    ляжет в conf\\ вместо ключей.
+    ляжет в conf\\ вместо ключей, и конфиг, на котором встанет сборка: без
+    ключа или Endpoint, с опечаткой в числе. Правила — те же, что у endpoint:
+    иначе такой конфиг ложится и не даёт включить весь VPN.
     """
     sections = {line.strip().lower() for line in (text or "").splitlines()}
     if "[interface]" not in sections or "[peer]" not in sections:
         return "это не конфиг WireGuard: нет секции [Interface] или [Peer]"
+    try:
+        _endpoint(parse_text(text), "check", 1280)
+    except ValueError as exc:
+        return str(exc)
     return None
 
 
@@ -332,28 +338,44 @@ def peer_host(host, tag, log=print):
 
 def endpoint(conf, tag, default_mtu, log=print, resolve=True):
     """Строит sing-box endpoint из разобранного .conf. resolve=False — имя
-    пира остаётся именем: основному конфигу адрес пира не нужен."""
-    iface, peer = conf["interface"], conf["peer"]
-
-    for required, where in (("privatekey", iface), ("publickey", peer),
-                            ("endpoint", peer), ("allowedips", peer)):
-        if required not in where:
-            sys.exit(f"[{tag}] в конфиге нет обязательного поля {required}")
-
-    host, _, port = peer["endpoint"].rpartition(":")
-    if not port.isdigit():
-        sys.exit(f"[{tag}] Endpoint должен быть host:port, получено {peer['endpoint']!r}")
+    пира остаётся именем: основному конфигу адрес пира не нужен. Ошибка в
+    конфиге — выход сборки с причиной."""
+    try:
+        ep = _endpoint(conf, tag, default_mtu)
+    except ValueError as exc:
+        sys.exit(f"[{tag}] {exc}")
 
     # Имя резолвим ЗДЕСЬ, пока системный DNS ещё обычный. Иначе sing-box при
     # старте попробует резолвить его через свой же туннель, который в этот
     # момент не поднят, и упадёт с "context deadline exceeded".
     if resolve:
-        host = peer_host(host, tag, log)
+        peer = ep["peers"][0]
+        peer["address"] = peer_host(peer["address"], tag, log)
+
+    if any(ep.get(k) for k in AWG_JUNK) and ep["mtu"] > AWG_MTU_MAX:
+        print(f"  [{tag}] MTU {ep['mtu']} -> {AWG_MTU_MAX}: AWG с junk-параметрами")
+        ep["mtu"] = AWG_MTU_MAX
+    return ep
+
+
+def _endpoint(conf, tag, default_mtu):
+    """endpoint без резолва и потолка MTU. Конфиг, из которого его не
+    собрать, — ValueError с причиной: так его проверяет и check_conf_text."""
+    iface, peer = conf["interface"], conf["peer"]
+
+    for required, where in (("PrivateKey", iface), ("PublicKey", peer),
+                            ("Endpoint", peer), ("AllowedIPs", peer)):
+        if required.lower() not in where:
+            raise ValueError(f"в конфиге нет обязательного поля {required}")
+
+    host, _, port = peer["endpoint"].rpartition(":")
+    if not (host and port.isascii() and port.isdigit() and 0 < int(port) < 65536):
+        raise ValueError(f"Endpoint должен быть host:port, получено {peer['endpoint']!r}")
 
     ep = {
         "type": "wireguard",
         "tag": tag,
-        "mtu": as_int(iface.get("mtu", default_mtu), tag, "MTU"),
+        "mtu": _int(iface.get("mtu", default_mtu), "MTU"),
         "address": split_list(iface.get("address", "")),
         "private_key": iface["privatekey"],
         "peers": [{
@@ -367,15 +389,15 @@ def endpoint(conf, tag, default_mtu, log=print, resolve=True):
         ep["peers"][0]["pre_shared_key"] = peer["presharedkey"]
     if "persistentkeepalive" in peer:
         ep["peers"][0]["persistent_keepalive_interval"] = num_or_range(
-            peer["persistentkeepalive"], tag, "PersistentKeepalive")
+            peer["persistentkeepalive"], "PersistentKeepalive")
 
     # AWG-обфускация: числа как числа, magic-заголовки-диапазоны как строки.
     for k in AWG_INT:
         if k in iface:
-            ep[k] = as_int(iface[k], tag, k.capitalize())
+            ep[k] = _int(iface[k], k.capitalize())
     for k in AWG_HDR:
         if k in iface:
-            ep[k] = num_or_range(iface[k], tag, k.upper())
+            ep[k] = num_or_range(iface[k], k.upper())
     for k in AWG_CPS:
         if k in iface:
             ep[k] = iface[k]
@@ -384,27 +406,32 @@ def endpoint(conf, tag, default_mtu, log=print, resolve=True):
             ep[key] = iface[k]
     for k, key in AWG3_RANGE.items():
         if k in iface:
-            ep[key] = num_or_range(iface[k], tag, key)
+            ep[key] = num_or_range(iface[k], key)
     for k, key in AWG3_BOOL.items():
         if k in iface:
             ep[key] = iface[k].lower() in ("1", "true", "yes", "on")
-
-    if any(ep.get(k) for k in AWG_JUNK) and ep["mtu"] > AWG_MTU_MAX:
-        print(f"  [{tag}] MTU {ep['mtu']} -> {AWG_MTU_MAX}: AWG с junk-параметрами")
-        ep["mtu"] = AWG_MTU_MAX
     return ep
 
 
-def as_int(value, tag, field):
-    """Число из .conf. Опечатка — внятная ошибка с именем поля, а не трейсбек:
-    последняя строка вывода уходит в окно как причина отказа."""
+def _int(value, field):
+    """Число из .conf. Опечатка — ValueError с именем поля, а не трейсбек:
+    причина уходит в окно."""
     try:
         return int(str(value).strip())
     except ValueError:
-        sys.exit(f"[{tag}] {field} = {value!r}: ожидаю целое число")
+        raise ValueError(f"{field} = {value!r}: ожидаю целое число") from None
 
 
-def num_or_range(value, tag, field):
+def as_int(value, tag, field):
+    """_int для сборки: опечатка — выход с причиной, последняя строка вывода
+    уходит в окно."""
+    try:
+        return _int(value, field)
+    except ValueError as exc:
+        sys.exit(f"[{tag}] {exc}")
+
+
+def num_or_range(value, field):
     """Число или диапазон "min-max": "25" -> 25, "25-35" -> "25-35".
 
     Диапазоны пришли с AmneziaWG 2.0 (H1–H4) и 3.x (тайминги, keepalive).
@@ -413,9 +440,9 @@ def num_or_range(value, tag, field):
     v = str(value).strip()
     lo, sep, hi = v.partition("-")
     if not sep:
-        return as_int(v, tag, field)
-    as_int(lo, tag, field)
-    as_int(hi, tag, field)
+        return _int(v, field)
+    _int(lo, field)
+    _int(hi, field)
     return f"{lo.strip()}-{hi.strip()}"
 
 

@@ -245,11 +245,61 @@ def test_без_обязательного_поля_сборка_прекращ�
         buildconfig.endpoint(conf, "wg-corp", 1280)
 
 
-def test_порт_обязан_быть_числом(tmp_path):
-    text = CORP.replace("198.51.100.10:51820", "198.51.100.10:не-порт")
+@pytest.mark.parametrize("port", ["не-порт", "70000", "0", ""])
+def test_порт_обязан_быть_числом(tmp_path, port):
+    text = CORP.replace("198.51.100.10:51820", f"198.51.100.10:{port}")
     conf = buildconfig.parse_conf(_write(tmp_path, "corp.conf", text))
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match=r"\[wg-corp\] Endpoint должен быть host:port"):
         buildconfig.endpoint(conf, "wg-corp", 1280)
+
+
+def test_опечатка_в_числе_прекращает_сборку_с_именем_поля(tmp_path):
+    text = PERSONAL_AWG.replace("H2 = 100-200", "H2 = 100-2OO")
+    conf = buildconfig.parse_conf(_write(tmp_path, "p.conf", text))
+    with pytest.raises(SystemExit, match=r"\[awg-personal\] H2 = '2OO'"):
+        buildconfig.endpoint(conf, "awg-personal", 1280)
+
+
+# ------------------------------------------- проверка добавляемого конфига
+
+def _without(text, field):
+    return "\n".join(l for l in text.splitlines() if not l.strip().startswith(field))
+
+
+@pytest.mark.parametrize("text", [CORP, PERSONAL_AWG])
+def test_годный_конфиг_проходит_проверку(text):
+    assert buildconfig.check_conf_text(text) is None
+
+
+@pytest.mark.parametrize("text, reason", [
+    ("", "нет секции [Interface] или [Peer]"),
+    ("[Interface]\n[Peer]\n", "не хватает секции [Interface] или [Peer]"),
+    (_without(CORP, "PrivateKey"), "нет обязательного поля PrivateKey"),
+    (_without(CORP, "PublicKey"), "нет обязательного поля PublicKey"),
+    (_without(CORP, "Endpoint"), "нет обязательного поля Endpoint"),
+    (_without(CORP, "AllowedIPs"), "нет обязательного поля AllowedIPs"),
+    (CORP.replace(":51820", ""), "Endpoint должен быть host:port"),
+    (CORP.replace("198.51.100.10:51820", ":51820"), "Endpoint должен быть host:port"),
+    (CORP.replace(":51820", ":518x0"), "Endpoint должен быть host:port"),
+    (CORP.replace(":51820", ":65536"), "Endpoint должен быть host:port"),
+    (CORP.replace("DNS", "MTU = 1420a\nDNS"), "MTU = '1420a': ожидаю целое число"),
+    (PERSONAL_AWG.replace("Jc = 4", "Jc = four"), "Jc = 'four'"),
+    (PERSONAL_AWG.replace("H2 = 100-200", "H2 = 100-"), "H2 = ''"),
+    (PERSONAL_AWG.replace("PersistentKeepalive = 25", "PersistentKeepalive = x"),
+     "PersistentKeepalive = 'x'"),
+])
+def test_конфиг_без_сборки_отказывает_с_причиной(text, reason):
+    """Принятый такой конфиг ронял сборку на включении — и с ним весь VPN."""
+    assert reason in buildconfig.check_conf_text(text)
+
+
+def test_проверка_не_резолвит_имя_пира(monkeypatch):
+    """Проверка в службе: ждать DNS за адресом пира ей незачем."""
+    monkeypatch.setattr(buildconfig, "resolve_peer",
+                        lambda *a, **kw: pytest.fail("резолв при проверке"))
+
+    assert buildconfig.check_conf_text(
+        CORP.replace("198.51.100.10", "vpn.example.com")) is None
 
 
 # ------------------------------------------------------ резолв адреса пира

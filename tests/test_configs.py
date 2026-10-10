@@ -18,7 +18,8 @@ import pytest
 from tunnelvpn import buildconfig, paths, service, tunnels
 from tunnelvpn.service import Core
 
-WG = "[Interface]\nPrivateKey = x\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = y\n"
+WG = ("[Interface]\nPrivateKey = x\nAddress = 10.0.0.2/32\n\n[Peer]\nPublicKey = y\n"
+      "Endpoint = 203.0.113.9:51820\nAllowedIPs = 10.0.0.0/24\n")
 
 WORK = {"id": "work", "name": "Работа", "mode": "list"}
 HOME = {"id": "home", "name": "Личный", "mode": "all"}
@@ -284,11 +285,16 @@ def test_bom_от_блокнота_не_мешает(core):
     assert core._read_config("nl-1", "personal")["text"].startswith("[Interface]")
 
 
-@pytest.mark.parametrize("text", ["", "CORP_DOMAINS=\"x.local\"\n", "[Interface]\n"])
+@pytest.mark.parametrize("text", [
+    "", "CORP_DOMAINS=\"x.local\"\n", "[Interface]\n", "[Interface]\n[Peer]\n",
+    WG.replace("PrivateKey = x\n", ""),
+    WG.replace(":51820", ""),
+    WG.replace("Address", "MTU = 14OO\nAddress"),
+])
 def test_не_конфиг_не_ложится_и_ничего_не_удаляет(core, text):
     _put("work", "wg0-old.conf")
     r = core._add_config("corp", text, kind="corp")
-    assert not r["ok"]
+    assert not r["ok"] and r["error"]
     assert _files("work") == ["wg0-old.conf"]
     assert _active("work") == ""
 
