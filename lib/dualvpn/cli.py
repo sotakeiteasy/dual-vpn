@@ -81,6 +81,8 @@ def _print_status(st):
         # Выход сторож переключает раньше, чем проверка выхода его перемерит.
         if st.get("out") == "direct":
             state = "запасной, напрямую: личный не работает"
+        elif not any(t.get("mode") == "all" for t in st.get("tunnels") or []):
+            state = "напрямую: основного туннеля нет"
         print(f"  выход    : {st.get('exit_ip') or '—'} "
               f"{st.get('exit_country') or ''} {st.get('exit_city') or ''} — {state}")
         # HTTPS проверяют только у туннеля без DNS.

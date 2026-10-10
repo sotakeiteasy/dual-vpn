@@ -238,6 +238,8 @@ class Tray:
             return f"DualVPN — запасной выход напрямую: «{name}» не работает"
         if st.get("exit_state") == "leak":
             return f"DualVPN — УТЕЧКА, виден адрес провайдера ({exit_ip})"
+        if not main:
+            return "DualVPN — работает · всё остальное напрямую"
         return f"DualVPN — работает · {who} · выход {exit_ip}"
 
     # -------------------------------------------------------------- меню

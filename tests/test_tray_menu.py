@@ -82,6 +82,13 @@ def test_запасной_выход_в_подсказке_значка():
     assert "УТЕЧКА" not in app._title()
 
 
+def test_без_основного_подсказка_всё_остальное_напрямую():
+    app = tray.Tray.__new__(tray.Tray)
+    app.status = _up(_work(), exit_ip="5.6.7.8", exit_state="direct")
+
+    assert app._title() == "DualVPN — работает · всё остальное напрямую"
+
+
 @pytest.mark.parametrize("t, name", [
     ({}, None),
     ({"confs": ["nl-1"]}, "nl-1"),

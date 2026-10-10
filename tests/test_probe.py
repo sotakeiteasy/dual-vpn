@@ -42,6 +42,7 @@ def test_адрес_провайдера_на_запасном_выходе_не
     monkeypatch.setattr(probe.paths, "REAL_IP_FILE", str(real))
     monkeypatch.setattr(probe.Prober, "peer_addrs", lambda self: {})
     monkeypatch.setattr(probe.Prober, "_exit_info", lambda self: {"ip": "5.6.7.8"})
+    monkeypatch.setattr(probe.Prober, "main_tag", staticmethod(lambda: "wg-home"))
     p = probe.Prober()
     p.set(out=out)
 
@@ -647,5 +648,8 @@ def test_адрес_сервера_не_основного_туннеля_вых
     assert _exit(monkeypatch, tmp_path, "198.51.100.7", "198.51.100.7", "home") == "leak"
 
 
-def test_без_основного_туннеля_совпадение_с_пиром_не_в_счёт(monkeypatch, tmp_path):
-    assert _exit(monkeypatch, tmp_path, "203.0.113.9", "203.0.113.9", None) == "leak"
+@pytest.mark.parametrize("ip", ["203.0.113.9", "5.6.7.8"])
+def test_без_основного_туннеля_выход_напрямую_а_не_утечка(monkeypatch, tmp_path, ip):
+    # Всё, что не забрал туннель «по списку», без основного идёт напрямую —
+    # так задумано: адрес провайдера не «Трафик мимо туннеля».
+    assert _exit(monkeypatch, tmp_path, ip, ip, None) == "direct"

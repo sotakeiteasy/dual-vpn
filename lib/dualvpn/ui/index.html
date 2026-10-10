@@ -407,7 +407,8 @@ function render(s) {
                   title = silent.length === 1 ? `«${tname(silent[0])}» не отвечает` : 'Туннели не отвечают';
                   sub = silent.length < T.length ? 'остальные туннели работают' : 'туннели подняты, но молчат'; }
   else           { cls='ok';   title='Всё работает';
-                   sub = T.length > 1 ? 'туннели подняты' : 'туннель поднят'; }
+                   sub = !main ? 'всё остальное — напрямую, без VPN'
+                       : T.length > 1 ? 'туннели подняты' : 'туннель поднят'; }
 
   document.getElementById('dot').className = cls;
   document.getElementById('state-title').textContent = title;

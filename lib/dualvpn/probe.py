@@ -418,7 +418,11 @@ class Prober:
                 # Личный не работает, служба сама увела выход напрямую: адрес
                 # провайдера тут ожидаем, это не утечка.
                 state = "direct"
-            elif main_tag and ip == peers.get(main_tag):
+            elif not main_tag:
+                # Основного нет: всё, что не забрал туннель «по списку», идёт
+                # напрямую — так задумано, адрес провайдера тут не утечка.
+                state = "direct"
+            elif ip == peers.get(main_tag):
                 state = "tunnel"          # одноногий сервер, адреса совпали
             elif real and ip == real:
                 state = "leak"            # нас видно тем же адресом, что и без VPN
