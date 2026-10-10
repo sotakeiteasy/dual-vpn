@@ -363,7 +363,11 @@ class Core:
         if op == "set-tunnel":
             reply = self._set_tunnel(tid, payload)
             # Итог rules зависит от домена проверки из «пускать» и режима туннеля.
-            if reply.get("ok") and ("include" in payload or "mode" in payload):
+            # Ушёл запасным — проверка по туннелю, а у основного свой id.
+            moved = reply.get("moved")
+            if moved:
+                self._test_conf(moved["tunnel"], moved["name"], wait=False)
+            elif reply.get("ok") and ("include" in payload or "mode" in payload):
                 self._test_active(tid)
             return reply
         if op == "remove-tunnel":
@@ -1540,7 +1544,9 @@ class Core:
 
         «Пускать» стёрто у полного конфига «по списку»: 0.0.0.0/0 в списке не
         берётся (allowed_nets), и такой туннель не вёз бы ничего. Основного нет —
-        становится им (в ответе mode); есть — отказ с его именем.
+        становится им (в ответе mode); есть — конфиг уходит к нему запасным, а
+        туннель — вместе с ним (в ответе moved). Непустой «не пускать» так не
+        переносится: у запасного своих списков нет, молча его не теряем.
         """
         try:
             data, t = self._load_target(tunnel)
@@ -1560,12 +1566,15 @@ class Core:
         idle = "include" in payload and self._idle_full(data, t)
         if idle and main is None:
             t["mode"] = "all"
+        spare = idle and main is not None
         problems = self._clash_of(data, changed)
-        if idle and main is not None:
-            problems.append({"field": "include", "text":
-                             f"основной уже есть — «{main['name']}»: без «пускать» "
-                             f"этот туннель ничего не повезёт — впиши, что пускать "
-                             f"через него, или сделай его запасным к основному"})
+        if spare:
+            problems += self._spare_blocks(t, main, rejected)
+        if not problems and spare:
+            r = self._to_spare(data, t, main)
+            if r["ok"]:
+                return r
+            problems = [{"field": "include", "text": r["error"]}]
         if problems:
             return {"ok": False, "problems": problems,
                     "error": "; ".join(p["text"] for p in problems)}
@@ -1576,6 +1585,34 @@ class Core:
         # их понял routelist, рядом с непонятыми; mode — туннель мог стать основным.
         return ({**r, "rejected": rejected, "include": t["include"],
                  "exclude": t["exclude"], "mode": t["mode"]} if r["ok"] else r)
+
+    @staticmethod
+    def _spare_blocks(t, main, rejected):
+        """Почему полный конфиг t без «пускать» не уходит запасным к main —
+        [{field, text}] для листа окна. Непонятое в полях тоже держит: с
+        удалённым туннелем оно пропало бы молча."""
+        out = [{"field": k, "text": "не понял: " + ", ".join(bad)}
+               for k, bad in rejected.items() if bad]
+        texts = []
+        if t["exclude"]:
+            texts.append(f"без «пускать» конфиг станет запасным к «{main['name']}», а у "
+                       f"запасного своих списков нет — очисти и «не пускать» или "
+                       f"впиши, что пускать через него")
+        if len(tunnels.list_confs(t["id"])) > 1:
+            texts.append(f"у «{t['name']}» несколько конфигов — запасным к "
+                       f"«{main['name']}» уходит только единственный: убери лишние "
+                       f"или впиши, что пускать через него")
+        return out + [{"field": "include", "text": x} for x in texts]
+
+    def _to_spare(self, data, t, main):
+        """Единственный конфиг t — запасным к основному main, туннель t уходит
+        (как move-config to all с drop_tunnel). Ответ — moved для окна."""
+        name = self._in_use(data)[t["id"]]
+        r = self._move_config(t["id"], name, "all", drop_tunnel=True)
+        if not r["ok"]:
+            return r
+        return {"ok": True, "moved": {"tunnel": r["tunnel"], "name": name,
+                                      "main": main["name"]}}
 
     def _idle_full(self, data, t):
         """Полный конфиг «по списку» с пустым «пускать»: такой не везёт ничего."""

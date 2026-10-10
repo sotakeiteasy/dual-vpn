@@ -568,18 +568,69 @@ def test_полный_без_пускать_и_без_основного_ста�
     assert _tunnel("work")["mode"] == "all"
 
 
-def test_полный_без_пускать_при_основном_отказ_с_его_именем(core):
-    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"]}, HOME]})
+def test_полный_без_пускать_при_основном_уходит_к_нему_запасным(core):
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"]}, {**HOME, "active": "de"}]})
     _put("work", "nl.conf", FULL)
     _put("home", "de.conf", FULL)
 
     r = core._set_tunnel("work", {"include": ""})
 
+    assert r == {"ok": True, "moved": {"tunnel": "home", "name": "nl", "main": "Личный"}}
+    assert _ids() == ["home"] and _tunnel("home")["active"] == "de"
+    assert tunnels.list_confs("home") == ["de", "nl"]
+    assert not os.path.exists(tunnels.conf_dir("work"))
+
+
+def test_полный_без_пускать_с_не_пускать_остаётся_туннелем(core):
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"], "exclude": ["b.ru"]}, HOME]})
+    _put("work", "nl.conf", FULL)
+    _put("home", "de.conf", FULL)
+
+    r = core._set_tunnel("work", {"include": ""})
+
+    # У запасного своих списков нет: «не пускать» молча не теряется.
     assert not r["ok"]
     assert [p["field"] for p in r["problems"]] == ["include"]
-    assert "основной уже есть — «Личный»" in r["error"]
+    assert "запасным к «Личный»" in r["error"] and "«не пускать»" in r["error"]
     assert _tunnel("work")["include"] == ["a.ru"]
-    assert [_tunnel(i)["mode"] for i in ("work", "home")] == ["list", "all"]
+    assert tunnels.list_confs("work") == ["nl"]
+
+
+def test_полный_с_непонятым_в_пускать_не_уходит_запасным(core):
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"]}, HOME]})
+    _put("work", "nl.conf", FULL)
+    _put("home", "de.conf", FULL)
+
+    r = core._set_tunnel("work", {"include": "foo_bar"})
+
+    # Список пуст, но человек что-то вписал: с удалённым туннелем это пропало бы.
+    assert not r["ok"]
+    assert r["problems"] == [{"field": "include", "text": "не понял: foo_bar"}]
+    assert _ids() == ["work", "home"]
+
+
+def test_полный_без_пускать_с_тем_же_именем_в_основном_отказ_полем(core):
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"]}, HOME]})
+    _put("work", "nl.conf", FULL)
+    _put("home", "nl.conf", FULL)
+
+    r = core._set_tunnel("work", {"include": ""})
+
+    assert not r["ok"]
+    assert r["problems"] == [{"field": "include", "text": "в «Личный» уже есть nl.conf"}]
+    assert _ids() == ["work", "home"] and _tunnel("work")["include"] == ["a.ru"]
+
+
+def test_полный_без_пускать_с_несколькими_конфигами_не_переносится(core):
+    tunnels.save({"tunnels": [{**WORK, "include": ["a.ru"], "active": "nl"}, HOME]})
+    _put("work", "nl.conf", FULL)
+    _put("work", "fi.conf", FULL)
+    _put("home", "de.conf", FULL)
+
+    r = core._set_tunnel("work", {"include": ""})
+
+    assert not r["ok"] and "несколько конфигов" in r["error"]
+    assert tunnels.list_confs("work") == ["fi", "nl"]
 
 
 def test_неполный_без_пускать_остаётся_по_списку(core):

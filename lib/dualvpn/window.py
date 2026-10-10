@@ -503,6 +503,11 @@ class Api:
             self.js("rulesFailed", {"error": reply.get("error") or "служба отказала",
                                     "problems": reply.get("problems", [])})
             return
+        if reply.get("moved"):
+            # Без «пускать» ушёл запасным к основному: туннеля, чей это лист, нет.
+            self.js("rulesMoved", reply["moved"])
+            self._apply()
+            return
         # mode — туннель без «пускать» мог стать основным: у листа одно поле.
         self.js("rulesSaved", {"include": reply.get("include", []),
                                "exclude": reply.get("exclude", []),

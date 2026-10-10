@@ -132,12 +132,22 @@ def test_отказ_службы_показан_в_листе_и_ничего_н
 
 def test_проблемы_по_полям_доходят_до_листа(monkeypatch):
     problems = [{"field": "include", "text": "«a.ru» уже в «Лаб»"},
-                {"field": "include", "text": "основной уже есть — «Личный»"}]
+                {"field": "include", "text": "очисти и «не пускать»"}]
     _, _, shown = _save_rules(monkeypatch, up=True,
                               reply={"ok": False, "error": "x", "problems": problems})
 
     # По полям, а не одной строкой: лист красит поле и пишет причины под ним.
     assert ("rulesFailed", {"error": "x", "problems": problems}) in shown
+
+
+def test_ушёл_запасным_лист_закрывается_и_применяется(monkeypatch):
+    moved = {"tunnel": "home", "name": "nl", "main": "Личный"}
+    ops, _, shown = _save_rules(monkeypatch, up=True, reply={"ok": True, "moved": moved})
+
+    # Туннеля листа больше нет: не rulesSaved с его полями, а закрыть и пересобрать.
+    assert ("rulesMoved", moved) in shown
+    assert "rulesSaved" not in [fn for fn, _ in shown]
+    assert "apply" in ops
 
 
 def test_правка_при_выключенном_vpn_не_включает_его(monkeypatch):
