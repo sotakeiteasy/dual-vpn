@@ -1,9 +1,11 @@
 """Рисует TunnelVPN.ico для exe и установщика.
 
 Сам значок рисует lib/tunnelvpn/icon.py: тот же ico нужен окну, запущенному из
-исходников, и форма задана в одном месте.
+исходников, и форма задана в одном месте. --svg переписывает его копию
+assets/icon.svg — после правки рисунка (расхождение ловит tests/test_icon.py).
 
     python installer/make_icon.py [куда.ico]
+    python installer/make_icon.py --svg
 """
 
 import os
@@ -22,6 +24,12 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 def main():
+    if sys.argv[1:] == ["--svg"]:
+        out = os.path.join(ROOT, "assets", "icon.svg")
+        with open(out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(icon.svg())
+        print(f"собрано: {out}")
+        return
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         ROOT, "installer", "TunnelVPN.ico")
     icon.write_ico(out)

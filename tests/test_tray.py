@@ -307,7 +307,7 @@ def _wait_state(t, state):
     return t.state
 
 
-def test_пока_идёт_включение_значок_жёлтый_а_после_ошибки_красный(monkeypatch):
+def test_пока_идёт_включение_значок_операции_а_после_ошибки_красный(monkeypatch):
     release = threading.Event()
 
     def call(op, **_kw):
@@ -321,7 +321,7 @@ def test_пока_идёт_включение_значок_жёлтый_а_по�
 
     t.on_toggle()
     assert t.state == "busy"
-    # Опрос посреди команды не сбрасывает жёлтый, хотя служба ещё не занята.
+    # Опрос посреди команды не сбрасывает «занято», хотя служба ещё не занята.
     t._poll_once()
     assert t.state == "busy"
 
@@ -427,3 +427,60 @@ def test_кружки_без_vpn_и_без_итога_серые():
     assert tray._conf_colors({"up": False}, frozenset()) == {}
     st = {"up": False, "tunnels": [{"id": "work", "last": ""}, {"id": "home"}]}
     assert tray._conf_colors(st, frozenset()) == {"work": "off", "home": "off"}
+
+
+_MAIN = {"id": "home", "mode": "all"}
+_SIDE = {"id": "work", "mode": "list"}
+
+
+@pytest.mark.parametrize("st, state", [
+    ({}, "off"),
+    ({"last_error": "нет конфига"}, "error"),
+    ({"busy": "включаю", "last_error": "старая"}, "busy"),
+    ({"up": True, "busy": "перезапускаю «Работа»"}, "busy"),
+    ({"up": True, "tunnels": [_MAIN, _SIDE], "exit_state": "tunnel"}, "up"),
+    ({"up": True, "tunnels": [_MAIN], "out": "direct"}, "fallback"),
+    ({"up": True, "tunnels": [_MAIN], "exit_state": "direct"}, "fallback"),
+    ({"up": True, "tunnels": [_MAIN], "exit_state": "leak"}, "leak"),
+    ({"up": True, "tunnels": [_MAIN], "out": "direct", "v6_leak": "2a00::1"}, "leak"),
+    # Без основного напрямую идёт всё остальное — так задумано.
+    ({"up": True, "tunnels": [_SIDE], "exit_state": "direct"}, "up"),
+])
+def test_состояние_значка_по_статусу(st, state):
+    assert tray._tray_state(st) == state
+
+
+def test_без_основного_прямой_выход_не_запасной():
+    t = tray.Tray()
+    t.status = {"up": True, "tunnels": [_SIDE], "out": "direct", "exit_ip": "1.2.3.4"}
+
+    assert t._title() == "TunnelVPN — работает · всё остальное напрямую"
+
+
+def test_запасной_выход_меняет_значок_при_опросе(monkeypatch):
+    monkeypatch.setattr(ipc, "call", lambda op, **_kw: {"status": {
+        "up": True, "tunnels": [_MAIN], "out": "direct"}})
+    t = tray.Tray()
+
+    t._poll_once()
+
+    assert t.state == "fallback"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="HICON — только Windows")
+@pytest.mark.parametrize("size", [16, 20, 24])
+def test_значок_трея_грузится_в_своём_размере(size):
+    """20 точек при 125 % не переделывается ни в 16, ни в 32."""
+    pytest.importorskip("pystray")
+    import win32gui
+
+    from tunnelvpn import icon
+
+    hicon = tray._load_icon(icon.tray("up", size))
+    try:
+        _is_icon, _x, _y, mask, color = win32gui.GetIconInfo(hicon)
+        assert win32gui.GetObject(color).bmWidth == size
+        win32gui.DeleteObject(mask)
+        win32gui.DeleteObject(color)
+    finally:
+        win32gui.DestroyIcon(hicon)

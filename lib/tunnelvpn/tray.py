@@ -9,18 +9,21 @@
 запуске, а не на каждое добавление конфига. Права он поднимает сам (run), а не
 манифестом: ярлык к уже работающему трею открывает окно без UAC.
 
-Значок рисуется кодом, а не берётся из файла: он маленький, состояний у него
-четыре, и держать четыре .ico в сборке ради этого незачем. Заодно он сам
-подстраивается под тёмную и светлую тему панели задач.
+Значок рисуется кодом (icon.tray), а не берётся из файла: состояний
+шесть, и каждое рисуется сразу в размер трея при нынешнем масштабе экрана.
+Тёмная обводка держит его и на светлой, и на тёмной панели задач.
 """
 
 import functools
 import os
 import sys
+import tempfile
 import threading
 import time
 
 from . import instance, ipc, paths, tunnels, window
+from .icon import TRAY, rgba
+from .icon import tray as tray_image
 
 # Включение у службы идёт ~1,2 с: при опросе раз в три секунды жёлтый
 # «включаю» почти не попадал в опрос, если включали из окна.
@@ -47,14 +50,8 @@ TASK_OPEN_WAIT = 15.0
 TIP_MAX = 127
 INFO_MAX = 255
 
-# Цвета состояний. Взяты такими, чтобы отличаться и на светлой, и на тёмной
-# панели: серый заметно темнее любой из них, зелёный и красный — насыщенные.
-COLORS = {
-    "off": (128, 128, 128, 255),
-    "up": (46, 160, 67, 255),
-    "busy": (210, 153, 34, 255),
-    "error": (218, 54, 51, 255),
-}
+# Цвета состояний — те же, что у значка (icon.TRAY) и статусов окна.
+COLORS = {state: rgba(color) for state, (color, _mark) in TRAY.items()}
 
 # Длиннее имя конфига в меню обрезаем: меню растягивается по самому длинному
 # пункту, и имя файла в сотню знаков сделало бы его шириной в пол-экрана.
@@ -73,14 +70,33 @@ WM_LBUTTONDBLCLK = 0x0203
 
 
 def _icon_image(state):
-    """Кружок нужного цвета. Pillow приходит вместе с pystray."""
-    from PIL import Image, ImageDraw
+    """Значок состояния в размер трея. Pillow приходит вместе с pystray."""
+    return tray_image(state, _tray_size())
 
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse((6, 6, size - 6, size - 6), fill=COLORS.get(state, COLORS["off"]))
-    return img
+
+def _tray_size():
+    """Сторона значка в трее: 16 при 100 %, 20 при 125 %, 24 при 150 %.
+    Правду она говорит после _dpi_aware, до него всегда 16."""
+    import win32api
+    return win32api.GetSystemMetrics(49) or 16             # SM_CXSMICON
+
+
+def _tray_state(st):
+    """Состояние значка (ключ icon.TRAY) по статусу службы. Порядок — как
+    у заголовка окна: утечка IPv6 раньше запасного выхода, а на запасном
+    выходе адрес провайдера ожидаем, это не утечка."""
+    if st.get("busy"):
+        return "busy"
+    if not st.get("up"):
+        return "error" if st.get("last_error") else "off"
+    if st.get("v6_leak"):
+        return "leak"
+    main = tunnels.by_kind(st.get("tunnels") or [], "personal")
+    if main and "direct" in (st.get("out"), st.get("exit_state")):
+        return "fallback"
+    if st.get("exit_state") == "leak":
+        return "leak"
+    return "up"
 
 
 class Tray:
@@ -131,14 +147,7 @@ class Tray:
     def _poll_locked(self):
         try:
             self.status = ipc.call("status").get("status", {})
-            if self._pending or self.status.get("busy"):
-                new = "busy"
-            elif self.status.get("up"):
-                new = "up"
-            elif self.status.get("last_error"):
-                new = "error"
-            else:
-                new = "off"
+            new = "busy" if self._pending else _tray_state(self.status)
         except ipc.NotRunning:
             self.status = {}
             new = "error"
@@ -235,7 +244,9 @@ class Tray:
         name = main["name"] if main else "основной"
         who = st.get("profile") or name
         exit_ip = st.get("exit_ip") or "—"
-        if st.get("out") == "direct":
+        if st.get("v6_leak"):
+            return f"TunnelVPN — УТЕЧКА IPv6: {st['v6_leak']}"
+        if _tray_state(st) == "fallback":
             return f"TunnelVPN — запасной выход напрямую: «{name}» не работает"
         if st.get("exit_state") == "leak":
             return f"TunnelVPN — УТЕЧКА, виден адрес провайдера ({exit_ip})"
@@ -692,8 +703,15 @@ class Tray:
     def run(self, background=False):
         import pystray
 
+        _dpi_aware()
         _dark_menus()
-        self.icon = pystray.Icon(
+
+        class Icon(pystray.Icon):
+            def _assert_icon_handle(self):
+                if not self._icon_handle:
+                    self._icon_handle = _load_icon(self.icon)
+
+        self.icon = Icon(
             "tunnelvpn", _icon_image("off"), f"TunnelVPN {paths.version()}",
             menu=self._menu())
         self._hook_menu()
@@ -920,6 +938,46 @@ def _redraw_menus(hwnd):
         win32gui.EnumThreadWindows(tid, each, None)
     except Exception:                                      # noqa: BLE001
         pass                                               # меню уже закрыли
+
+
+def _dpi_aware():
+    """Трей в точках экрана, а не в 96 dpi. Иначе Windows отдаёт метрики
+    100 % и сама растягивает картинки: значок в 16 точек при 150 % выходил мылом,
+    как и кружки меню. По системе, а не по мониторам: значок в трее один
+    и рисуется под масштаб основного экрана. Зовётся до создания окон.
+    """
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)    # PROCESS_SYSTEM_DPI_AWARE
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
+def _load_icon(image):
+    """HICON из картинки ровно её размера.
+
+    Сам pystray пишет ico без списка размеров — Pillow кладёт туда только
+    стандартные стороны не больше картинки, и 20 точек при 125 % пропадает, — и
+    грузит его с LR_DEFAULTSIZE, то есть большим значком, который оболочка
+    потом сама ужимает до трея.
+    """
+    from pystray._util import win32
+
+    side = image.width
+    fd, path = tempfile.mkstemp(suffix=".ico")
+    os.close(fd)
+    try:
+        image.save(path, format="ICO", sizes=[(side, side)])
+        return win32.LoadImage(None, path, win32.IMAGE_ICON, side, side,
+                               win32.LR_LOADFROMFILE)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _dark_menus():
