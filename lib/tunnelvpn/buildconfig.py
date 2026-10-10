@@ -184,6 +184,15 @@ def is_full(conf):
     return False
 
 
+# Поля маскировки AmneziaWG: хоть одно в [Interface] — конфиг AWG, без них — WG.
+AWG_KEYS = (*AWG_INT, *AWG_HDR, *AWG_CPS, *AWG3_STR, *AWG3_RANGE, *AWG3_BOOL)
+
+
+def is_awg(conf):
+    """Конфиг AmneziaWG: в [Interface] есть поле маскировки (бейдж AWG в окне)."""
+    return any(k in conf["interface"] for k in AWG_KEYS)
+
+
 def _is_cidr(value):
     try:
         ipaddress.ip_network(value, strict=False)

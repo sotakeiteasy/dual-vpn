@@ -1330,7 +1330,7 @@ def test_сбой_записи_туннелей_возвращает_файл(co
 def test_полнота_конфига_перечитывается_после_правки(core, monkeypatch):
     """Статус спрашивают каждые пару секунд: файл читается заново, только
     когда сменилось время правки."""
-    monkeypatch.setattr(service, "_full_cache", {})
+    monkeypatch.setattr(service, "_conf_cache", {})
     _put("home", "nl-1.conf", FULL)
     path = tunnels.conf_path("home", "nl-1")
     os.utime(path, ns=(1_000_000_000, 1_000_000_000))
@@ -1341,3 +1341,20 @@ def test_полнота_конфига_перечитывается_после_�
     assert service._conf_full("home", "nl-1") is False
     assert service._conf_full("home", "") is False
     assert service._conf_full("home", "nope") is False
+
+
+@pytest.mark.parametrize("extra, awg", [
+    ("", False),
+    ("Jc = 4\nS1 = 15\n", True),
+    ("H1 = 1106457265\n", True),
+    ("I1 = <b 0xf6ab3267fa>\n", True),
+    ("HeaderProtectionKey = abc\n", True),
+])
+def test_бейдж_awg_по_полям_маскировки(core, monkeypatch, extra, awg):
+    """Бейдж WG/AWG в окне: AWG — любое поле маскировки в [Interface], и у
+    запасного тоже; файл без них — обычный WireGuard."""
+    monkeypatch.setattr(service, "_conf_cache", {})
+    _put("home", "nl-1.conf", FULL.replace("[Interface]\n", f"[Interface]\n{extra}"))
+
+    assert service._conf_facts("home", "nl-1") == {"full": True, "awg": awg}
+    assert service._conf_facts("home", "nope") == {"full": False, "awg": False}

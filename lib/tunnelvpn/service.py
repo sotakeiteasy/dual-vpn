@@ -100,27 +100,35 @@ def _read_conf(tid, name):
         return None
 
 
-# Полный ли конфиг, {путь: (mtime, итог)}: статус окно спрашивает каждые
-# пару секунд, а файл меняется редко.
-_full_cache = {}
+# Что статус знает о конфиге, {путь: (mtime, {full, awg})}: статус окно
+# спрашивает каждые пару секунд, а файл меняется редко.
+_conf_cache = {}
+_NO_FACTS = {"full": False, "awg": False}
 
 
-def _conf_full(tid, name):
-    """Есть ли у конфига туннеля 0.0.0.0/0; нет или не читается — False."""
+def _conf_facts(tid, name):
+    """{full, awg} конфига туннеля: 0.0.0.0/0 в AllowedIPs и поля маскировки
+    AmneziaWG; нет файла или не читается — оба False."""
     if not name:
-        return False
+        return _NO_FACTS
     try:
         path = tunnels.conf_path(tid, name)
         stamp = os.stat(path).st_mtime_ns
     except (OSError, ValueError):
-        return False
-    hit = _full_cache.get(path)
+        return _NO_FACTS
+    hit = _conf_cache.get(path)
     if hit and hit[0] == stamp:
         return hit[1]
     conf = _read_conf(tid, name)
-    full = bool(conf) and buildconfig.is_full(conf)
-    _full_cache[path] = (stamp, full)
-    return full
+    facts = {"full": bool(conf) and buildconfig.is_full(conf),
+             "awg": bool(conf) and buildconfig.is_awg(conf)}
+    _conf_cache[path] = (stamp, facts)
+    return facts
+
+
+def _conf_full(tid, name):
+    """Есть ли у конфига туннеля 0.0.0.0/0; нет или не читается — False."""
+    return _conf_facts(tid, name)["full"]
 
 
 def _private_dns(conf):
@@ -441,13 +449,16 @@ class Core:
         # любой (get-tunnels — администратору). Окну хватает числа записей (rules):
         # есть ли что терять при удалении. full — у выбранного конфига 0.0.0.0/0:
         # такой туннель «по списку» можно вернуть в основной (move-config).
+        # awg — бейдж WG/AWG у каждого конфига, запасные тоже.
         in_use = self._in_use(data)
         st["tunnels"] = [{"id": t["id"], "name": t["name"], "mode": t["mode"],
                           "active": t["active"], "enabled": t["enabled"],
-                          "confs": tunnels.list_confs(t["id"]),
+                          "confs": confs,
                           "rules": len(t["include"]) + len(t["exclude"]),
-                          "full": _conf_full(t["id"], in_use[t["id"]])}
-                         for t in data["tunnels"]]
+                          "full": _conf_full(t["id"], in_use[t["id"]]),
+                          "awg": {c: _conf_facts(t["id"], c)["awg"] for c in confs}}
+                         for t in data["tunnels"]
+                         for confs in [tunnels.list_confs(t["id"])]]
         # Итог проверки каждого туннеля; checking — как у сторон: туннель
         # проверен раньше соседей, его кружок уже свежий.
         last = self._last_results(data)
