@@ -612,10 +612,13 @@ class Tunnel:
         None, если без полного перезапуска не обойтись.
 
         Полный нужен, когда новая сборка меняет основной конфиг: набор туннелей,
-        подсети и DNS туннеля «по списку», MTU и IPv6 основного, правила, журнал.
+        подсети и DNS туннеля «по списку», MTU и IPv6 основного, правила.
         Основной процесс конфиг не перечитывает, а tun, маршруты и остальные
         туннели здесь не трогаем — интернет на перезапуск не падает. Пока лежит
         процесс основного туннеля, выход идёт напрямую.
+
+        Уровень журнала полного не требует: боковые перезапускаются с ним сразу,
+        основной возьмёт его на следующем включении — ради журнала tun не роняем.
         """
         if self.uplink is None or self.proc is None or self.proc.poll() is not None:
             return None
@@ -630,18 +633,35 @@ class Tunnel:
                 data, confs, self.log, links, _api_link(running), resolve=False)
         except SystemExit:
             return None
-        if json.loads(json.dumps(config)) != running:
+        if json.loads(json.dumps({**config, "log": None})) != {**running, "log": None}:
             return None
         stamps = {tid: _conf_stamp(path) for tid, path in confs.items()}
         main = tunnels.main_tunnel(data)
         self.profile = main["active"] if main else ""
         done = []
         for side in self.sides:
-            if stamps.get(side.tid) == side.source:
+            if stamps.get(side.tid) != side.source:
+                done.append((side, self._swap_side(side, sides[side.tid],
+                                                   stamps.get(side.tid))))
                 continue
-            done.append((side, self._swap_side(side, sides[side.tid],
-                                               stamps.get(side.tid))))
+            cfg = buildconfig.read_json(buildconfig.side_json(side.tid))
+            if cfg.get("log") != sides[side.tid].get("log"):
+                done.append((side, self._relog_side(side, cfg,
+                                                    sides[side.tid].get("log"))))
         return done
+
+    def _relog_side(self, side, cfg, log_cfg):
+        """Боковой процесс на новый уровень журнала: его работающий конфиг cfg,
+        сменена только секция log. Пира заново не резолвим — см. restart_side."""
+        if not cfg.get("endpoints"):
+            return f"конфиг процесса «{side.title}» не прочитать"
+        try:
+            buildconfig.write_json(buildconfig.side_json(side.tid),
+                                   {**cfg, "log": log_cfg})
+        except OSError as exc:
+            return f"конфиг процесса «{side.title}» не записать: {exc}"
+        self.log(f"→ сменился уровень журнала — перезапускаю процесс «{side.title}»")
+        return self._restart_out(side)
 
     def _swap_side(self, side, cfg, stamp):
         """Боковой процесс на новый конфиг cfg (пир ещё именем) из .conf с меткой
@@ -668,10 +688,14 @@ class Tunnel:
             return f"конфиг процесса «{side.title}» не записать: {exc}"
         # На диске уже новый: не поднимется — сторож поднимет его из этого файла.
         side.source = stamp
+        self.log(f"→ сменился конфиг «{side.title}» — перезапускаю только его процесс")
+        return self._restart_out(side)
+
+    def _restart_out(self, side):
+        """restart_side; пока лежит процесс основного туннеля — выход напрямую."""
         is_main = side is self.main
         if is_main:
             self.set_out(buildconfig.DIRECT_TAG)
-        self.log(f"→ сменился конфиг «{side.title}» — перезапускаю только его процесс")
         err = self.restart_side(side)
         if is_main and not err:
             self.set_out(buildconfig.socks_tag(side.tid))

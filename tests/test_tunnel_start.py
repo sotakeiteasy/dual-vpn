@@ -679,6 +679,33 @@ def test_сменился_основной_конфиг_нужен_полный_
     assert _peer("home")["address"] == "203.0.113.10"
 
 
+def test_смена_уровня_журнала_без_полного_перезапуска(live):
+    """Основной возьмёт уровень на следующем включении: ради журнала tun не роняем."""
+    tun, seen = live
+    inner = tunnel.buildconfig.assemble
+    level = {"level": "debug", "timestamp": True}
+
+    def assemble(*args, **kw):
+        main, sides, built, report = inner(*args, **kw)
+        return ({**main, "log": level},
+                {tid: {**side, "log": level} for tid, side in sides.items()}, built, report)
+
+    tunnel.buildconfig.assemble = assemble
+    main, work, home = tun.proc, _side(tun, "work").proc, tun.main.proc
+
+    done = tun.reload_sides()
+
+    assert sorted((side.tid, err) for side, err in done) == [("home", ""), ("work", "")]
+    assert work.terminated and home.terminated
+    assert not main.terminated and tun.proc is main
+    assert seen["outs"] == [buildconfig.DIRECT_TAG, HOME_SOCKS]
+    # Работающий конфиг, сменён только журнал: пир заново не резолвился.
+    assert _peer("work")["address"] == "203.0.113.20" and _peer("home")["address"] == "203.0.113.10"
+    assert all(buildconfig.read_json(buildconfig.side_json(tid))["log"] == level
+               for tid in ("work", "home"))
+    assert tun.reload_sides() == []
+
+
 def test_испорченный_tunnels_json_нужен_полный_перезапуск(live):
     tun, _seen = live
     with open(paths.TUNNELS_JSON, "w", encoding="utf-8") as fh:
