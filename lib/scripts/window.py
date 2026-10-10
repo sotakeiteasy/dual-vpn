@@ -432,6 +432,8 @@ class Window:
             self.install_daemon()
         elif name == "update":
             self.start_update()
+        elif name == "update_notes":
+            self.show_update_notes()
         elif name == "ready":
             self.log("окно: страница загрузилась")
         elif name == "jserror":
@@ -576,6 +578,10 @@ class Window:
 
     def start_update_checks(self):
         """Проверка при старте и раз в UPDATE_EVERY. Зовётся из главного потока."""
+        fake = os.environ.get("VPNLX_FAKE_UPDATE")
+        if fake:
+            self.fake_update(fake)
+            return
         if os.environ.get("VPNLX_TEST_WINDOW") or not self.updatable():
             return
         self.check_update()
@@ -606,9 +612,33 @@ class Window:
             self.log(f"обновление: новее {cur} нет")
             self.upd = NO_UPDATE
 
+    def fake_update(self, version):
+        """VPNLX_FAKE_UPDATE=X.Y.Z: показать, будто вышла X.Y.Z, с её разделом
+        из CHANGELOG.md. Только посмотреть подвал и «Что нового»: ставить
+        нечего, «Обновить» закончится ошибкой."""
+        r = subprocess.run(["/bin/bash", os.path.join(self.base, "lib", "scripts",
+                                                      "changelog.sh"), version],
+                           capture_output=True, text=True, encoding="utf-8")
+        self._upd_info = {"version": version, "fake": True,
+                          "notes": r.stdout.strip() or r.stderr.strip()}
+        self.upd = dict(NO_UPDATE, state="available", version=version)
+        self.log(f"обновление: тестовое {version}")
+
+    def show_update_notes(self):
+        """«Что нового?» в подвале: описание релиза и там же «Обновить»."""
+        info = self._upd_info
+        if info is None:
+            return
+        self.eval(f"showUpdate({_js(info['version'])}, {_js(info.get('notes', ''))})")
+
     def start_update(self):
         info = self._upd_info
         if info is None or self.upd["state"] not in ("available", "error"):
+            return
+        if info.get("fake"):
+            self.upd = dict(NO_UPDATE, state="error", version=info["version"],
+                            error="test update: nothing to install")
+            self.push()
             return
         self.upd = dict(NO_UPDATE, state="working", version=info["version"],
                         step=t("скачиваю", "downloading"))

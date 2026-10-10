@@ -128,6 +128,26 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.w.upd["state"], "available")
         self.assertFalse(self.w.relaunched)
 
+    def test_whats_new_shows_notes(self):
+        js = []
+        self.w.eval = js.append
+        self.w._upd_info = dict(self.INFO, notes="- Новое")
+        self.w.show_update_notes()
+        self.assertEqual(js, ['showUpdate("0.1.5", "- Новое")'])
+
+    def test_fake_update_takes_changelog_and_installs_nothing(self):
+        self.w.base = os.path.join(os.path.dirname(__file__), "..")
+        self.w.upd = window.NO_UPDATE
+        self.w.push = lambda: None
+        self.w.fake_update("0.1.13")
+        self.assertEqual(self.w.upd["state"], "available")
+        self.assertIn("conf/personal", self.w._upd_info["notes"])
+
+        with mock.patch.object(window.update, "download") as download:
+            self.w.start_update()
+        download.assert_not_called()
+        self.assertEqual(self.w.upd["state"], "error")
+
     def test_failure_is_shown(self):
         self.run_update("нет прав")
         self.assertEqual(self.w.upd["state"], "error")

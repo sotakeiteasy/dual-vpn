@@ -69,7 +69,9 @@ def pick(releases, current):
         if best is None or ver > best[0]:
             best = (ver, {"version": num, "name": name,
                           "dmg_url": urls[name], "sha_url": urls[name + ".sha256"],
-                          "page": r.get("html_url") or ""})
+                          "page": r.get("html_url") or "",
+                          # Описание релиза — раздел версии из CHANGELOG.md.
+                          "notes": (r.get("body") or "").strip()})
     return best[1] if best else None
 
 

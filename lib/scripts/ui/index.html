@@ -259,6 +259,11 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
 #sheet-body p { margin: 0 0 10px; }
 #sheet-body p:last-child { margin-bottom: 0; }
 #sheet-body a { color: var(--accent); text-decoration: none; }
+#sheet-body ul { margin: 0; padding-left: 18px; }
+#sheet-body li { margin: 0 0 8px; }
+#sheet-body li:last-child { margin-bottom: 0; }
+#sheet-body code { font: 11.5px/1.5 ui-monospace, Menlo, monospace;
+                   background: #80808024; padding: 1px 5px; border-radius: 4px; }
 #sheet-body { padding: 14px 16px; overflow: auto;
               font: 12.5px/1.65 -apple-system, sans-serif;
               -webkit-user-select: text; user-select: text; }
@@ -438,6 +443,7 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
       <button id="sheet-load" hidden data-en="Load from File…">Взять из файла…</button>
       <button id="sheet-save" hidden data-en="Save">Сохранить</button>
       <button id="sheet-apply" hidden data-en="Apply">Применить</button>
+      <button id="sheet-update" hidden data-en="Update">Обновить</button>
       <button id="sheet-close" class="primary" data-en="Close">Закрыть</button>
     </div>
   </div>
@@ -779,10 +785,11 @@ function renderHowto(h) {
     a crash: only when you click “Turn On”.</p>
 
     <h3>Updates</h3>
-    <p>The window checks for new versions itself and shows “Update” at the
-    bottom. The image is downloaded from GitHub and verified by checksum, then
-    the system asks for the administrator password to replace the app in
-    Applications. What's new is on the release page.</p>
+    <p>The window checks for new versions itself and shows “Version … is out”
+    at the bottom. “What's new?” opens the list of changes, and “Update” is
+    right there. The image is downloaded from GitHub and verified by checksum,
+    then the system asks for the administrator password to replace the app in
+    Applications.</p>
 
     <h3>If something doesn't work</h3>
     <p>Look at the “corp” row on the left. If only it is silent while the personal
@@ -854,9 +861,10 @@ function renderHowto(h) {
 
     <h3>Обновления</h3>
     <p>Окно само проверяет, вышла ли новая версия, и показывает внизу
+    «Вышла версия …». По «что нового?» откроется список изменений, там же —
     «Обновить». Образ скачивается с GitHub и сверяется по контрольной сумме,
     потом система спросит пароль администратора — чтобы заменить приложение в
-    Программах. Что нового в версии — на странице релиза.</p>
+    Программах.</p>
 
     <h3>Если что-то не работает</h3>
     <p>Смотри на строку «корп» слева. Если молчит она одна, а личный туннель
@@ -889,7 +897,8 @@ function renderVersion(v) {
   const u = m.update;
   document.getElementById('version').innerHTML = esc(m.text) + (u
     ? `<div id="upd" class="${u.bad ? 'bad' : ''}">${esc(u.text)}` +
-      (u.action ? ` — <a href="#" id="upd-go">${esc(u.action)}</a>` : '') + '</div>'
+      (u.action ? ` — <a href="#" id="upd-go" data-send="${u.send}">${esc(u.action)}</a>` : '') +
+      '</div>'
     : '');
 }
 
@@ -923,7 +932,7 @@ const SITE_FIELDS = [
 
 // Подвал листа: у каждого вида свой набор кнопок, остальные прячем.
 function sheetButtons(...ids) {
-  ['sheet-del', 'sheet-load', 'sheet-save', 'sheet-apply']
+  ['sheet-del', 'sheet-load', 'sheet-save', 'sheet-apply', 'sheet-update']
     .forEach(id => { $(id).hidden = !ids.includes(id); });
 }
 
@@ -1015,6 +1024,23 @@ function showInfo(title, paras) {
   document.getElementById('sheet').classList.add('on');
 }
 
+// «Что нового» в новой версии: раздел из CHANGELOG.md, он же описание релиза.
+// Пункты «- …» — списком, `код` — моноширинным; остальное — абзацами.
+function showUpdate(version, notes) {
+  sheetButtons('sheet-update');
+  document.getElementById('sheet-name').textContent =
+    tr(`Что нового в ${version}`, `What's new in ${version}`);
+  const b = document.getElementById('sheet-body');
+  b.classList.remove('mono');
+  const inline = s => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
+  const lines = (notes || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const items = lines.filter(l => l.startsWith('- ')).map(l => `<li>${inline(l.slice(2))}</li>`);
+  const paras = lines.filter(l => !l.startsWith('- ')).map(l => `<p>${inline(l)}</p>`);
+  b.innerHTML = (paras.join('') + (items.length ? `<ul>${items.join('')}</ul>` : '')) ||
+    `<p>${tr('Описания у версии нет.', 'This version has no description.')}</p>`;
+  document.getElementById('sheet').classList.add('on');
+}
+
 function showConf(kind, name, text) {
   sheetButtons('sheet-del');
   document.getElementById('sheet-body').classList.add('mono');
@@ -1045,8 +1071,13 @@ document.getElementById('sheet-body').addEventListener('click', e => {
 });
 // Подвал перерисовывается целиком, поэтому слушаем на нём, а не на ссылке.
 document.getElementById('version').onclick = e => {
-  if (!e.target.closest('#upd-go')) return;
+  const a = e.target.closest('#upd-go');
+  if (!a) return;
   e.preventDefault();
+  send(a.dataset.send);
+};
+document.getElementById('sheet-update').onclick = () => {
+  closeSheet();
   send('update');
 };
 document.getElementById('sheet-load').onclick = () => send('load_site');

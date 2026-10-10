@@ -56,6 +56,10 @@ class PickTests(unittest.TestCase):
         got = update.pick([rel("mac-v0.1.9"), rel("mac-v0.1.10"), rel("mac-v0.1.5")], "0.1.4")
         self.assertEqual(got["version"], "0.1.10")
 
+    def test_release_notes_come_along(self):
+        r = dict(rel("mac-v0.1.7"), body="- Новое\n")
+        self.assertEqual(update.pick([r], "0.1.6")["notes"], "- Новое")
+
     def test_nothing_newer(self):
         self.assertIsNone(update.pick([rel("mac-v0.1.4"), rel("mac-v0.1.3")], "0.1.4"))
 

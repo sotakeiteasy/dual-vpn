@@ -223,10 +223,11 @@ test('подвал: без новой версии — только номера
   assert.equal(versionModel(undefined).text, 'DualVPN ?');
 });
 
-test('подвал: есть новая — кнопка «Обновить»', () => {
+test('подвал: есть новая — «что нового?», а «Обновить» уже в описании', () => {
   const u = versionModel(upd('available')).update;
-  assert.equal(u.text, 'есть 0.1.6');
-  assert.equal(u.action, 'Обновить');
+  assert.equal(u.text, 'Вышла версия 0.1.6');
+  assert.equal(u.action, 'что нового?');
+  assert.equal(u.send, 'update_notes');
 });
 
 test('подвал: обновление идёт — шаг без кнопки', () => {
@@ -239,6 +240,7 @@ test('подвал: не встала — первая строка ошибки
   const u = versionModel(upd('error', {error: 'сумма не совпала\nподробности'})).update;
   assert.equal(u.text, '0.1.6 не встала: сумма не совпала');
   assert.equal(u.action, 'Повторить');
+  assert.equal(u.send, 'update');
   assert.equal(u.bad, true);
 });
 
