@@ -118,6 +118,7 @@ from AppKit import (NSAttributedString, NSColor, NSControlSizeSmall,  # noqa: E4
 from Foundation import NSObject, NSRunLoop, NSRunLoopCommonModes  # noqa: E402
 from PyObjCTools import AppHelper  # noqa: E402
 import control                    # noqa: E402
+import loginitem                  # noqa: E402
 import tui                        # noqa: E402
 from menumodel import menu_model   # noqa: E402
 from window import Window          # noqa: E402
@@ -267,14 +268,20 @@ class App(rumps.App):
         self.menu.add(self.status_item)
         self.menu.add(rumps.separator)
         self.act = {
-            "restart": rumps.MenuItem("Перезапустить", callback=self.on_restart),
-            "details": rumps.MenuItem("Подробнее…", callback=self.on_window),
+            "restart": menu_item("Перезапустить", "arrow.clockwise", self.on_restart),
+            "details": menu_item("Подробнее…", "info.circle", self.on_window),
         }
         for it in self.act.values():
             self.menu.add(it)
-        self.menu.add(rumps.MenuItem("Открыть окно…", callback=self.on_window))
+        self.menu.add(menu_item("Открыть окно…", "macwindow", self.on_window))
         self.menu.add(rumps.separator)
-        self.menu.add(rumps.MenuItem("Выход", callback=self.on_quit))
+        # Сразу с настоящей подписью: rumps хранит пункты по заголовку, и
+        # пустой затёр бы шапку, у которой заголовок тоже пустой.
+        self.login_item = menu_item(pin_title(loginitem.enabled()), None, self.on_login)
+        self.show_pinned()
+        self.menu.add(self.login_item)
+        self.menu.add(rumps.separator)
+        self.menu.add(menu_item("Выход", "power", self.on_quit))
 
         self.window = Window(BASE, tui.STATE, log, self.ctrl, DATA)
 
@@ -307,6 +314,23 @@ class App(rumps.App):
 
     def on_restart(self, _):
         self.ctrl.restart()
+
+    def on_login(self, _):
+        # Закреплённый значок сам появляется после входа в систему; туннель
+        # при этом не поднимается.
+        on = not loginitem.enabled()
+        err = (loginitem.enable(__file__, sys.executable) if on
+               else loginitem.disable())
+        log(f"{'закрепить' if on else 'открепить'}: {err or 'готово'}")
+        if err:
+            rumps.notification("DualVPN", f"не удалось {'закрепить' if on else 'открепить'}", err)
+        self.show_pinned()
+
+    def show_pinned(self):
+        """Пункт говорит, что сделает нажатие, — галочка тут читалась хуже."""
+        pinned = loginitem.enabled()
+        self.login_item.title = pin_title(pinned)
+        set_symbol(self.login_item, "pin.slash" if pinned else "pin")
 
     def changed(self):
         """Контроллер сменил состояние. Зовётся из его потока, а трогать меню
@@ -543,6 +567,27 @@ class StatusView:
 def _styled(text, font, color):
     return NSAttributedString.alloc().initWithString_attributes_(
         text, {NSFontAttributeName: font, NSForegroundColorAttributeName: color})
+
+
+def menu_item(title, symbol, callback):
+    """Пункт меню с иконкой SF Symbols слева, как в системных меню.
+
+    Иконка — шаблон: macOS сама красит её под текст пункта и под подсветку.
+    """
+    it = rumps.MenuItem(title, callback=callback)
+    if symbol:
+        set_symbol(it, symbol)
+    return it
+
+
+def pin_title(pinned):
+    return "Открепить от меню" if pinned else "Закрепить в меню"
+
+
+def set_symbol(item, symbol):
+    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, item.title)
+    if img is not None:             # символа нет в старой системе — без иконки
+        item._menuitem.setImage_(img)
 
 
 def show(item, visible):
