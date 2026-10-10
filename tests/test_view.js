@@ -54,6 +54,20 @@ test('точка: проверяю — серая, мимо туннеля и м
   assert.equal(viewModel({...UP, corp_ip: ''}).rows[1].dot, 'bad');
 });
 
+test('строки туннелей — переключатели, оба выключить нельзя', () => {
+  assert.deepEqual(viewModel(UP).rows.map(r => [r.tunnel, r.off, r.toggleable]),
+                   [['personal', false, true], ['corp', false, true]]);
+  const v = viewModel({...UP, corp_ip: '', corp_state: 'off'});
+  assert.equal(v.cls, 'ok');
+  assert.equal(v.title, 'Работает только личный');
+  assert.deepEqual(v.rows.map(r => [r.value, r.off, r.toggleable]),
+                   [['188.241.219.116 · DE', false, false], ['выключен', true, true]]);
+  const p = viewModel({...UP, exit_ip: '', exit_state: 'off'});
+  assert.equal(p.title, 'Работает только корп');
+  assert.deepEqual(p.rows.map(r => [r.dot, r.off, r.toggleable]),
+                   [['off', true, true], ['ok', false, false]]);
+});
+
 test('задержка — только после замера', () => {
   const v = viewModel({...UP, exit_ms: 42, corp_ms: 18});
   assert.deepEqual(v.rows.map(r => r.ms), ['42 мс', '18 мс']);

@@ -83,6 +83,8 @@ def menu_model(st, op):
     actions["stop"] = True
     actions["restart"] = True
     corp_ok = bool(st.get("corp_ip"))
+    # Выключенный в окне туннель — не поломка: его не меряют и им не пугают.
+    corp_off = st.get("corp_state") == "off"
     # До первого ответа корп ещё не проверен, а не молчит (см. view.js).
     corp_pending = not corp_ok and st.get("corp_state") == "unknown"
     leak6 = st.get("v6_leak")
@@ -95,8 +97,12 @@ def menu_model(st, op):
         out["icon"], out["title"] = "bad", "Туннель не работает — перезапусти"
     elif corp_pending:
         out["icon"], out["title"] = "on", "Проверяю туннели…"
+    elif corp_off:
+        out["icon"], out["title"] = "on", "Работает только личный"
     elif not corp_ok:
         out["icon"], out["title"] = "on", "Корп не отвечает"
+    elif state == "off":
+        out["icon"], out["title"] = "on", "Работает только корп"
     else:
         out["icon"], out["title"] = "on", "Всё работает"
 
@@ -109,9 +115,13 @@ def menu_model(st, op):
         personal = {"value": "мимо туннеля", "ok": False}
     elif state == "down":
         personal = {"value": "не отвечает", "ok": False}
+    elif state == "off":
+        personal = {"value": "выключен", "ok": None}
     else:
         personal = {"value": "проверяю…", "ok": None}
-    if corp_pending:
+    if corp_off:
+        corp = {"value": "выключен", "ok": None}
+    elif corp_pending:
         corp = {"value": "проверяю…", "ok": None}
     else:
         corp = {"value": "на связи" if corp_ok else "не отвечает", "ok": corp_ok}

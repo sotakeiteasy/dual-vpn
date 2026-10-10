@@ -158,6 +158,36 @@ class BuildConfigTests(unittest.TestCase):
         self.assertNotIn("header_protection_key", ep)
         self.check_with_sing_box(out)
 
+    def turn_off(self, which):
+        state = os.path.join(self.data, "lib", "state")
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, "off"), "w", encoding="utf-8") as fh:
+            fh.write(which)
+
+    def test_corp_off_drops_endpoint_routes_and_dns(self):
+        # Истёкший корп выключен в окне: его файл даже не читаем.
+        self.write("personal.conf", AWG2)
+        self.write("wg0-corp.conf", "мусор")
+        self.turn_off("corp")
+        r, cfg, out = self.build("personal")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([e["tag"] for e in cfg["endpoints"]], ["awg-personal"])
+        self.assertNotIn("wg-corp", json.dumps(cfg))
+        self.assertEqual(cfg["route"]["final"], "awg-personal")
+        self.check_with_sing_box(out)
+
+    def test_personal_off_sends_the_rest_direct(self):
+        self.turn_off("personal")
+        r, cfg, out = self.build("нет-такого")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([e["tag"] for e in cfg["endpoints"]], ["wg-corp"])
+        self.assertEqual(cfg["route"]["final"], "direct")
+        self.assertNotIn("awg-personal", json.dumps(cfg))
+        dns = {s["tag"]: s for s in cfg["dns"]["servers"]}
+        self.assertNotIn("detour", dns["dns-personal"])
+        self.assertEqual(dns["dns-corp"]["detour"], "wg-corp")
+        self.check_with_sing_box(out)
+
     def test_bad_number_names_the_field(self):
         # Последняя строка вывода уходит в окно как причина — трейсбек там
         # ничего не скажет, имя поля скажет.

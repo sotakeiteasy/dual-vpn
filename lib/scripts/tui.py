@@ -312,8 +312,21 @@ def probe_slow():
     худшем случае цикл шёл около 34 секунд. Ключи ST у проб разные,
     так что друг другу они не мешают.
     """
-    threads = [threading.Thread(target=f, daemon=True)
-               for f in (probe_personal, probe_corp)]
+    # Туннель, выключенный в окне, в собранном конфиге отсутствует — его не
+    # меряем: иначе мёртвый корп весь день отвечал бы «молчит» по таймаутам.
+    # Смотрим на config.json, а не на флаг: флаг меняется раньше перезапуска.
+    tags = peer_addrs()
+    probes = []
+    if "awg-personal" in tags:
+        probes.append(probe_personal)
+    else:
+        set_st(exit_ip="", exit_country="", exit_state="off", exit_ms=None,
+               exit_is_peer=False, v6_leak="")
+    if "wg-corp" in tags:
+        probes.append(probe_corp)
+    else:
+        set_st(corp_ip="", corp_http="", corp_state="off", corp_ms=None)
+    threads = [threading.Thread(target=f, daemon=True) for f in probes]
     for t in threads:
         t.start()
     for t in threads:

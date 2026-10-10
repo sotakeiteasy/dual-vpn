@@ -86,6 +86,14 @@ class MenuModelTests(unittest.TestCase):
         self.assertEqual(m["title"], "Проверяю туннели…")
         self.assertIn({"name": "Корп", "value": "проверяю…", "ok": None}, m["rows"])
 
+    def test_tunnel_turned_off_is_not_a_failure(self):
+        m = menu_model({**UP, "corp_ip": "", "corp_state": "off"}, IDLE)
+        self.assertEqual((m["icon"], m["title"]), ("on", "Работает только личный"))
+        self.assertIn({"name": "Корп", "value": "выключен", "ok": None}, m["rows"])
+        m = menu_model({**UP, "exit_ip": "", "exit_state": "off"}, IDLE)
+        self.assertEqual((m["icon"], m["title"]), ("on", "Работает только корп"))
+        self.assertIn({"name": "Личный", "value": "выключен", "ok": None}, m["rows"])
+
     def test_leaks_are_bad(self):
         self.assertEqual(menu_model({**UP, "v6_leak": "2a00::1"}, IDLE)["icon"], "bad")
         m = menu_model({**UP, "exit_state": "leak"}, IDLE)

@@ -486,6 +486,8 @@ class Window:
             self.del_config(arg)
         elif name == "theme":
             self.set_theme(arg)
+        elif name == "toggle_tunnel":
+            self.toggle_tunnel(arg)
         else:
             self.log(f"неизвестное сообщение из окна: {name}")
 
@@ -830,6 +832,55 @@ class Window:
             self.log(f"профиль: {name}")
         except OSError as e:
             self.log(f"не смог сохранить профиль: {e}")
+            self.eval(f"failed({_js(str(e))})")
+            return
+
+        if up:
+            self.ctrl.restart()
+        self.push()
+
+    TUNNEL_NAME = {"corp": "корп", "personal": "личный"}
+
+    def toggle_tunnel(self, which):
+        """Клик по строке туннеля: выключить его или включить обратно.
+
+        Флаг — файл lib/state/off, его читает build-config.py при старте,
+        поэтому без перезапуска он ничего не меняет — перезапускаем сразу.
+        Выключенным бывает только один: оба — это кнопка «Выключить».
+        """
+        if which not in self.TUNNEL_NAME:
+            self.log(f"окно: неизвестный туннель {which!r}")
+            return
+        path = os.path.join(self.state, "off")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                off = fh.read().strip()
+        except OSError:
+            off = ""
+        if off and off != which:
+            self.alert("Оба туннеля выключить нельзя",
+                       f"Сейчас выключен {self.TUNNEL_NAME[off]}. "
+                       "Чтобы выключить всё — кнопка «Выключить».")
+            return
+
+        name = self.TUNNEL_NAME[which]
+        turn_on = off == which
+        up = bool(self.status().get("up"))
+        if up and not self.confirm(
+                f"{'Включить' if turn_on else 'Выключить'} {name}?",
+                "Туннель перезапустится, соединения оборвутся.",
+                ok="Включить" if turn_on else "Выключить"):
+            return
+
+        try:
+            if turn_on:
+                os.remove(path)
+            else:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(which)
+            self.log(f"туннель {name}: {'включён' if turn_on else 'выключен'}")
+        except OSError as e:
+            self.log(f"не смог переключить туннель: {e}")
             self.eval(f"failed({_js(str(e))})")
             return
 

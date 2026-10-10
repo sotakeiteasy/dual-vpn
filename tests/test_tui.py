@@ -44,7 +44,8 @@ class ProbeSlowTests(unittest.TestCase):
         for p in self.patches:
             p.start()
         with open(os.path.join(self.state, "config.json"), "w", encoding="utf-8") as fh:
-            json.dump({"endpoints": [{"tag": "awg-personal", "peers": [{"address": "1.2.3.4"}]}],
+            json.dump({"endpoints": [{"tag": "awg-personal", "peers": [{"address": "1.2.3.4"}]},
+                                     {"tag": "wg-corp", "peers": [{"address": "203.0.113.10"}]}],
                        "dns": {"servers": [{"tag": "dns-corp", "server": "172.15.0.110"}]}}, fh)
         with tui.LOCK:
             tui.ST.clear()
@@ -109,6 +110,18 @@ class ProbeSlowTests(unittest.TestCase):
         self.assertEqual((st["exit_ms"], st["corp_ms"]), (None, None))
         st = self.probe(good, "10.0.0.5")
         self.assertEqual((st["exit_ms"], st["corp_ms"]), (49, 8))
+
+    def test_turned_off_tunnel_is_not_probed(self):
+        # Корп выключен в окне — в config.json его нет, и мерить его нечего:
+        # ни dig, ни ping, ни curl к нему не уходят.
+        with open(os.path.join(self.state, "config.json"), "w", encoding="utf-8") as fh:
+            json.dump({"endpoints": [{"tag": "awg-personal", "peers": [{"address": "1.2.3.4"}]}],
+                       "dns": {"servers": []}}, fh)
+        calls = []
+        with mock.patch.object(tui, "probe_corp", lambda: calls.append("corp")):
+            st = self.probe(json.dumps({"ip": "1.2.3.4"}), "10.0.0.5")
+        self.assertEqual(calls, [])
+        self.assertEqual((st["corp_state"], st["exit_state"]), ("off", "tunnel"))
 
     def test_ping_ms(self):
         self.assertIsNone(tui.ping_ms(""))

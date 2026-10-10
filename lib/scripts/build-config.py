@@ -287,6 +287,21 @@ LOCAL_NETS = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
               "169.254.0.0/16", "224.0.0.0/4"]
 
 
+def disabled_tunnel():
+    """Какой туннель выключен кликом в окне: 'corp', 'personal' или ''.
+
+    Флаг лежит файлом lib/state/off, как профиль. Мёртвый корп-конфиг
+    (истёк, сервер молчит) иначе весь день слал рукопожатия и мерился
+    пробером впустую. Выключить оба нельзя — это просто «Выключить VPN».
+    """
+    try:
+        with open(os.path.join(STATE, "off"), encoding="utf-8") as fh:
+            off = fh.read().strip()
+    except OSError:
+        return ""
+    return off if off in ("corp", "personal") else ""
+
+
 def running_pid():
     """PID работающего sing-box из нашей папки, иначе ''."""
     try:
@@ -313,11 +328,15 @@ def main():
     if "--out" in sys.argv:
         out_path = sys.argv[sys.argv.index("--out") + 1]
 
-    p_path = pick_conf("личный", personal_patterns())
-    c_path = pick_conf("корпоративный", CORP_PAT, exclude=p_path)
+    # Выключенный туннель не собираем вовсе: ни эндпоинта, ни маршрутов, ни
+    # DNS. Его файл тогда и не нужен — истёкший корп можно просто не трогать.
+    off = disabled_tunnel()
+    p_path = pick_conf("личный", personal_patterns()) if off != "personal" else None
+    c_path = (pick_conf("корпоративный", CORP_PAT, exclude=p_path)
+              if off != "corp" else None)
 
-    personal = parse_conf(p_path)
-    corp = parse_conf(c_path)
+    personal = parse_conf(p_path) if p_path else None
+    corp = parse_conf(c_path) if c_path else None
 
     # Значение по умолчанию — только когда в конфиге нет строки MTU.
     #
@@ -326,8 +345,9 @@ def main():
     # nl-1 рукопожатие проходило, а данные не пролезали — туннель выглядел
     # поднятым, но интернета не было. Конфиги со своим MTU (personal.conf)
     # это не затрагивает: там значение берётся из файла.
-    ep_personal = endpoint(personal, "awg-personal", 1280)
-    ep_corp = endpoint(corp, "wg-corp", 1280)
+    ep_personal = endpoint(personal, "awg-personal", 1280) if personal else None
+    ep_corp = endpoint(corp, "wg-corp", 1280) if corp else None
+    endpoints = [ep for ep in (ep_personal, ep_corp) if ep]
 
     # Переключатели для диагностики, без правки файлов:
     #   SB_STACK=system|gvisor|mixed   сетевой стек tun
@@ -341,7 +361,7 @@ def main():
     # даёт EISCONN («socket is already connected»). Ломается переустановка
     # ключей раз в ~2 минуты, и туннель тихо умирает. С системным интерфейсом
     # сокетом занимается ядро, и этот путь не используется.
-    if os.environ.get("SB_CORP_SYSTEM") == "1":
+    if ep_corp and os.environ.get("SB_CORP_SYSTEM") == "1":
         ep_corp["system"] = True
 
     # SB_CORP_AWG=1 — пустить корп через AWG-код форка с нейтральными
@@ -350,7 +370,7 @@ def main():
     # сообщений), поэтому обычный сервер принимает их как есть.
     # Смысл: личный туннель на этом же коде работает без ошибок, а обычный
     # WireGuard-путь форка на macOS отбивается EISCONN при рукопожатии.
-    if os.environ.get("SB_CORP_AWG") == "1":
+    if ep_corp and os.environ.get("SB_CORP_AWG") == "1":
         ep_corp.update({"jc": 0, "jmin": 0, "jmax": 0, "s1": 0, "s2": 0,
                         "h1": 1, "h2": 2, "h3": 3, "h4": 4})
 
@@ -359,23 +379,23 @@ def main():
     # более он использует ListenPacket, где отправка с явным адресом легальна
     # и EISCONN не возникает. Пир-пустышка ведёт в TEST-NET-1 (RFC 5737),
     # трафика туда нет, на маршрутизацию он не влияет.
-    if os.environ.get("SB_CORP_2PEERS") == "1":
+    if ep_corp and os.environ.get("SB_CORP_2PEERS") == "1":
         ep_corp["peers"].append({
             "address": "192.0.2.1",
             "port": 51820,
             "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             "allowed_ips": ["192.0.2.2/32"],
         })
-    if os.environ.get("SB_CORP_MTU"):
+    if ep_corp and os.environ.get("SB_CORP_MTU"):
         ep_corp["mtu"] = int(os.environ["SB_CORP_MTU"])
 
-    routes = corp_routes(corp)
+    routes = corp_routes(corp) if corp else []
 
     # SB_CORP_EXCLUDE="198.51.100.7/32 ..." — не гнать эти адреса в корп-туннель.
     # Нужно, когда какой-то адрес из AllowedIPs недоступен со стороны корп-сети:
     # без исключения соединение с ним висит 15с и тормозит браузер.
     excl = os.environ.get("SB_CORP_EXCLUDE", "").replace(",", " ").split()
-    if excl:
+    if excl and ep_corp:
         drop = [ipaddress.ip_network(x, strict=False) for x in excl if _is_cidr(x)]
         routes = [r for r in routes
                   if not any(ipaddress.ip_network(r, strict=False).subnet_of(d)
@@ -398,7 +418,7 @@ def main():
     # причём не молча — соединение получает отказ, и браузер рвёт страницу
     # (это и был ERR_CONNECTION_CLOSED). Без v6-адреса на tun приложения
     # просто не пытаются использовать v6 и сразу работают по IPv4.
-    personal_v6 = any(
+    personal_v6 = bool(personal) and any(
         ipaddress.ip_network(a, strict=False).version == 6
         for a in split_list(personal["interface"].get("address", ""))
         if _is_cidr(a)
@@ -408,7 +428,7 @@ def main():
         tun_address.append("fdfe:dcba:9876::1/126")
     else:
         # Раз v6 наружу нести нечем — не заявляем, что умеем его маршрутизировать.
-        for ep in (ep_personal, ep_corp):
+        for ep in endpoints:
             allowed = ep["peers"][0]["allowed_ips"]
             ep["peers"][0]["allowed_ips"] = [
                 c for c in allowed
@@ -417,7 +437,7 @@ def main():
             ]
 
     # Корп-DNS: из [Interface] DNS корп-конфига, иначе не поднимаем.
-    corp_dns = split_list(corp["interface"].get("dns", ""))
+    corp_dns = split_list(corp["interface"].get("dns", "")) if corp else []
     corp_dns = [d for d in corp_dns if re.match(r"^[\d.]+$", d)]
 
     # Домены, которые резолвятся через корп-DNS. Дублируют /etc/resolver на macOS
@@ -429,16 +449,20 @@ def main():
     # ВАЖНО: домен корп-endpoint сюда попадать не должен. Иначе имя сервера
     # придётся резолвить через корп-DNS, который доступен только когда
     # туннель уже поднят — замкнутый круг. Его резолвим публично.
-    endpoint_host = corp["peer"]["endpoint"].rpartition(":")[0].lower()
-    domains = sorted(
-        d for d in (dns_domains(corp) | extra)
-        if not endpoint_host.endswith(d.lower())
-    )
+    domains = []
+    if corp:
+        endpoint_host = corp["peer"]["endpoint"].rpartition(":")[0].lower()
+        domains = sorted(
+            d for d in (dns_domains(corp) | extra)
+            if not endpoint_host.endswith(d.lower())
+        )
 
-    dns_servers = [{
-        "type": "udp", "tag": "dns-personal",
-        "server": "8.8.8.8", "detour": "awg-personal",
-    }]
+    # Без личного туннеля всё, что не ушло в корп, идёт напрямую — и DNS тоже.
+    # Тег прежний: на него завязаны final и default_domain_resolver.
+    dns_personal = {"type": "udp", "tag": "dns-personal", "server": "8.8.8.8"}
+    if ep_personal:
+        dns_personal["detour"] = "awg-personal"
+    dns_servers = [dns_personal]
     dns_rules = []
     if corp_dns:
         dns_servers.insert(0, {
@@ -449,7 +473,7 @@ def main():
 
     tun = {
         "type": "tun", "tag": "tun-in",
-        "mtu": int(os.environ.get("SB_TUN_MTU", ep_personal["mtu"])),
+        "mtu": int(os.environ.get("SB_TUN_MTU", endpoints[0]["mtu"])),
         "address": tun_address,
         "auto_route": True,
         "stack": stack,
@@ -469,14 +493,14 @@ def main():
             "final": "dns-personal",
             "strategy": "ipv4_only",
         },
-        "endpoints": [ep_personal, ep_corp],
+        "endpoints": endpoints,
         "inbounds": [tun],
         "outbounds": [{"type": "direct", "tag": "direct"}],
         "route": {
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
-                {"ip_cidr": routes, "outbound": "wg-corp"},
+                *([{"ip_cidr": routes, "outbound": "wg-corp"}] if ep_corp else []),
                 # Локальная сеть — напрямую, не в туннель. Без этого запросы
                 # к соседним устройствам (NAS, принтер, роутер) уходили в
                 # личный туннель и висли там по 15 секунд.
@@ -484,7 +508,7 @@ def main():
                 # свои подсети из этих же диапазонов уже забрал выше.
                 {"ip_cidr": LOCAL_NETS, "outbound": "direct"},
             ],
-            "final": "awg-personal",
+            "final": "awg-personal" if ep_personal else "direct",
             # SB_NO_AUTODETECT=1 — не перепривязывать сокеты к интерфейсу.
             # Наш скрипт меняет маршруты сразу после старта, и при включённом
             # автоопределении sing-box может перепривязать UDP-сокет туннеля
@@ -502,15 +526,21 @@ def main():
     os.chmod(out_path, 0o600)
 
     print(f"собрано: {out_path}")
-    print(f"  из     : {os.path.basename(p_path)} + {os.path.basename(c_path)}")
-    print(f"  личный : {ep_personal['peers'][0]['address']}:"
-          f"{ep_personal['peers'][0]['port']}  mtu {ep_personal['mtu']}"
-          f"  awg={'да' if any(k in ep_personal for k in AWG_INT) else 'нет'}")
-    print(f"  корп   : {ep_corp['peers'][0]['address']}:"
-          f"{ep_corp['peers'][0]['port']}  mtu {ep_corp['mtu']}")
-    print(f"  в корп : {', '.join(routes)}")
-    print(f"  корп-DNS: {corp_dns[0] if corp_dns else 'нет'}"
-          f"  для {', '.join(domains)}")
+    print(f"  из     : {' + '.join(os.path.basename(p) for p in (p_path, c_path) if p)}")
+    if ep_personal:
+        print(f"  личный : {ep_personal['peers'][0]['address']}:"
+              f"{ep_personal['peers'][0]['port']}  mtu {ep_personal['mtu']}"
+              f"  awg={'да' if any(k in ep_personal for k in AWG_INT) else 'нет'}")
+    else:
+        print("  личный : выключен в окне — остальной трафик идёт напрямую")
+    if ep_corp:
+        print(f"  корп   : {ep_corp['peers'][0]['address']}:"
+              f"{ep_corp['peers'][0]['port']}  mtu {ep_corp['mtu']}")
+        print(f"  в корп : {', '.join(routes)}")
+        print(f"  корп-DNS: {corp_dns[0] if corp_dns else 'нет'}"
+              f"  для {', '.join(domains)}")
+    else:
+        print("  корп   : выключен в окне")
 
 
 if __name__ == "__main__":

@@ -76,6 +76,10 @@ body {
    у края: между именем и адресом она терялась посреди строки. */
 .tun { display: flex; align-items: center; gap: 8px; padding: 9px 14px; }
 .tun + .tun { border-top: 1px solid var(--line); }
+/* Строка туннеля — переключатель: клик выключает его или включает обратно. */
+.tun.toggle { cursor: pointer; }
+.tun.toggle:hover { background: #80808014; }
+.tun.off .tun-val { color: var(--dim); }
 .tun-name { width: 50px; color: var(--dim); flex: none; }
 .tdot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--off); }
 .tdot.ok  { background: var(--ok); }
@@ -508,12 +512,16 @@ function render(s) {
   }
   CHECKING_WAS = checking;
   const fresh = Date.now() - FRESH_AT < FRESH_FOR ? ' fresh' : '';
-  const tunnels = v.rows.map(r =>
-    `<div class="tun"><span class="tdot ${r.dot}" title="${esc(r.label)}" aria-label="${esc(r.label)}"></span>
+  const tunnels = v.rows.map(r => {
+    const hint = !r.toggleable ? 'оба туннеля выключить нельзя — это «Выключить»'
+               : r.off ? 'нажми, чтобы включить' : 'нажми, чтобы выключить';
+    return `<div class="tun${r.toggleable ? ' toggle' : ''}${r.off ? ' off' : ''}"
+       data-tunnel="${r.tunnel}" title="${esc(hint)}"><span class="tdot ${r.dot}" title="${esc(r.label)}" aria-label="${esc(r.label)}"></span>
        <span class="tun-name">${esc(r.name)}</span>
-       <span class="tun-val" title="${esc(r.value)}">${esc(r.value)}</span>
-       ${checking ? '<span class="tun-ms measuring" aria-label="меряю"><i></i><i></i><i></i></span>'
-         : r.ms ? `<span class="tun-ms${fresh}">${esc(r.ms)}</span>` : ''}</div>`).join('');
+       <span class="tun-val">${esc(r.value)}</span>
+       ${checking && !r.off ? '<span class="tun-ms measuring" aria-label="меряю"><i></i><i></i><i></i></span>'
+         : r.ms ? `<span class="tun-ms${fresh}">${esc(r.ms)}</span>` : ''}</div>`;
+  }).join('');
   if (tunnels !== prev.tunnels) { prev.tunnels = tunnels; $('tunnels').innerHTML = tunnels; }
   $('tunnels').hidden = !v.rows.length;
 
@@ -945,6 +953,10 @@ document.getElementById('sheet-save').onclick = () => {
   send('save_site', v);
 };
 document.getElementById('btn-restart').onclick = () => send('restart');
+document.getElementById('tunnels').onclick = e => {
+  const row = e.target.closest('.tun.toggle');
+  if (row) send('toggle_tunnel', row.dataset.tunnel);
+};
 document.getElementById('btn-check').onclick = () => {
   CHECK_SENT = Date.now();
   CHECK_SEEN = false;
