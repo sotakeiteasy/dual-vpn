@@ -35,9 +35,9 @@ done
 head "кодировки (в .app локаль ASCII — без encoding падает на русском)"
 # И чтение тоже: build-config.py читал .conf без encoding, и кириллица
 # в комментарии уронила бы сборку под ASCII-локалью. os.open — дескриптор,
-# не текст, кодировки у него нет.
+# не текст, кодировки у него нет. Как и у двоичного режима: "rb", "wb", "ab".
 BADENC=$(grep -nE '(^|[^.])\bopen\(' "$BASE"/lib/scripts/*.py \
-         | grep -v 'encoding=' | grep -v '"rb"' | grep -v 'def open_log')
+         | grep -v 'encoding=' | grep -vE '"[rwax]b\+?"' | grep -v 'def open_log')
 if [ -n "$BADENC" ]; then
   echo "$BADENC"
   bad "есть работа с текстовым файлом без encoding"
