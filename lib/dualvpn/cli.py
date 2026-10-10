@@ -5,6 +5,9 @@
     dualvpn stop                опустить и откатить маршруты
     dualvpn list                туннели и их конфиги (* — активный)
     dualvpn use ТУННЕЛЬ КОНФИГ  выбрать конфиг туннеля (туннель — id или имя)
+    dualvpn enable|disable ТУННЕЛЬ
+                                включить или выключить туннель «по списку»;
+                                основной выключает «Всё остальное напрямую» в окне
     dualvpn profile ИМЯ         выбрать конфиг основного туннеля
     dualvpn log [N]             последние строки журнала sing-box
     dualvpn version
@@ -66,7 +69,8 @@ def _print_status(st):
         print(f"  ошибка   : {st['last_error']}")
     print(f"  профиль  : {st.get('profile') or 'единственный конфиг основного'}")
     for t in st.get("tunnels") or []:
-        check = _check_text(t) if up else ""
+        check = ("выключен" if t.get("enabled") is False
+                 else _check_text(t) if up else "")
         print(f"  туннель  : {t.get('name')} [{t.get('id')}], {_MODES.get(t.get('mode'), '?')}"
               f" — {t.get('active') or 'конфиг не выбран'}"
               + (f"; {check}" if check else ""))
@@ -215,7 +219,8 @@ def main(argv=None):
     if cmd == "list":
         items = _call("status").get("status", {}).get("tunnels") or []
         for t in items:
-            print(f"{t.get('name')} [{t.get('id')}], {_MODES.get(t.get('mode'), '?')}:")
+            off = ", выключен" if t.get("enabled") is False else ""
+            print(f"{t.get('name')} [{t.get('id')}], {_MODES.get(t.get('mode'), '?')}{off}:")
             for name in t.get("confs") or []:
                 print(f"  {'*' if name == t.get('active') else ' '} {name}")
             if not t.get("confs"):
@@ -233,6 +238,17 @@ def main(argv=None):
             print(f"не вышло: {r.get('error')}")
             return 1
         print(f"→ туннель {r.get('tunnel')}: {argv[2]}")
+        return _apply()
+
+    if cmd in ("enable", "disable"):
+        if len(argv) < 2:
+            print(f"укажи туннель: dualvpn {cmd} work")
+            return 1
+        r = _call("set-enabled", tunnel=argv[1], on=cmd == "enable")
+        if not r.get("ok"):
+            print(f"не вышло: {r.get('error')}")
+            return 1
+        print(f"→ туннель {r.get('tunnel')}: {'включён' if r.get('enabled') else 'выключен'}")
         return _apply()
 
     if cmd == "profile":

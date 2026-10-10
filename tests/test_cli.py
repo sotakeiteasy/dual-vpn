@@ -57,6 +57,46 @@ def test_use_без_конфига_не_зовёт_службу(sent):
     assert sent == []
 
 
+@pytest.mark.parametrize("cmd, on, shown", [
+    ("disable", False, "work: выключен"),
+    ("enable", True, "work: включён"),
+])
+def test_enable_disable_флаг_туннеля_и_сразу_применяет(sent, capsys, cmd, on, shown):
+    sent.replies["set-enabled"] = {"ok": True, "tunnel": "work", "enabled": on}
+
+    assert cli.main([cmd, "Работа"]) == 0
+
+    assert sent == [("set-enabled", {"tunnel": "Работа", "on": on}), ("apply", {})]
+    assert shown in capsys.readouterr().out
+
+
+def test_disable_основного_отказ_службы_и_не_применяет(sent, capsys):
+    sent.replies["set-enabled"] = {"ok": False, "error": "«Личный» — основной"}
+
+    assert cli.main(["disable", "home"]) == 1
+
+    assert "не вышло: «Личный» — основной" in capsys.readouterr().out
+    assert [op for op, _ in sent] == ["set-enabled"]
+
+
+def test_disable_без_туннеля_не_зовёт_службу(sent):
+    assert cli.main(["disable"]) == 1
+    assert sent == []
+
+
+def test_выключенный_туннель_помечен_в_status_и_list(sent, capsys):
+    off = {**STATUS["tunnels"][0], "enabled": False, "check": "error"}
+    sent.replies["status"] = {"ok": True, "status": {"up": True, "tunnels": [off]}}
+
+    cli.main(["status"])
+    cli.main(["list"])
+
+    out = capsys.readouterr().out
+    assert "Работа [work], по списку — corp; выключен" in out
+    assert "молчит" not in out
+    assert "Работа [work], по списку, выключен:" in out
+
+
 def test_profile_остаётся_алиасом(sent):
     assert cli.main(["profile", "nl-1"]) == 0
     assert sent[0] == ("set-profile", {"profile": "nl-1"})

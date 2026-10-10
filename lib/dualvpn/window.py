@@ -176,6 +176,11 @@ class Api:
             # Выбор среди лежащих конфигов — без прав, как set-profile.
             self._guard(ipc.call("set-active", tunnel=arg["tunnel"], name=arg["name"]))
             self._apply()
+        elif name == "set_enabled":
+            # Вкл/выкл туннеля «по списку» — без прав, как выбор конфига; на
+            # живой VPN переносит тот же _apply, что и сохранение правил.
+            self._guard(ipc.call("set-enabled", tunnel=arg["tunnel"], on=bool(arg["on"])))
+            self._apply()
         elif name == "del_config":
             self._guard(self._admin_call("remove-config", tunnel=arg["tunnel"],
                                          name=arg["name"],

@@ -153,43 +153,119 @@ def test_длинное_имя_обрезается_а_пустое_зовёт_�
 class _Item:
     """Пункт pystray без pystray: подпись и действие как есть."""
 
-    def __init__(self, text, action, enabled=None):
-        self.text, self.action, self.enabled = text, action, enabled
+    def __init__(self, text, action, enabled=None, checked=None):
+        self.text, self.action, self.enabled, self.checked = text, action, enabled, checked
+
+
+# Подменю — кортеж его пунктов в action.
+STUB = types.SimpleNamespace(MenuItem=_Item, Menu=lambda *items: items)
 
 
 def _menu_app(st):
     app = tray.Tray.__new__(tray.Tray)
     app.status = st
     app._tunnel_items = {}
-    app._menu_ids = tuple(t["id"] for t in st["tunnels"])
+    app._menu_ids = tuple(tray._menu_key(t) for t in st["tunnels"])
     app.added = []
     app.on_add_config = app.added.append
+    app.toggled = []
+    app.on_set_enabled = app.toggled.append
     return app
 
 
 def test_пункты_туннелей_по_порядку_с_подписью_и_своим_туннелем():
-    app = _menu_app(_up(_work(confs=["office"]), _home()))
-    stub = types.SimpleNamespace(MenuItem=_Item)
+    app = _menu_app(_up(_work(), _home(confs=["nl-1"])))
 
-    work, home = app._conf_items(stub)
+    work, home = app._conf_items(STUB)
     work.action()
     home.action()
 
-    assert work.text(work) == "office"
-    assert home.text(home) == "Личный: добавить конфиг…"
+    assert work.text(work) == "Работа: добавить конфиг…"
+    assert home.text(home) == "nl-1"
     assert app.added == ["work", "home"]
 
 
 def test_пункты_туннелей_те_же_объекты_а_удалённый_забыт():
     app = _menu_app(_up(_work(), _work(id="lab", name="Лаб"), _home()))
-    stub = types.SimpleNamespace(MenuItem=_Item)
-    work, lab, home = app._conf_items(stub)
+    work, lab, home = app._conf_items(STUB)
 
-    app.status = _up(_home(), _work(confs=["office"]))
-    app._menu_ids = ("home", "work")
-    again = app._conf_items(stub)
+    app.status = _up(_home(), _work())
+    app._menu_ids = (("home", None), ("work", None))
+    again = app._conf_items(STUB)
 
     assert again == (home, work)
-    assert set(app._tunnel_items) == {"home", "work"}
-    assert work.text(work) == "office"
+    assert set(app._tunnel_items) == {("home", None), ("work", None)}
+
+
+def test_туннель_по_списку_с_конфигом_подменю_вкл_выкл_и_добавить():
+    app = _menu_app(_up(_work(confs=["office"], enabled=False), _home(confs=["nl-1"])))
+
+    work, home = app._conf_items(STUB)
+    switch, add = work.action
+    switch.action()
+    add.action()
+
+    assert work.text(work) == "office (выключен)"
+    assert switch.text == "Включён" and switch.checked(switch) is False
+    assert app.toggled == ["work"] and app.added == ["work"]
+    # Основной — одним кликом: его выключает «Всё остальное напрямую» в окне.
+    assert callable(home.action)
+
+
+def test_смена_флага_новый_ключ_пункта_меню():
+    """Галочку подменю _patch_menu не правит: смена флага — перестройка меню."""
+    on = tray._menu_key(_work(confs=["office"]))
+    off = tray._menu_key(_work(confs=["office"], enabled=False))
+
+    assert on == ("work", True) and off == ("work", False)
+    assert tray._menu_key(_work()) == ("work", None)
+    assert tray._menu_key(_home(confs=["nl-1"])) == ("home", None)
+
+
+def test_выключенный_серый_и_на_живом_и_на_выключенном_vpn():
+    off = _work(enabled=False, check="", last="error")
+
+    assert tray._conf_colors(_up(off, _home()), frozenset({"work", "home"})) == {
+        "work": "off", "home": "busy"}
+    assert tray._conf_colors({**_up(off), "up": False}, NONE) == {"work": "off"}
+    assert tray._conf_colors(_up(off, busy="включаю"), NONE) == {"work": "off"}
+
+
+@pytest.mark.parametrize("enabled, on, up, ops", [
+    (True, False, True, ["set-enabled", "apply"]),
+    (False, True, True, ["set-enabled", "apply"]),
+    # VPN выключен — флаг подействует при включении, apply не нужен.
+    (True, False, False, ["set-enabled"]),
+])
+def test_вкл_выкл_из_трея(monkeypatch, enabled, on, up, ops):
+    st = {**_up(_work(confs=["office"], enabled=enabled)), "up": up}
+    sent = []
+
+    def call(op, **kw):
+        sent.append((op, kw))
+        return {"ok": True, "status": st}
+    monkeypatch.setattr(tray.ipc, "call", call)
+    app = tray.Tray()
+    app.status = st
+    app._busy_while = lambda work: work()
+
+    app.on_set_enabled("work")
+
+    assert [op for op, _ in sent if op != "status"] == ops
+    assert ("set-enabled", {"tunnel": "work", "on": on}) in sent
+
+
+def test_отказ_вкл_выкл_уведомляет_и_не_применяет(monkeypatch):
+    sent, shown = [], []
+    monkeypatch.setattr(tray.ipc, "call", lambda op, **kw: sent.append(op) or
+                        {"ok": False, "error": "«Личный» — основной"})
+    app = tray.Tray()
+    app.status = _up(_work(confs=["office"]))
+    app._busy_while = lambda work: work()
+    app._notify = shown.append
+
+    app.on_set_enabled("work")
+
+    assert sent == ["set-enabled"]
+    assert shown == ["«Личный» — основной"]
 

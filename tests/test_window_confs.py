@@ -70,6 +70,32 @@ def test_выбор_конфига_без_прав_по_id_туннеля(monkey
     assert admin == []
 
 
+def test_вкл_выкл_туннеля_без_прав_и_сразу_на_живой_vpn(monkeypatch):
+    api, admin, shown = _api(monkeypatch, [])
+    calls = []
+    monkeypatch.setattr(ipc, "call", lambda op, **kw: calls.append((op, kw)) or
+                        {"ok": True, "status": {}})
+
+    api.send("set_enabled", {"tunnel": "work", "on": False})
+
+    # set-enabled в USER_OPS, как stop; флаг на живой VPN переносит apply.
+    assert calls[:2] == [("set-enabled", {"tunnel": "work", "on": False}), ("apply", {})]
+    assert admin == []
+    assert "failed" not in [fn for fn, _ in shown]
+
+
+def test_отказ_вкл_выкл_виден_и_не_применяет(monkeypatch):
+    api, _, shown = _api(monkeypatch, [])
+    calls = []
+    monkeypatch.setattr(ipc, "call", lambda op, **kw: calls.append(op) or
+                        {"ok": False, "error": "«Личный» — основной"})
+
+    api.send("set_enabled", {"tunnel": "home", "on": False})
+
+    assert calls == ["set-enabled"]
+    assert ("failed", "set_enabled: «Личный» — основной") in shown
+
+
 def test_команды_плитки_уходят_администратору_с_id_туннеля(monkeypatch):
     api, admin, shown = _api(monkeypatch, [])
 

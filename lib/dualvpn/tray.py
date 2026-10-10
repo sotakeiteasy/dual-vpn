@@ -159,7 +159,7 @@ class Tray:
         """То, от чего зависят подписи, галочки и доступность пунктов меню."""
         st = self.status
         return (bool(st), bool(st.get("up")), bool(st.get("busy")),
-                tuple((t["id"], _conf_label(t)) for t in st.get("tunnels") or []))
+                tuple((_menu_key(t), _conf_label(t)) for t in st.get("tunnels") or []))
 
     def _post(self, msg, wparam=0, lparam=0):
         """Сообщение окну значка. Окна ещё нет — опрос повторит."""
@@ -185,7 +185,8 @@ class Tray:
         if sig == self._last_menu_sig:
             return
         # Порядок tunnels.json, как в окне: на маршрут он не влияет (решение #16).
-        ids = tuple(t["id"] for t in self.status.get("tunnels") or [])
+        # С видом пункта: подменю и галочку в нём _patch_menu на месте не правит.
+        ids = tuple(_menu_key(t) for t in self.status.get("tunnels") or [])
         if self._menu_open:
             if ids == self._menu_ids and self._patch_menu():
                 self._last_menu_sig = sig
@@ -279,17 +280,29 @@ class Tray:
 
     def _conf_items(self, pystray):
         """Пункты туннелей в порядке _menu_ids: имя конфига и кружок
-        статуса слева, клик — добавить файл в этот туннель.
+        статуса слева, клик — добавить файл в этот туннель. У туннеля
+        «по списку» с конфигом — подменю «Включён» и «Добавить конфиг…»: основной
+        выключает «Всё остальное напрямую» в окне, и его пункт остаётся одним кликом.
 
         Кружок ставит _paint_dots, а не pystray: картинок у пунктов pystray
-        не умеет. Пункт удалённого туннеля забываем.
+        не умеет. Пункт удалённого туннеля или прежнего вида забываем.
         """
         items = {}
-        for tid in self._menu_ids:
-            items[tid] = self._tunnel_items.get(tid) or pystray.MenuItem(
-                self._label_of(tid), self._add_to(tid), enabled=self._can_edit)
+        for key in self._menu_ids:
+            tid, on = key
+            items[key] = self._tunnel_items.get(key) or (
+                self._switch_item(pystray, tid) if on is not None else pystray.MenuItem(
+                    self._label_of(tid), self._add_to(tid), enabled=self._can_edit))
         self._tunnel_items = items
         return tuple(items.values())
+
+    def _switch_item(self, pystray, tid):
+        """Пункт туннеля «по списку» с подменю вкл/выкл и добавления файла."""
+        return pystray.MenuItem(self._label_of(tid), pystray.Menu(
+            pystray.MenuItem("Включён", self._toggle_of(tid), checked=self._enabled_of(tid),
+                             enabled=self._can_edit),
+            pystray.MenuItem("Добавить конфиг…", self._add_to(tid), enabled=self._can_edit)),
+            enabled=self._can_edit)
 
     def _label_of(self, tid):
         """Подпись пункта туннеля tid — из текущего статуса."""
@@ -299,6 +312,13 @@ class Tray:
         """Действие пункта без аргументов: pystray считает co_argcount, и
         lambda tid=tid он вызвал бы с значком вместо id."""
         return lambda: self.on_add_config(tid)
+
+    def _toggle_of(self, tid):
+        return lambda: self.on_set_enabled(tid)
+
+    def _enabled_of(self, tid):
+        """Галочка «Включён» — из текущего статуса."""
+        return lambda _i: (_tunnel_of(self.status, tid) or {}).get("enabled") is not False
 
     # ------------------------------------------------------ кружки в меню
 
@@ -382,7 +402,7 @@ class Tray:
             return
         items = list(self.icon.menu)
         colors = _conf_colors(self.status, self._checking)
-        for tid, item in self._tunnel_items.items():
+        for (tid, _on), item in self._tunnel_items.items():
             t = _tunnel_of(self.status, tid)
             if item in items:
                 _set_item_bitmap(handle[0], items.index(item),
@@ -482,6 +502,16 @@ class Tray:
             else:
                 self._notify(f"«{title}»: конфиг {reply.get('name')}.conf {what}")
         threading.Thread(target=work, daemon=True).start()
+
+    def on_set_enabled(self, tid):
+        """Вкл/выкл туннеля «по списку»: служба пишет флаг, на живой VPN его
+        переносит apply — как после добавления конфига."""
+        on = (_tunnel_of(self.status, tid) or {}).get("enabled") is False
+
+        def work():
+            if self._call("set-enabled", tunnel=tid, on=on) and self.status.get("up"):
+                self._call("apply")
+        self._busy_while(work)
 
     def _call(self, op, **payload):
         """Команда в службу с уведомлением об ошибке. None — не вышло."""
@@ -718,12 +748,21 @@ def _conf_name(t):
     return active if active in confs else None
 
 
+def _menu_key(t):
+    """(id, включён) пункта туннеля t. Второе — None у пункта без подменю:
+    основной и туннель без конфига одним кликом зовут добавить файл."""
+    if t.get("mode") != "list" or not _conf_name(t):
+        return t["id"], None
+    return t["id"], t.get("enabled") is not False
+
+
 def _conf_label(t):
     """Подпись пункта туннеля: имя его конфига, как на плитке окна, или
-    «<имя туннеля>: добавить конфиг…» — конфиг выбирать нечего."""
+    «<имя туннеля>: добавить конфиг…» — конфиг выбирать нечего. Выключенный
+    туннель «по списку» — с пометкой, как «конфиг выключен» на плитке."""
     conf = _conf_name(t)
     if conf:
-        return _clip(conf, NAME_MAX)
+        return _clip(conf, NAME_MAX) + (" (выключен)" if t.get("enabled") is False else "")
     return f"{_clip(t.get('name') or t.get('id'), NAME_MAX)}: добавить конфиг…"
 
 
@@ -749,14 +788,17 @@ def _conf_colors(st, checking):
     запасном выходе напрямую, случившемся после проверки. «По списку» без
     DNS и домена в «пускать» ответить нечему — серый честнее красного.
     Сервер отвечает, а домен из «пускать» нет (rules) — рыжий, как жёлтая
-    плитка окна: не мёртвый, но и не «всё хорошо».
+    плитка окна: не мёртвый, но и не «всё хорошо». Выключенный «по списку» не
+    поднят и не проверяется — серый всегда, даже с прошлым «не работал».
     """
     items = st.get("tunnels") or []
+    out = {t["id"]: "off" for t in items if t.get("enabled") is False}
+    items = [t for t in items if t["id"] not in out]
     if not st.get("up"):
-        return {t["id"]: "error" if t.get("last") == "error" else "off" for t in items}
+        return {**out, **{t["id"]: "error" if t.get("last") == "error" else "off"
+                          for t in items}}
     if st.get("busy"):
-        return {t["id"]: "busy" for t in items}
-    out = {}
+        return {**out, **{t["id"]: "busy" for t in items}}
     for t in items:
         check = t.get("check")
         if t["id"] in checking or t.get("checking"):

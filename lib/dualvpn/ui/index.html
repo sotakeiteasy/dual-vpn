@@ -423,7 +423,7 @@ function render(s) {
                   sub = silent.length < T.length ? 'остальные туннели работают' : 'туннели подняты, но молчат'; }
   else           { cls='ok';   title='Всё работает';
                    sub = !main ? 'всё остальное — напрямую, без VPN'
-                       : T.length > 1 ? 'туннели подняты' : 'туннель поднят'; }
+                       : T.filter(t => t.enabled !== false).length > 1 ? 'туннели подняты' : 'туннель поднят'; }
 
   document.getElementById('dot').className = cls;
   document.getElementById('state-title').textContent = title;
@@ -492,14 +492,16 @@ function render(s) {
 // отработал в прошлый раз: сломанный заменяют до включения, а не после.
 // Серым: зелёная «выключен · работал» читалась как «работает». Проверка
 // конфига (↻, после добавления) свежее прошлого раза — тогда её итог.
+// «Конфиг выключен» — туннель «по списку» выключен сам, «VPN выключен» — весь VPN.
 function tileState(t, s, checking, direct) {
   if (!hasConf(t)) return ['warn', 'нет конфига'];
   const name = t.active || t.confs[0];
   const test = testOf(t, name);
   if (testing(t, name)) return ['warn', 'проверяю…'];
-  if (!s.up) return test ? testState(test, 'выключен · ')
-                  : t.last === 'error' ? ['bad', 'выключен · раньше не работал']
-                  : t.last === 'up' ? ['off', 'выключен · раньше работал'] : ['off', 'выключен'];
+  if (t.enabled === false) return test ? testState(test, 'конфиг выключен · ') : ['off', 'конфиг выключен'];
+  if (!s.up) return test ? testState(test, 'VPN выключен · ')
+                  : t.last === 'error' ? ['bad', 'VPN выключен · раньше не работал']
+                  : t.last === 'up' ? ['off', 'VPN выключен · раньше работал'] : ['off', 'VPN выключен'];
   // Итог ↻ на живом VPN — пока туннель не проверили заново.
   const fresh = test && t.seq === TESTED[testKey(t.id, name)] ? testState(test, '') : null;
   if (t.mode === 'all') {
@@ -669,7 +671,12 @@ function tileMenu(id, name, near) {
     const full = t.full ? [['Всё остальное через этот туннель', () => setMode(id, 'all')],
                            ...(main ? [[`Запасным к «${esc(tname(main))}»`, () => moveToAll(t, name)]] : [])]
                         : [];
-    openMenu([rules, show, edit,
+    // Выключенный не поднимается, конфиги и правила остаются (у основного —
+    // «Всё остальное напрямую» выше).
+    const off = t.enabled === false;
+    const toggle = [off ? 'Включить' : 'Выключить',
+                    () => send('set_enabled', {tunnel: id, on: off})];
+    openMenu([toggle, rules, show, edit,
               ['Заменить файл…', () => send('add_config', {tunnel: id, place: 'replace'})],
               ...full, del], near);
   }
