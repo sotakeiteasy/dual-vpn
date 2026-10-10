@@ -56,7 +56,7 @@ class PutConfigTests(unittest.TestCase):
         self.w.eval = self.js.append
         self.w.status = lambda: {"up": False}
         self.w.push = lambda: None
-        self.conf = os.path.join(self.w.data, "conf")
+        self.conf = os.path.join(self.w.data, "conf", "corp")
         os.makedirs(self.conf)
         with open(os.path.join(self.conf, "wg-old.conf"), "w") as fh:
             fh.write("old")
@@ -87,6 +87,18 @@ class PutConfigTests(unittest.TestCase):
         self.w.ctrl = mock.Mock()
         self.w.put_config("corp", "wg0-ivanov.conf", self.write("new"))
         self.w.ctrl.restart.assert_called_once()
+
+    def test_page_object_arrives_as_nsdictionary(self):
+        # Так {kind, name} отдаёт WebKit: не dict, а NSDictionary.
+        from Foundation import NSDictionary
+        arg = NSDictionary.dictionaryWithDictionary_({"kind": "corp", "name": "wg-old"})
+        self.w.show_config(arg)
+        self.assertEqual(self.js, ['showConf("corp", "wg-old", "old")'])
+
+    def test_page_object_with_bad_kind_is_ignored(self):
+        self.w.show_config({"kind": "../corp", "name": "wg-old"})
+        self.w.show_config("wg-old")
+        self.assertEqual(self.js, [])
 
 
 @unittest.skipIf(window is None, "нет AppKit")

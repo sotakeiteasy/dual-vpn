@@ -73,8 +73,9 @@ for s in c.get("dns", {}).get("servers", []):
 
 # Если конфиг ещё не собран (например, меряем под WireGuard.app) — из корп-.conf
 if [ -z "$CORP_DNS" ]; then
-  CORP_CONF=""
-  for RE in '^corp\.conf$' '^wg[-_0-9].*\.conf$' '^wg\.conf$'; do
+  # Рабочий лежит в conf/corp; папки нет — ищем по прежним именам в conf/.
+  CORP_CONF=$(ls -1 "$BASE"/conf/corp/*.conf 2>/dev/null | head -1)
+  [ -n "$CORP_CONF" ] || for RE in '^corp\.conf$' '^wg[-_0-9].*\.conf$' '^wg\.conf$'; do
     NAME=$(ls -1 "$BASE/conf" 2>/dev/null | grep -iE "$RE" | head -1)
     [ -n "$NAME" ] && { CORP_CONF="$BASE/conf/$NAME"; break; }
   done

@@ -10,14 +10,14 @@
 # dns.rules для них не работают. Файлы в /etc/resolver заставляют macOS слать
 # запросы по этим доменам прямо на корп-DNS, а тот уже идёт в туннель.
 #
-# Адрес DNS берётся из строки DNS= в conf/corp.conf.
+# Адрес DNS берётся из строки DNS= рабочего конфига в conf/corp.
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# Корп-конфиг: corp.conf либо то, как его отдают админы — wg0-<фамилия>.conf.
-# Логика та же, что в build-config.py; регистр не важен.
-CORP_CONF=""
-for RE in '^corp\.conf$' '^wg[-_0-9].*\.conf$' '^wg\.conf$'; do
+# Рабочий конфиг лежит в conf/corp, имя любое. Папки нет — ищем по прежним
+# именам в conf/: corp.conf либо wg0-<фамилия>.conf, регистр не важен.
+CORP_CONF=$(ls -1 "$BASE"/conf/corp/*.conf 2>/dev/null | head -1)
+[ -n "$CORP_CONF" ] || for RE in '^corp\.conf$' '^wg[-_0-9].*\.conf$' '^wg\.conf$'; do
   NAME=$(ls -1 "$BASE/conf" 2>/dev/null | grep -iE "$RE" | head -1)
   if [ -n "$NAME" ]; then
     CORP_CONF="$BASE/conf/$NAME"
@@ -42,7 +42,7 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 if [ -z "$CORP_CONF" ] || [ ! -f "$CORP_CONF" ]; then
-  echo "в $BASE/conf нет корп-конфига (corp.conf или wg0-<фамилия>.conf)"
+  echo "no work config in $BASE/conf/corp"
   exit 1
 fi
 echo "корп-конфиг: $(basename "$CORP_CONF")"

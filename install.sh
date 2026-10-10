@@ -28,8 +28,14 @@ fi
 [ -x "$BASE/lib/bin/sing-box" ] || {
   echo "нет lib/bin/sing-box — скачай бинарник, см. README, шаг 2"; exit 1; }
 
-ls "$BASE"/conf/*.conf >/dev/null 2>&1 || {
-  echo "в conf/ нет ни одного .conf — положи свои конфиги, см. README, шаг 3"
+# Конфиги по папкам conf/corp и conf/personal; прямо в conf/ — до 0.1.13,
+# их разложит служба.
+HAVE_CONF=""
+for F in "$BASE"/conf/*.conf "$BASE"/conf/corp/*.conf "$BASE"/conf/personal/*.conf; do
+  if [ -f "$F" ]; then HAVE_CONF=1; break; fi
+done
+[ -n "$HAVE_CONF" ] || {
+  echo "в conf/corp и conf/personal нет ни одного .conf — положи свои конфиги, см. README, шаг 3"
   exit 1; }
 
 # Пароль — сразу, а не после сборки. Иначе установка минутами стояла на

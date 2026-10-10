@@ -3,7 +3,7 @@
 #
 #   sudo ./vpn ui [ПРОФИЛЬ]     панель: статус сверху, логи снизу  (q — выход)
 #   sudo ./vpn start [ПРОФИЛЬ]  то же без панели, простым выводом в терминал
-#   sudo ./vpn list             какие личные конфиги лежат в conf/
+#   sudo ./vpn list             какие конфиги лежат в conf/corp и conf/personal
 #   sudo ./vpn stop             снять процесс и всё, что мы навесили на систему
 #   sudo ./vpn status           что сейчас поднято
 #   sudo ./vpn diag             полный тест: старт, замеры, остановка
@@ -13,9 +13,9 @@
 #
 # Без аргументов — start.
 #
-# ПРОФИЛЬ — имя файла из conf/ без .conf, который пойдёт личным туннелем:
-# `vpn ui nl-1` возьмёт conf/nl-1.conf. Без него — personal.conf, как раньше.
-# Корп-туннель выбирается сам и от профиля не зависит.
+# ПРОФИЛЬ — имя файла из conf/personal без .conf, который пойдёт личным
+# туннелем: `vpn ui nl-1` возьмёт conf/personal/nl-1.conf. Без него — выбранный
+# в окне, по умолчанию первый по алфавиту. Рабочий — единственный в conf/corp.
 
 set -u
 # Код и данные разведены. Внутри .app код лежит в бандле и переписывается
@@ -85,39 +85,47 @@ PEERS=""   # адреса пиров из config.json, заполняется д
 : "${SB_PERSONAL:=}"
 export SB_PERSONAL
 
+# Конфиги лежат по папкам: conf/corp — рабочий, conf/personal — личные, имя
+# файла не важно. Лежащие прямо в conf/ — от прежних версий или положенные
+# руками — раскладываются по прежним правилам имён (confdirs.py).
+sort_confs() {
+  python3 "$SCRIPTS/confdirs.py" "$CONF" || true
+}
+
 # Проверяем имя до старта: иначе ошибка вылезет уже после sudo и v6_off.
 set_profile() {
+  sort_confs
   # Аргумент важнее переменной окружения, та — важнее сохранённого выбора.
-  # Файл нужен демону: в plist профиль не передашь, а из окна его меняют.
+  # Сохранённый выбор build-config.py читает сам: если его файла уже нет,
+  # он берёт первый личный, а не отказывает.
   local name="${1:-$SB_PERSONAL}"
-  if [ -z "$name" ] && [ -f "$STATE/profile" ]; then
-    name=$(tr -d ' \n' < "$STATE/profile")
-  fi
   [ -z "$name" ] && return 0
   name="${name%.conf}"
-  if [ ! -f "$CONF/$name.conf" ]; then
+  if [ ! -f "$CONF/personal/$name.conf" ]; then
     cmd_list
-    fail_start "no profile \"${name}\": $CONF/$name.conf not found"
+    fail_start "no profile \"${name}\": $CONF/personal/$name.conf not found"
   fi
   SB_PERSONAL="$name"
   export SB_PERSONAL
 }
 
 cmd_list() {
-  echo "личные конфиги в conf/:"
-  local found=0
-  for f in "$CONF"/*.conf; do
-    [ -e "$f" ] || continue
-    found=1
-    local n mark=""
-    n="$(basename "$f" .conf)"
-    case "$n" in
-      corp|wg|wg[-_0-9]*) mark="  (корп)" ;;
-      personal)           mark="  (личный по умолчанию)" ;;
-    esac
-    echo "  $n$mark"
+  sort_confs
+  local saved="" kind f n mark found
+  [ -f "$STATE/profile" ] && saved=$(tr -d ' \n' < "$STATE/profile")
+  for kind in corp personal; do
+    echo "conf/$kind:"
+    found=0
+    for f in "$CONF/$kind"/*.conf; do
+      [ -e "$f" ] || continue
+      found=1
+      n="$(basename "$f" .conf)"
+      mark=""
+      [ "$kind" = personal ] && [ "$n" = "$saved" ] && mark="  (выбран)"
+      echo "  $n$mark"
+    done
+    [ "$found" = 1 ] || echo "  (пусто)"
   done
-  [ "$found" = 1 ] || echo "  (пусто)"
   echo "запуск: sudo $0 ui ИМЯ"
 }
 
@@ -555,7 +563,7 @@ cmd_start() {
   trap 'cleanup 0' INT TERM HUP QUIT
   trap cleanup EXIT
 
-  # Пересобираем config.json из conf/*.conf: корп-конфиг ротируется,
+  # Пересобираем config.json из conf/corp и conf/personal: корп-конфиг ротируется,
   # достаточно положить новый файл — правки скриптов не нужны.
   # Вывод перехватываем, чтобы последняя его строка — это и есть причина:
   # sys.exit с текстом или последняя строка трейсбека — ушла в LAST_ERROR.
@@ -564,7 +572,7 @@ cmd_start() {
   out=$(python3 "$SCRIPTS/build-config.py" 2>&1); rc=$?
   [ -n "$out" ] && printf '%s\n' "$out"
   if [ $rc != 0 ]; then
-    fail_start "could not build the config — fix conf/*.conf" "$(printf '%s\n' "$out" | tail -1)"
+    fail_start "could not build the config — fix the files in conf/corp or conf/personal" "$(printf '%s\n' "$out" | tail -1)"
   fi
   out=$("$BIN/sing-box" check -c "$STATE/config.json" 2>&1); rc=$?
   [ -n "$out" ] && printf '%s\n' "$out"

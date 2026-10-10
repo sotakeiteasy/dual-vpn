@@ -12,14 +12,15 @@ NSApp, поэтому конфликта нет.
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import traceback
+from collections.abc import Mapping
 
+import confdirs
 import control
 import corpconf
 import i18n
@@ -284,67 +285,34 @@ class Window:
         return sum(1 for l in self.session()
                    if " ERROR " in l or l.startswith("ERROR"))
 
-    # Те же правила, что в build-config.py: имя файла решает, чем он будет.
-    CORP_PAT = (r"^corp\.conf$", r"^wg[-_0-9].*\.conf$", r"^wg\.conf$")
-    PERSONAL_PAT = (r"^personal\.conf$", r"^(awg|amnezia).*\.conf$")
+    def conf(self):
+        return os.path.join(self.data, "conf")
 
     def configs(self):
-        """Два раздела: рабочий и личный.
+        """Два раздела: рабочий и личный — по папкам conf/corp и conf/personal.
 
-        Личный выбирается — их может лежать сколько угодно. Рабочий не
-        выбирается: build-config.py берёт единственный подходящий и ругается,
-        если их несколько, поэтому здесь это показано как ошибка, а не выбор.
+        Личный выбирается — их может лежать сколько угодно; по умолчанию
+        первый, как и в build-config.py. Рабочий не
+        выбирается: сборка берёт единственный и ругается, если их несколько,
+        поэтому здесь это показано как ошибка, а не выбор.
         """
-        d = os.path.join(self.data, "conf")
-        try:
-            files = sorted(f for f in os.listdir(d) if f.lower().endswith(".conf"))
-        except OSError:
-            files = []
-
-        corp = []
-        for pat in self.CORP_PAT:
-            m = [f for f in files if re.match(pat, f, re.I)]
-            if m:
-                corp = m
-                break
-
         chosen = ""
         try:
-            with open(os.path.join(self.state, "profile"), encoding="utf-8") as fh:
-                chosen = fh.read().strip()
-        except OSError:
-            pass
-        # Профиль мог указывать на удалённый файл — тогда он не в счёт.
-        if chosen and chosen + ".conf" not in files:
-            chosen = ""
-        chosen_explicit = bool(chosen)
+            # Конфиги, лежащие прямо в conf/, — из прежних версий или
+            # положенные руками — раскладываются по папкам здесь же.
+            for f, kind in confdirs.sort_out(self.conf()):
+                self.log(f"конфиг {f} перенесён в conf/{kind}/")
+            chosen = confdirs.profile(self.conf(), self.state)
+        except OSError as e:
+            self.log(f"не смог разложить конфиги: {e}")
 
-        personal = [f for f in files if f not in corp]
-        if not chosen:
-            for pat in self.PERSONAL_PAT:
-                m = [f for f in personal if re.match(pat, f, re.I)]
-                if m:
-                    chosen = m[0][:-5]
-                    break
-
-        # Когда профиль не выбран, build-config.py тоже ищет по шаблонам и
-        # падает, если подходящих несколько. Раньше окно в этом случае бодро
-        # подсвечивало первый и молчало о том, что сборка не пройдёт.
-        p_ambiguous = False
-        if not chosen_explicit:
-            for pat in self.PERSONAL_PAT:
-                m = [f for f in personal if re.match(pat, f, re.I)]
-                if m:
-                    p_ambiguous = len(m) > 1
-                    break
-
+        corp = confdirs.names(self.conf(), "corp")
         return {
-            "corp": [{"name": f[:-5], "active": True} for f in corp],
+            "corp": [{"name": n, "active": True} for n in corp],
             # Несколько рабочих — не выбор, а поломка: сборка конфига упадёт.
             "corp_ambiguous": len(corp) > 1,
-            "personal": [{"name": f[:-5], "active": f[:-5] == chosen}
-                         for f in personal],
-            "personal_ambiguous": p_ambiguous,
+            "personal": [{"name": n, "active": n == chosen}
+                         for n in confdirs.names(self.conf(), "personal")],
         }
 
     def tool(self, name):
@@ -520,15 +488,15 @@ class Window:
             "in the section header: a code will arrive at the work email from settings.",
             "Got it as a file? Click ＋ in the header. The old one is removed, "
             "the file is copied in, and the original is no longer needed.",
-            "Names: corp.conf, wg.conf, wg-*.conf, wg0-*.conf. "
-            "Any other name is fixed automatically.",
+            "The file name doesn't matter: what makes it the work config is "
+            "the section it was added to.",
             "Where traffic goes is decided by AllowedIPs inside the file.",
         ]),
         "personal": ("Personal tunnel", [
             "Everything that didn't go to the work tunnel goes here.",
-            "Keep as many as you like and switch with a click.",
-            "Names: personal.conf, awg-*.conf, amnezia-*.conf — "
-            "or any file picked in the list.",
+            "Keep as many as you like and switch with a click. "
+            "By default, the first in the list.",
+            "The file name doesn't matter — add it with ＋ in this section.",
             "AmneziaWG is detected automatically: if the file has Jc, S1, H1 "
             "and similar fields, obfuscation is already on.",
         ]),
@@ -540,15 +508,15 @@ class Window:
             "раздела: код придёт на рабочую почту из настроек.",
             "Выдали файлом — ＋ в заголовке. Старый удалится, "
             "файл скопируется к себе, исходник больше не нужен.",
-            "Имена: corp.conf, wg.conf, wg-*.conf, wg0-*.conf. "
-            "Другое имя программа поправит сама.",
+            "Имя файла не важно: рабочим его делает раздел, "
+            "в который он добавлен.",
             "Куда идёт трафик, решает AllowedIPs внутри файла.",
         ]),
         "personal": ("Личный туннель", [
             "Всё, что не ушло в рабочий туннель, идёт сюда.",
-            "Держи сколько угодно и переключайся кликом.",
-            "Имена: personal.conf, awg-*.conf, amnezia-*.conf — "
-            "или любой файл, выбранный в списке.",
+            "Держи сколько угодно и переключайся кликом. "
+            "По умолчанию — первый в списке.",
+            "Имя файла не важно — добавляй ＋ в этом разделе.",
             "AmneziaWG подхватывается сам: если в файле есть Jc, S1, H1 "
             "и подобные поля, маскировка уже работает.",
         ]),
@@ -837,23 +805,37 @@ class Window:
         """Имя приходит со страницы, а дальше идёт в open и unlink."""
         return bool(name) and not set(name) & set("/\\") and name not in (".", "..")
 
-    def show_config(self, name):
-        if not self._safe(name):
+    def _conf_path(self, arg):
+        """{kind, name} со страницы -> путь к файлу или None.
+
+        Имя одно и то же может оказаться и у рабочего, и у личного, поэтому
+        страница называет и раздел. Объект со страницы приходит NSDictionary,
+        а не dict: проверка на dict отбросила бы каждый.
+        """
+        if not isinstance(arg, Mapping):
+            return None
+        kind, name = arg.get("kind"), arg.get("name")
+        if (kind not in confdirs.KINDS or not isinstance(name, str)
+                or not self._safe(name)):
+            return None
+        return confdirs.conf_path(self.conf(), kind, name)
+
+    def show_config(self, arg):
+        path = self._conf_path(arg)
+        if path is None:
             return
-        path = os.path.join(self.data, "conf", f"{name}.conf")
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
         except OSError as e:
             text = f"can't read: {e}"
         # Ключи прячет страница; сюда они всё же попадают, поэтому в лог ни строчки.
-        self.eval(f"showConf({_js(name)}, {_js(text)})")
+        self.eval(f"showConf({_js(arg['kind'])}, {_js(arg['name'])}, {_js(text)})")
 
     def use_config(self, name):
-        if not self._safe(name):
+        # Выбирают только личный: рабочий один.
+        if not self._safe(name) or name not in confdirs.names(self.conf(), "personal"):
             return
-        if any(c["name"] == name for c in self.configs()["corp"]):
-            return                      # рабочий не выбирают, он один
 
         cur = [c for c in self.configs()["personal"] if c["active"]]
         if cur and cur[0]["name"] == name:
@@ -870,8 +852,7 @@ class Window:
             return
 
         try:
-            with open(os.path.join(self.state, "profile"), "w", encoding="utf-8") as fh:
-                fh.write(name)
+            confdirs.save_profile(self.state, name)
             self.log(f"профиль: {name}")
         except OSError as e:
             self.log(f"не смог сохранить профиль: {e}")
@@ -935,6 +916,9 @@ class Window:
         self.push()
 
     def add_config(self, kind):
+        if kind not in confdirs.KINDS:
+            self.log(f"окно: неизвестный раздел конфигов {kind!r}")
+            return
         panel = NSOpenPanel.openPanel()
         panel.setAllowedFileTypes_(["conf"])
         panel.setMessage_(t("Рабочий конфиг WireGuard", "Work WireGuard config")
@@ -944,17 +928,10 @@ class Window:
         if panel.runModal() != 1:
             return
         src = str(panel.URLs()[0].path())
+        # Имя остаётся как было: вид задаёт папка, а не имя.
         base = os.path.basename(src)
 
-        # Тип определяется именем файла, поэтому имя приводим к нужному виду.
-        # Иначе файл office.conf, выбранный как рабочий, молча стал бы личным.
-        looks_corp = any(re.match(p, base, re.I) for p in self.CORP_PAT)
-        if kind == "corp" and not looks_corp:
-            base = "wg-" + base
-        elif kind == "personal" and looks_corp:
-            base = "awg-" + base
-
-        dst = os.path.join(self.data, "conf", base)
+        dst = os.path.join(confdirs.kind_dir(self.conf(), kind), base)
         replacing = self.replaced_by(kind, base)
         if replacing:
             if not self.confirm(REPLACE_CORP(), replace_info(replacing, base),
@@ -972,16 +949,16 @@ class Window:
         """Прежние рабочие, которые уйдут, когда ляжет base. У личных — никто."""
         if kind != "corp":
             return []
-        return [c["name"] + ".conf" for c in self.configs()["corp"]
-                if c["name"] + ".conf" != base]
+        return [n + ".conf" for n in confdirs.names(self.conf(), "corp")
+                if n + ".conf" != base]
 
     def put_config(self, kind, base, write):
-        """Кладёт конфиг в conf/ под именем base; write(tmp) пишет содержимое.
+        """Кладёт конфиг в conf/<kind>/ под именем base; write(tmp) пишет содержимое.
 
         Один путь и для файла, и для конфига с сайта. Спрашивать человека —
         дело вызывающего: здесь только запись. True — положили.
         """
-        conf_dir = os.path.join(self.data, "conf")
+        conf_dir = confdirs.kind_dir(self.conf(), kind)
         dst = os.path.join(conf_dir, base)
         replacing = self.replaced_by(kind, base)
         # Сначала копия во временный файл рядом, и только потом подмена. Иначе
@@ -989,6 +966,7 @@ class Window:
         # каталог вообще без рабочего конфига — сборка перестала бы проходить.
         tmp = dst + ".new"
         try:
+            os.makedirs(conf_dir, mode=0o700, exist_ok=True)
             write(tmp)
             os.chmod(tmp, 0o600)            # внутри приватный ключ
             for old_name in replacing:      # их может быть несколько, если уже намусорено
@@ -1081,32 +1059,32 @@ class Window:
                 fh.write(text)
         self.put_config("corp", base, write)
 
-    def edit_config(self, name):
+    def edit_config(self, arg):
         """Открывает файл в системном редакторе.
 
         Свой редактор в окне не делаю: там пришлось бы показать приватный ключ
         открытым текстом, ради чего маскировка в просмотре и заводилась.
         """
-        if not self._safe(name):
-            return
-        path = os.path.join(self.data, "conf", f"{name}.conf")
-        if os.path.exists(path):
+        path = self._conf_path(arg)
+        if path is not None and os.path.exists(path):
             subprocess.run(["/usr/bin/open", "-t", path])
 
-    def del_config(self, name):
-        if not self._safe(name):
+    def del_config(self, arg):
+        path = self._conf_path(arg)
+        if path is None:
             return
+        name = arg["name"]
         if not self.confirm(t(f"Удалить {name}.conf?", f"Delete {name}.conf?"),
                             t("Файл будет удалён с диска, это не отменить.",
                               "The file will be deleted from disk. This can't be undone.")):
             return
         try:
-            os.unlink(os.path.join(self.data, "conf", f"{name}.conf"))
+            os.unlink(path)
             self.log(f"удалён конфиг: {name}")
             # Иначе следующий «Включить» запустит демон с профилем, которого
             # больше нет, и туннель не поднимется.
             prof = os.path.join(self.state, "profile")
-            if os.path.exists(prof):
+            if arg["kind"] == "personal" and os.path.exists(prof):
                 with open(prof, encoding="utf-8") as fh:
                     if fh.read().strip() == name:
                         os.unlink(prof)

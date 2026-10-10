@@ -15,7 +15,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 # Скрипты кладём файлами, а не модулями: их запускает bash, а не Python,
 # и внутри zip-архива py2app они были бы недоступны.
 SCRIPTS = [os.path.join(ROOT, "lib", "scripts", f)
-           for f in ("build-config.py", "tui.py", "setup-resolver.sh",
+           for f in ("build-config.py", "confdirs.py", "tui.py", "setup-resolver.sh",
                      "check.sh", "diag.sh", "install-daemon.sh",
                      "apply-update.sh", "migrate-data.sh")]
 
@@ -41,7 +41,7 @@ OPTIONS = {
         "NSHumanReadableCopyright": "",
     },
     # tui даёт логику проб, остальное — то, чем она пользуется.
-    "includes": ["rumps", "tui", "window", "control", "menumodel", "update", "corpconf", "loginitem", "i18n",
+    "includes": ["rumps", "tui", "window", "control", "menumodel", "update", "corpconf", "confdirs", "loginitem", "i18n",
                  "curses",
                  "json", "re", "subprocess", "plistlib", "shutil",
                  "PyObjCTools.AppHelper"],
@@ -52,10 +52,7 @@ OPTIONS = {
     # sing-box — 54 МБ, это основной вес готового DMG.
     "resources": ["ui", ROOT + "/vpn", ROOT + "/VERSION",
                   ROOT + "/lib/bin/sing-box",
-                  ROOT + "/lib/launchd",
-                  ROOT + "/conf/personal.conf.example",
-                  ROOT + "/conf/corp.conf.example",
-                  ROOT + "/conf/site.env.example"] + SCRIPTS,
+                  ROOT + "/lib/launchd"] + SCRIPTS,
 }
 
 setup(

@@ -62,6 +62,26 @@ class MigrateTests(unittest.TestCase):
         self.run_script()
         self.assertEqual(self.files("conf"), ["wg.conf"])
 
+    def test_config_folders_move_too(self):
+        # С 0.1.13 конфиги лежат по папкам conf/corp и conf/personal.
+        for name in ("corp.conf", "awg-home.conf"):
+            os.unlink(os.path.join(self.old, "conf", name))
+        self.put(self.old, "conf/corp/office.conf", "[Interface]\n", 0o600)
+        self.put(self.old, "conf/personal/home.conf", "[Interface]\n", 0o600)
+
+        self.run_script()
+
+        self.assertEqual(self.files("conf/corp"), ["office.conf"])
+        self.assertEqual(self.files("conf/personal"), ["home.conf"])
+        mode = os.stat(os.path.join(self.new, "conf", "corp", "office.conf")).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_existing_folder_configs_are_not_overwritten(self):
+        self.put(self.new, "conf/personal/mine.conf", "своё\n")
+        self.run_script()
+        self.assertEqual(self.files("conf"), ["personal"])
+        self.assertEqual(self.files("conf/personal"), ["mine.conf"])
+
     def test_service_already_on_new_place(self):
         self.service(self.new)
         self.run_script()

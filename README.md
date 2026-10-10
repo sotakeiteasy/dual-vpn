@@ -55,7 +55,7 @@
    sudo bash /Applications/DualVPN.app/Contents/Resources/install-daemon.sh
    ```
 
-   Конфиги (`conf/*.conf`, `conf/site.env`) и выбранный профиль скопируются
+   Конфиги (`conf/corp/`, `conf/personal/`, `conf/site.env`) и выбранный профиль скопируются
    из проекта в `~/Library/Application Support/DualVPN`, если там их ещё
    нет. Папку проекта установщик не трогает — её можно удалить сам.
 4. Перезапусти приложение: каталог данных оно читает при старте.
@@ -75,7 +75,8 @@ curl -LO https://github.com/Leadaxe/sing-box-lx/releases/download/v$VER/sing-box
 tar xzf sing-box-$VER-$ARCH.tar.gz --strip-components=1 sing-box-$VER-$ARCH/sing-box
 chmod +x sing-box && xattr -dr com.apple.quarantine sing-box && cd ../..
 
-cp ~/mine/personal.conf ~/mine/wg0-corp.conf conf/
+mkdir -p conf/corp conf/personal
+cp ~/mine/office.conf conf/corp/ && cp ~/mine/home.conf conf/personal/
 bash install.sh                    # без sudo, пароль спросит сам
 ```
 
@@ -87,19 +88,30 @@ bash install.sh                    # без sudo, пароль спросит с
 
 ## Конфиги
 
-Тип определяется именем файла:
+Тип задаёт папка, имя файла может быть любым:
 
-| | имена | формат |
+| | папка | формат |
 |---|---|---|
-| рабочий | `corp.conf`, `wg.conf`, `wg-*.conf`, `wg0-*.conf` | WireGuard |
-| личный | `personal.conf`, `awg-*.conf`, `amnezia-*.conf` | WireGuard или AmneziaWG |
+| рабочий | `conf/corp/` | WireGuard |
+| личный | `conf/personal/` | WireGuard или AmneziaWG |
 
-Рабочий должен быть ровно один, личных сколько угодно — переключаются в окне.
+Рабочий должен быть ровно один, личных сколько угодно — переключаются в окне,
+по умолчанию первый по алфавиту. Конфиги, лежащие прямо в
+`conf/` (так было до 0.1.13), раскладываются по папкам сами: `corp.conf`,
+`wg.conf`, `wg-*.conf`, `wg0-*.conf` — в рабочие, остальное — в личные.
 У рабочего не должно быть `AllowedIPs = 0.0.0.0/0`: маршруты берутся оттуда,
-и он заберёт весь трафик. Образцы — в `conf/*.example`.
+и он заберёт весь трафик.
 
-Домены рабочей сети задаются в окне или в `conf/site.env`
-(см. `site.env.example`).
+Настройки рабочей сети задаются в окне или в `conf/site.env` — строки
+`KEY="значение"`, несколько значений через пробел:
+
+```bash
+CORP_DOMAINS="example.local"         # домены, которые резолвит рабочий DNS
+CORP_PROBE="git.example.local"       # по нему проверяется, жива ли рабочая сеть
+CORP_HOSTS="wiki.example.local"      # что ещё проверяет `vpn check`
+SB_CORP_EXCLUDE=""                   # адреса мимо рабочего туннеля, даже из AllowedIPs
+CORP_EMAIL=""                        # почта, на которую сайт конфигов шлёт код
+```
 
 ## Из терминала
 

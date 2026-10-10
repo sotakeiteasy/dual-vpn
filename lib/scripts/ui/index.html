@@ -167,8 +167,8 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
               flex: none; border: 1.5px solid var(--dim); }
 .conf.active .conf-radio { border-color: var(--accent);
   background: radial-gradient(circle closest-side, var(--accent) 55%, transparent 60%); }
-.conf[data-pick="0"] { cursor: default; }
-.conf[data-pick="0"]:hover { background: none; }
+.conf[data-kind="corp"] { cursor: default; }
+.conf[data-kind="corp"]:hover { background: none; }
 .conf-name { flex: 1; }
 .conf-kind { font-size: 11px; color: var(--dim); }
 .conf-menu { flex: none; width: 24px; padding: 0; line-height: 18px; color: var(--dim);
@@ -598,12 +598,14 @@ function renderConfs(d) {
   // уже не быть, и «Удалить» ушло бы в никуда.
   closeMenu();
 
-  const rows = (list, pick) => list.map(c => `
+  // Раздел — у каждой строки: имя одно и то же может быть у рабочего и у личного.
+  const rows = (list, kind) => list.map(c => `
     <div class="conf ${c.active ? 'active' : ''}" data-name="${esc(c.name)}"
-         data-pick="${pick ? 1 : 0}">
-      ${pick ? '<div class="conf-radio"></div>' : ''}
+         data-kind="${kind}">
+      ${kind === 'personal' ? '<div class="conf-radio"></div>' : ''}
       <span class="conf-name">${esc(c.name)}</span>
-      <button class="conf-menu" data-menu="${esc(c.name)}" title="${tr('Действия', 'Actions')}">⋯</button>
+      <button class="conf-menu" data-menu="${esc(c.name)}" data-kind="${kind}"
+              title="${tr('Действия', 'Actions')}">⋯</button>
     </div>`).join('');
 
   document.getElementById('confs-corp').innerHTML =
@@ -611,22 +613,18 @@ function renderConfs(d) {
       ? `<div class="warnline">${tr('несколько рабочих конфигов — сборка не пройдёт, оставь один',
                                    'several work configs — the build will fail, keep one')}</div>`
       : '') +
-    (rows(d.corp || [], false) ||
+    (rows(d.corp || [], 'corp') ||
       `<div class="emptyrow">${tr('рабочего конфига нет', 'no work config')}</div>`);
 
   document.getElementById('confs-personal').innerHTML =
-    (d.personal_ambiguous
-      ? `<div class="warnline">${tr('подходящих личных конфигов несколько — выбери один, иначе сборка не пройдёт',
-                                   'several matching personal configs — pick one or the build will fail')}</div>`
-      : '') +
-    (rows(d.personal || [], true) ||
+    (rows(d.personal || [], 'personal') ||
       `<div class="emptyrow">${tr('личных конфигов нет', 'no personal configs')}</div>`);
   tick('confs');
 }
 
 // Выпадающее меню строки: удаление должно быть в одном клике, а не прятаться
 // внутри просмотра — там его никто не найдёт.
-function openMenu(name, near) {
+function openMenu(kind, name, near) {
   closeMenu();
   const m = document.createElement('div');
   m.id = 'rowmenu';
@@ -642,7 +640,8 @@ function openMenu(name, near) {
     if (!b) return;
     const act = b.dataset.act;
     closeMenu();
-    send(act === 'show' ? 'show_config' : act === 'edit' ? 'edit_config' : 'del_config', name);
+    send(act === 'show' ? 'show_config' : act === 'edit' ? 'edit_config' : 'del_config',
+         {kind, name});
   };
 }
 
@@ -740,22 +739,21 @@ function renderHowto(h) {
 
     <h3>Which configs fit</h3>
     <p>Regular WireGuard files from your admin or your own server.
-    They go into <code>conf/</code>; the type is decided by the file name:</p>
+    Add them with ＋ in their section; the file name doesn't matter, the type
+    is decided by the folder:</p>
     <table>
-      <tr><td>work</td><td><code>corp.conf</code>, <code>wg.conf</code>,
-        <code>wg-*.conf</code>, <code>wg0-*.conf</code><br>
+      <tr><td>work</td><td><code>conf/corp/</code>, exactly one file<br>
         <span class="note">regular WireGuard. Routes come from its
         <code>AllowedIPs</code> — whatever the admin put there goes into
         the work tunnel</span></td></tr>
-      <tr><td>personal</td><td><code>personal.conf</code>, <code>awg-*.conf</code>,
-        <code>amnezia-*.conf</code><br>
+      <tr><td>personal</td><td><code>conf/personal/</code>, as many as you like<br>
         <span class="note">WireGuard or AmneziaWG. The latter is a fork that
         obfuscates traffic (<code>Jc</code>, <code>S1</code>, <code>H1</code> and
         similar fields) so the ISP doesn't recognize the connection as VPN</span></td></tr>
     </table>
-    <p class="note">Any other file in <code>conf/</code> can be picked as
-    personal too — in the list on the left. The work one is always connected and
-    needs no choice.</p>
+    <p class="note">The personal one is picked in the list on the left, by
+    default the first. The work one is always connected and needs
+    no choice.</p>
 
     <h3>Work config from the website</h3>
     <p>No need to ask the admin for a work config: ⟳ in the work section
@@ -817,21 +815,19 @@ function renderHowto(h) {
 
     <h3>Какие конфиги подходят</h3>
     <p>Это обычные файлы WireGuard, которые выдаёт админ или личный сервер.
-    Кладутся в <code>conf/</code>, тип определяется по имени файла:</p>
+    Добавляются ＋ в своём разделе; имя файла не важно, тип задаёт папка:</p>
     <table>
-      <tr><td>рабочий</td><td><code>corp.conf</code>, <code>wg.conf</code>,
-        <code>wg-*.conf</code>, <code>wg0-*.conf</code><br>
+      <tr><td>рабочий</td><td><code>conf/corp/</code>, ровно один файл<br>
         <span class="note">обычный WireGuard. Маршруты берутся из его
         <code>AllowedIPs</code> — что админ туда положил, то и пойдёт в
         рабочий туннель</span></td></tr>
-      <tr><td>личный</td><td><code>personal.conf</code>, <code>awg-*.conf</code>,
-        <code>amnezia-*.conf</code><br>
+      <tr><td>личный</td><td><code>conf/personal/</code>, сколько угодно<br>
         <span class="note">WireGuard или AmneziaWG. Второй — форк с маскировкой
         трафика (<code>Jc</code>, <code>S1</code>, <code>H1</code> и подобные
         поля), чтобы провайдер не опознавал соединение как VPN</span></td></tr>
     </table>
-    <p class="note">Любой другой файл в <code>conf/</code> тоже можно выбрать
-    личным — слева в списке. Рабочий подключается всегда и выбора не требует.</p>
+    <p class="note">Личный выбирается слева в списке, по умолчанию — первый.
+    Рабочий подключается всегда и выбора не требует.</p>
 
     <h3>Рабочий конфиг с сайта</h3>
     <p>Рабочий конфиг не обязательно просить у админа: ⟳ у раздела рабочих
@@ -1019,7 +1015,7 @@ function showInfo(title, paras) {
   document.getElementById('sheet').classList.add('on');
 }
 
-function showConf(name, text) {
+function showConf(kind, name, text) {
   sheetButtons('sheet-del');
   document.getElementById('sheet-body').classList.add('mono');
   document.getElementById('sheet-name').textContent = name + '.conf';
@@ -1028,6 +1024,7 @@ function showConf(name, text) {
   document.getElementById('sheet-body').textContent = text;
   document.getElementById('sheet').classList.add('on');
   document.getElementById('sheet').dataset.name = name;
+  document.getElementById('sheet').dataset.kind = kind;
 }
 
 // Кнопки только отправляют команду. Окно ожидания появится по сигналу
@@ -1089,8 +1086,10 @@ document.getElementById('side').onclick = e => {
 document.getElementById('search').oninput = () => send('logs');
 document.getElementById('only-err').onchange = () => send('logs');
 document.getElementById('sheet-close').onclick = closeSheet;
-document.getElementById('sheet-del').onclick =
-  () => send('del_config', document.getElementById('sheet').dataset.name);
+document.getElementById('sheet-del').onclick = () => {
+  const {kind, name} = document.getElementById('sheet').dataset;
+  send('del_config', {kind, name});
+};
 
 // Сообщаем Python, что страница поднялась: на этом держится сквозной тест —
 // он проверяет всю цепочку от ресурса в бандле до моста обратно.
@@ -1127,8 +1126,8 @@ document.getElementById('btn-theme').onclick = () => {
 
 document.getElementById('side').addEventListener('click', e => {
   const mb = e.target.closest('[data-menu]');
-  if (mb) { openMenu(mb.dataset.menu, mb); return; }
+  if (mb) { openMenu(mb.dataset.kind, mb.dataset.menu, mb); return; }
   const row = e.target.closest('.conf');
-  if (row && row.dataset.pick === '1') send('use_config', row.dataset.name);
+  if (row && row.dataset.kind === 'personal') send('use_config', row.dataset.name);
 });
 </script>

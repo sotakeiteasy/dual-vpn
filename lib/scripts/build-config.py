@@ -2,12 +2,14 @@
 """
 Собирает config.json для sing-box-lx из обычных WireGuard/AmneziaWG .conf файлов.
 
-    conf/personal.conf   личный AmneziaWG  -> весь остальной трафик
-    conf/corp.conf       корпоративный WG  -> подсети из его AllowedIPs
+    conf/personal/*.conf  личные AmneziaWG/WG -> весь остальной трафик
+    conf/corp/*.conf      корпоративный WG    -> подсети из его AllowedIPs
 
-Вместо personal.conf можно взять любой другой файл из conf/ — профиль:
+Имя файла не важно, роль задаёт папка. Какой из личных взять — профиль:
     SB_PERSONAL=nl-1 python3 build-config.py
     python3 build-config.py --personal nl-1
+Без него — сохранённый в lib/state/profile, по умолчанию первый по алфавиту.
+Папок нет (Windows) — ищем по именам прямо в conf/, как раньше.
 
 Корп-маршруты берутся ИЗ AllowedIPs корп-конфига, поэтому при ротации
 достаточно положить новый файл — правки скрипта не нужны.
@@ -22,6 +24,8 @@ import subprocess
 import os
 import re
 import sys
+
+import confdirs
 
 # Раскладка: <корень>/conf — исходные .conf, <корень>/lib/state — то, что
 # генерируется. Скрипт лежит в <корень>/lib/scripts.
@@ -52,30 +56,25 @@ AWG3_BOOL = {"randomtrailers": "random_trailers",
              "disablecookies": "disable_cookies"}
 
 
-# Как называются конфиги в conf/. Регистр не важен.
-# Корп-файл обычно приходит от админов как wg0-<фамилия>.conf — берём и такой.
-PERSONAL_PAT = (r"^personal\.conf$", r"^(awg|amnezia).*\.conf$")
-CORP_PAT = (r"^corp\.conf$", r"^wg[-_0-9].*\.conf$", r"^wg\.conf$")
-
-
-def personal_patterns():
-    """Шаблоны для личного конфига.
-
-    По умолчанию — personal.conf / awg*.conf. Если задан профиль
-    (SB_PERSONAL=nl-1 или --personal nl-1), берём ровно этот файл: так рядом
-    с personal.conf можно держать сколько угодно других серверов и
-    переключаться между ними без переименований.
-    """
+def requested_profile():
+    """Профиль из SB_PERSONAL или --personal, без .conf; не задан — ''."""
     name = os.environ.get("SB_PERSONAL", "")
     if "--personal" in sys.argv:
         name = sys.argv[sys.argv.index("--personal") + 1]
     name = name.strip()
-    if not name:
-        return PERSONAL_PAT
-    if os.sep in name:
-        sys.exit(f"a profile is a file name in conf/, without a path: got {name!r}")
-    stem = re.escape(name[:-5] if name.lower().endswith(".conf") else name)
-    return (rf"^{stem}\.conf$",)
+    if "/" in name or os.sep in name:
+        sys.exit(f"a profile is a file name, without a path: got {name!r}")
+    return name[:-5] if name.lower().endswith(".conf") else name
+
+
+def personal_patterns():
+    """Шаблоны личного конфига для conf/ без папок (Windows).
+
+    По умолчанию — personal.conf / awg*.conf. Если задан профиль, берём
+    ровно этот файл.
+    """
+    name = requested_profile()
+    return (rf"^{re.escape(name)}\.conf$",) if name else confdirs.PERSONAL_PAT
 
 
 def list_profiles():
@@ -87,8 +86,34 @@ def list_profiles():
         return []
 
 
+def pick_corp():
+    """Рабочий из conf/corp: он один, выбирать нечего."""
+    have = confdirs.names(CONF, "corp")
+    where = confdirs.kind_dir(CONF, "corp")
+    if not have:
+        sys.exit(f"no work config in {where}")
+    if len(have) > 1:
+        sys.exit(f"several work configs in {where}: {', '.join(have)}\n"
+                 f"keep only one")
+    return confdirs.conf_path(CONF, "corp", have[0])
+
+
+def pick_personal():
+    """Личный из conf/personal: заданный профиль, сохранённый или первый."""
+    have = confdirs.names(CONF, "personal")
+    where = confdirs.kind_dir(CONF, "personal")
+    name = requested_profile()
+    if name and name not in have:
+        sys.exit(f"no personal config {name!r} in {where}\n"
+                 f"found: {', '.join(have) if have else '(none)'}")
+    name = name or confdirs.profile(CONF, STATE)
+    if not name:
+        sys.exit(f"no personal config in {where}")
+    return confdirs.conf_path(CONF, "personal", name)
+
+
 def pick_conf(what, patterns, exclude=None):
-    """Ищет в conf/ файл по шаблонам: сперва точное имя, потом общее."""
+    """conf/ без папок: файл по шаблонам, сперва точное имя, потом общее."""
     try:
         files = sorted(os.listdir(CONF))
     except OSError:
@@ -331,9 +356,14 @@ def main():
     # Выключенный туннель не собираем вовсе: ни эндпоинта, ни маршрутов, ни
     # DNS. Его файл тогда и не нужен — истёкший корп можно просто не трогать.
     off = disabled_tunnel()
-    p_path = pick_conf("personal", personal_patterns()) if off != "personal" else None
-    c_path = (pick_conf("corp", CORP_PAT, exclude=p_path)
-              if off != "corp" else None)
+    if confdirs.has_dirs(CONF):
+        p_path = pick_personal() if off != "personal" else None
+        c_path = pick_corp() if off != "corp" else None
+    else:
+        p_path = (pick_conf("personal", personal_patterns())
+                  if off != "personal" else None)
+        c_path = (pick_conf("corp", confdirs.CORP_PAT, exclude=p_path)
+                  if off != "corp" else None)
 
     personal = parse_conf(p_path) if p_path else None
     corp = parse_conf(c_path) if c_path else None

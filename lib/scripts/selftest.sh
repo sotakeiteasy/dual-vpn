@@ -66,7 +66,7 @@ w.state = os.path.join(base, "lib", "state")
 w.log = lambda *a: None
 w.ctrl = None                   # без контроллера статус обязан собираться сам
 c = w.configs()
-assert set(c) >= {"corp", "personal", "corp_ambiguous", "personal_ambiguous"}, c
+assert set(c) >= {"corp", "personal", "corp_ambiguous"}, c
 st = w.status()
 assert isinstance(st.get("up"), bool)
 assert set(st["op"]) == {"phase", "step", "busy"}, st["op"]
@@ -229,7 +229,7 @@ else
        fi ;;
   esac
   # Всё, чем программа поднимает туннель, должно лежать внутри и запускаться.
-  for F in vpn sing-box install-daemon.sh apply-update.sh migrate-data.sh build-config.py; do
+  for F in vpn sing-box install-daemon.sh apply-update.sh migrate-data.sh build-config.py confdirs.py; do
     [ -x "$APP/Contents/Resources/$F" ] || [ -f "$APP/Contents/Resources/$F" ] \
       && ok "в бандле: $F" || bad "в бандле нет $F"
   done
