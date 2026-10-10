@@ -588,8 +588,8 @@ def dns_section(by_tunnel, public_detour):
         rules.append({"rule_set": [names_tag(tid)], "server": dns_tag(tid)})
     # Публичный DNS идёт тем же выходом, что и трафик: упал основной туннель —
     # переключатель OUT_TAG уводит в direct и его. Иначе без основного не
-    # резолвилось бы ни одно имя, и запасной выход был бы бесполезен. Без
-    # основного туннеля — напрямую: detour на пустой direct sing-box отвергает.
+    # резолвилось бы ни одно имя, и запасной выход был бы бесполезен.
+    # В сам direct detour не ведём: такой sing-box отвергает.
     public = {"type": "udp", "tag": PUBLIC_DNS_TAG, "server": "8.8.8.8"}
     if public_detour:
         public["detour"] = public_detour
@@ -632,6 +632,9 @@ def rules_tag(tid):
 def names_tag(tid):
     return f"names-{tid}"
 
+
+# «Не пускать» основного — напрямую, мимо out.
+BYPASS_TAG = "bypass"
 
 RULE_SET_VERSION = 3
 
@@ -827,13 +830,20 @@ def running_pid():
 def sources():
     """(туннели, {id: путь к активному .conf}) для сборки из tunnels.json.
     Испорченный файл или неоднозначный активный конфиг — sys.exit с причиной.
-    У выключенного туннеля — None: его выбор конфига сборку не держит."""
+    У выключенного неоднозначный выбор конфига сборку не держит — None."""
     try:
         data = tunnels.load()
-        return data, {t["id"]: tunnels.active_conf(t) if t["enabled"] else None
-                      for t in data["tunnels"]}
     except ValueError as exc:
         sys.exit(str(exc))
+    confs = {}
+    for t in data["tunnels"]:
+        try:
+            confs[t["id"]] = tunnels.active_conf(t)
+        except ValueError as exc:
+            if t["enabled"]:
+                sys.exit(str(exc))
+            confs[t["id"]] = None
+    return data, confs
 
 
 def _unique(items):
@@ -845,7 +855,7 @@ def _summary(t, ep, nets, domains, dns):
     awg = "да" if any(k in ep for k in AWG_INT) else "нет"
     lines = [f"  [{t['id']}] {t['name']}: "
              f"{'весь остальной трафик' if t['mode'] == 'all' else 'по списку'}, "
-             f"{peer['address']}:{peer['port']}  mtu {ep['mtu']}  awg={awg}"]
+             f"{'' if t['enabled'] else 'выключен, '}{peer['address']}:{peer['port']}  mtu {ep['mtu']}  awg={awg}"]
     if nets or domains:
         lines.append(f"      пускаю: {', '.join(nets + domains)}")
     if t["exclude"]:
@@ -857,10 +867,11 @@ def _summary(t, ep, nets, domains, dns):
 
 def build(data, confs, out_path, side_path=None, log=print, set_path=None):
     """Основной конфиг и по боковому на туннель. Возвращает [(id, имя)]
-    собранных по порядку файла.
+    включённых — чьи процессы запускать — по порядку файла.
 
     data — tunnels.validate(); confs — {id: путь к активному .conf}. Туннель
-    без конфига и выключенный пропускаются: пустой слот не держит остальные.
+    без конфига пропускается: пустой слот не держит остальные. Выключенный
+    собирается с пустым rule-set, без процесса.
     """
     side_path = side_path or side_json
     config, sides, sets, built, report = assemble(data, confs, log)
@@ -892,28 +903,41 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
     имена пиров в боковых не резолвятся.
     """
     links, level = links or {}, data["log_level"]
-    built = []                       # (туннель, разобранный .conf, endpoint)
+    # (туннель, разобранный .conf, endpoint). Выключенный тоже: в основном
+    # конфиге у него socks, DNS и правило с пустым rule-set — включение и
+    # выключение меняют файл rule-set и боковой процесс, а не основной конфиг.
+    built = []
     for t in data["tunnels"]:
         path = confs.get(t["id"])
-        if not t["enabled"]:
-            log(f"  [{t['id']}] «{t['name']}»: выключен, туннель пропускаю")
-            continue
         if not path:
             log(f"  [{t['id']}] «{t['name']}»: конфига нет, туннель пропускаю")
             continue
-        conf = parse_conf(path)
-        # Значение по умолчанию — только когда в конфиге нет строки MTU.
-        #
-        # 1280, а не 1420: клиент WireGuard на macOS в этом случае берёт именно
-        # 1280, и конфиги от провайдеров рассчитаны на это. С 1420 у сервера
-        # nl-1 рукопожатие проходило, а данные не пролезали — туннель выглядел
-        # поднятым, но интернета не было. Конфиги со своим MTU это не
-        # затрагивает: там значение берётся из файла.
-        built.append((t, conf, endpoint(conf, ep_tag(t["id"]), 1280, log,
-                                        resolve)))
-    if not built and any(not t["enabled"] for t in data["tunnels"]):
-        sys.exit("включённого туннеля с конфигом нет — включи туннель или добавь .conf")
-    if not built:
+        if t["enabled"]:
+            conf = parse_conf(path)
+            # Значение по умолчанию — только когда в конфиге нет строки MTU.
+            #
+            # 1280, а не 1420: клиент WireGuard на macOS в этом случае берёт
+            # именно 1280, и конфиги от провайдеров рассчитаны на это. С 1420 у
+            # сервера nl-1 рукопожатие проходило, а данные не пролезали — туннель
+            # выглядел поднятым, но интернета не было. Конфиги со своим MTU это
+            # не затрагивает: там значение берётся из файла.
+            ep = endpoint(conf, ep_tag(t["id"]), 1280, log, resolve)
+        else:
+            # Пира выключенного не резолвим: имя резолвит включение
+            # (Tunnel._place_side). Его испорченный конфиг сборку не держит.
+            try:
+                conf = parse_conf(path)
+                ep = endpoint(conf, ep_tag(t["id"]), 1280, log, resolve=False)
+            except SystemExit as exc:
+                log(f"  [{t['id']}] «{t['name']}»: выключен, конфиг не собрать "
+                    f"({exc}) — туннель пропускаю")
+                continue
+            log(f"  [{t['id']}] «{t['name']}»: выключен — процесс не запускаю, "
+                f"правила пустые")
+        built.append((t, conf, ep))
+    if not any(t["enabled"] for t, _, _ in built):
+        if built or any(not t["enabled"] for t in data["tunnels"]):
+            sys.exit("включённого туннеля с конфигом нет — включи туннель или добавь .conf")
         sys.exit("ни у одного туннеля нет конфига — добавь .conf")
     main = next((b for b in built if b[0]["mode"] == "all"), None)
 
@@ -955,7 +979,9 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
             nets = _unique(allowed_nets(conf, v6) + inc_nets)
             ex_nets, ex_domains = split_entries(t["exclude"], v6)
             rule = tunnel_rule(nets, domains, ex_nets, ex_domains)
-            if not rule:
+            if not t["enabled"]:
+                rule = None
+            elif not rule:
                 log(f"  [{t['id']}] «{t['name']}»: пускать нечего — ни подсетей "
                     f"в AllowedIPs, ни записей в списке")
             # Правило в основном конфиге есть и с пустым rule-set: что
@@ -970,7 +996,7 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
                 dns = (t["id"], servers[0], off_endpoint(domains, host))
                 dns_tunnels.append(dns)
                 sets[names_tag(t["id"])] = rule_set(
-                    {"domain_suffix": dns[2]} if dns[2] else None)
+                    {"domain_suffix": dns[2]} if dns[2] and t["enabled"] else None)
         report += _summary(t, ep, nets, domains, dns)
 
     # Локальная сеть — напрямую, не в туннель. Без этого запросы к соседним
@@ -978,10 +1004,11 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
     # по 15 секунд. Правило стоит ПОСЛЕ туннелей «по списку»: порядок решает,
     # и свои подсети из этих же диапазонов они уже забрали выше.
     rules.append({"ip_cidr": LOCAL_NETS, "outbound": DIRECT_TAG})
-    if main:
-        bypass = _match(*split_entries(main[0]["exclude"], v6))
-        if bypass:
-            rules.append({**bypass, "outbound": DIRECT_TAG})
+    # «Не пускать» основного — тоже rule-set: смена основного и правка списка
+    # не трогают основной конфиг.
+    bypass = _match(*split_entries(main[0]["exclude"], v6)) if main else None
+    sets[BYPASS_TAG] = rule_set(bypass)
+    rules.append({"rule_set": [BYPASS_TAG], "outbound": DIRECT_TAG})
 
     links = {t["id"]: links.get(t["id"]) or new_link() for t, _, _ in built}
     api = api or new_api()
@@ -990,14 +1017,17 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
                    "server": "127.0.0.1", "server_port": link["port"],
                    "username": link["username"], "password": link["password"]}
                   for tid, link in links.items()]
-    if main:
-        # Рвать соединения при смене выхода: открытые через мёртвый основной
-        # туннель иначе висят до своих таймаутов.
-        outbounds.append({"type": "selector", "tag": OUT_TAG,
-                          "outbounds": [socks_tag(main[0]["id"]), DIRECT_TAG],
-                          "default": socks_tag(main[0]["id"]),
-                          "interrupt_exist_connections": True})
-    dns_servers, dns_rules = dns_section(dns_tunnels, OUT_TAG if main else None)
+    # Selector — и без основного, с выбором direct, и со всеми туннелями:
+    # основной включается, выключается и меняется переключением через clash_api
+    # (Tunnel.reload_sides), без перезапуска. Рвать соединения при смене
+    # выхода: открытые через мёртвый основной туннель иначе висят до своих таймаутов.
+    outbounds.append({"type": "selector", "tag": OUT_TAG,
+                      "outbounds": [socks_tag(tid) for tid in links] + [DIRECT_TAG],
+                      "default": socks_tag(main[0]["id"]) if main else DIRECT_TAG,
+                      "interrupt_exist_connections": True})
+    dns_servers, dns_rules = dns_section(dns_tunnels, OUT_TAG)
+    # Без основного — наименьший среди всех, выключенные в счёте: иначе их
+    # включение меняло бы MTU tun и требовало полного перезапуска.
     mtu = main[2]["mtu"] if main else min(ep["mtu"] for _, _, ep in built)
 
     config = {
@@ -1031,8 +1061,8 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
                 {"protocol": "dns", "action": "hijack-dns"},
                 *rules,
             ],
-            # Нет туннеля на «весь остальной трафик» — остальное напрямую.
-            "final": OUT_TAG if main else DIRECT_TAG,
+            # Нет туннеля на «весь остальной трафик» — out смотрит в direct.
+            "final": OUT_TAG,
             # SB_NO_AUTODETECT=1 — не перепривязывать сокеты к интерфейсу.
             # Наш скрипт меняет маршруты сразу после старта, и при включённом
             # автоопределении sing-box может перепривязать UDP-сокет туннеля
@@ -1043,14 +1073,13 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
             "default_domain_resolver": PUBLIC_DNS_TAG,
         },
     }
-    if sets:
-        config["route"]["rule_set"] = [
-            {"type": "local", "tag": tag, "format": "source",
-             "path": rule_set_json(tag)} for tag in sets]
+    config["route"]["rule_set"] = [
+        {"type": "local", "tag": tag, "format": "source",
+         "path": rule_set_json(tag)} for tag in sets]
 
     sides = {t["id"]: side_config(ep, links[t["id"]], level) for t, _, ep in built}
-    return (config, sides, sets, [(t["id"], t["name"]) for t, _, _ in built],
-            report)
+    return (config, sides, sets,
+            [(t["id"], t["name"]) for t, _, _ in built if t["enabled"]], report)
 
 
 def _drop_stale_sides(keep):
@@ -1112,7 +1141,8 @@ def main(log=print):
     data, confs = sources()
     built = build(data, confs, out_path, side_path, log, set_path)
     if side_path is None:
-        _drop_stale_sides([tid for tid, _ in built])
+        # Выключенные тоже: их боковые и rule-set ждут включения.
+        _drop_stale_sides(side_ids(read_json(out_path)))
         drop_legacy()
     return built
 

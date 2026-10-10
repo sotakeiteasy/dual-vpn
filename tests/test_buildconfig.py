@@ -549,7 +549,7 @@ def test_пароль_socks_новый_на_каждую_сборку(build):
             != _by_tag(second["outbounds"], "socks-work")["password"])
 
 
-def test_порядок_правил_списки_локальная_сеть_мимо_vpn(build):
+def test_порядок_правил_списки_локальная_сеть_мимо_vpn(build, tmp_path):
     main, _ = build(THREE)
 
     assert main["route"]["rules"] == [
@@ -558,8 +558,10 @@ def test_порядок_правил_списки_локальная_сеть_м
         {"rule_set": ["rules-work"], "outbound": "socks-work"},
         {"rule_set": ["rules-lab"], "outbound": "socks-lab"},
         {"ip_cidr": buildconfig.LOCAL_NETS, "outbound": "direct"},
-        {"ip_cidr": ["198.51.100.7/32"], "outbound": "direct"},
+        {"rule_set": ["bypass"], "outbound": "direct"},
     ]
+    assert _load(tmp_path / "bypass.json") == {"version": 3, "rules": [
+        {"ip_cidr": ["198.51.100.7/32"]}]}
 
 
 def test_что_забирает_туннель_лежит_в_его_rule_set(build, tmp_path):
@@ -570,7 +572,7 @@ def test_что_забирает_туннель_лежит_в_его_rule_set(bu
     assert main["route"]["rule_set"] == [
         {"type": "local", "tag": tag, "format": "source",
          "path": str(tmp_path / f"{tag}.json")}
-        for tag in ("rules-work", "names-work", "rules-lab")]
+        for tag in ("rules-work", "names-work", "rules-lab", "bypass")]
     assert _load(tmp_path / "rules-work.json") == {"version": 3, "rules": [
         {"type": "logical", "mode": "and", "rules": [
             {"ip_cidr": ["10.10.0.0/16", "192.168.77.0/24"],
@@ -600,7 +602,8 @@ def test_остальное_через_основной_с_запасным_dire
     assert main["route"]["final"] == "out"
     out = _by_tag(main["outbounds"], "out")
     assert out["type"] == "selector"
-    assert out["outbounds"] == ["socks-home", "direct"]
+    # Все туннели: основным становится любой переключением, без перезапуска.
+    assert out["outbounds"] == ["socks-work", "socks-lab", "socks-home", "direct"]
     assert out["default"] == "socks-home"
     assert main["inbounds"][0]["mtu"] == sides["home"]["endpoints"][0]["mtu"]
     assert buildconfig.api_of(main)[0].startswith("127.0.0.1:")
@@ -620,14 +623,18 @@ def test_dns_только_у_туннелей_по_списку_с_dns_в_conf(b
     assert main["route"]["default_domain_resolver"] == "dns"
 
 
-def test_без_основного_туннеля_остальное_напрямую(build):
+def test_без_основного_туннеля_остальное_напрямую(build, tmp_path):
+    """Selector out — и без основного, с выбором direct: основной появляется
+    переключением, без перезапуска."""
     main, sides = build(THREE[:2])
 
     assert list(sides) == ["work", "lab"]
-    assert main["route"]["final"] == "direct"
-    assert not any(o["tag"] == "out" for o in main["outbounds"])
-    assert "detour" not in _by_tag(main["dns"]["servers"], "dns")
+    assert main["route"]["final"] == "out"
+    assert _by_tag(main["outbounds"], "out")["default"] == "direct"
+    assert buildconfig.main_id(main) is None
+    assert _by_tag(main["dns"]["servers"], "dns")["detour"] == "out"
     assert main["inbounds"][0]["mtu"] == 1280
+    assert _load(tmp_path / "bypass.json") == {"version": 3, "rules": []}
 
 
 def test_уровень_журнала_во_всех_конфигах(build):
@@ -659,17 +666,28 @@ def test_туннель_без_конфига_пропускается(build, tm
     assert any("«Work»: конфига нет" in line for line in lines)
 
 
-def test_выключенный_туннель_пропускается(build):
-    """Ни процесса, ни правила, ни DNS: его трафик идёт как без него."""
+def test_выключенный_туннель_собирается_с_пустыми_rule_set(build, tmp_path):
+    """Основной конфиг тот же, что у включённого: вкл/выкл меняет только
+    rule-set и боковой. Процесс не запускается, пир не резолвится."""
     items = [dict(THREE[0], enabled=False), *THREE[1:]]
 
+    on, _ = build(THREE)
     main, sides = build(items)
 
     assert list(sides) == ["lab", "home"]
-    assert not any(o["tag"] == "socks-work" for o in main["outbounds"])
-    assert not any("dns-work" == s["tag"] for s in main["dns"]["servers"])
-    assert [r.get("outbound") for r in main["route"]["rules"][2:]] == [
-        "socks-lab", "direct", "direct"]
+    assert buildconfig.side_ids(main) == ["work", "lab", "home"]
+    assert ({**main, "outbounds": None, "experimental": None}
+            == {**on, "outbounds": None, "experimental": None})
+    assert _load(tmp_path / "rules-work.json") == {"version": 3, "rules": []}
+    assert _load(tmp_path / "names-work.json") == {"version": 3, "rules": []}
+
+
+def test_испорченный_конфиг_выключенного_сборку_не_держит(build):
+    items = [dict(THREE[0], enabled=False), *THREE[1:]]
+
+    main, _ = build(items, texts=dict(CONFS, work="[Interface]\n"))
+
+    assert buildconfig.side_ids(main) == ["lab", "home"]
 
 
 def test_все_включённые_без_конфига_причина_про_выключенные(tmp_path):
@@ -680,13 +698,19 @@ def test_все_включённые_без_конфига_причина_про
 
 
 def test_выбор_конфига_выключенного_сборку_не_держит(monkeypatch):
-    """Несколько конфигов без выбора — отказ сборки, но не у выключенного."""
-    data = tunnels.validate({"tunnels": [dict(THREE[0], enabled=False), THREE[2]]})
+    """Несколько конфигов без выбора — отказ сборки, но не у выключенного:
+    его туннель собирается без конфига. Выбранный — есть и у выключенного."""
+    def active(t):
+        if t["id"] == "work":
+            raise ValueError("выбери один")
+        return f"{t['id']}.conf"
+    data = tunnels.validate({"tunnels": [dict(THREE[0], enabled=False),
+                                         dict(THREE[1], enabled=False), THREE[2]]})
     monkeypatch.setattr(tunnels, "load", lambda: data)
-    monkeypatch.setattr(tunnels, "active_conf",
-                        lambda t: "home.conf" if t["id"] == "home" else 1 / 0)
+    monkeypatch.setattr(tunnels, "active_conf", active)
 
-    assert buildconfig.sources() == (data, {"work": None, "home": "home.conf"})
+    assert buildconfig.sources() == (data, {"work": None, "lab": "lab.conf",
+                                            "home": "home.conf"})
 
 
 def test_ни_одного_конфига_это_ошибка(tmp_path):
@@ -859,8 +883,20 @@ def test_лишние_боковые_конфиги_удаляются(state):
     buildconfig.main(log=lambda line: None)
 
     assert sorted(p.name for p in state.iterdir()) == [
-        "config.json", "names-work.json", "rules-work.json",
+        "bypass.json", "config.json", "names-work.json", "rules-work.json",
         "tunnel-home.json", "tunnel-work.json"]
+
+
+def test_боковой_и_rule_set_выключенного_остаются(state):
+    """Их ждёт включение на лету; процесса у него нет."""
+    data = tunnels.load()
+    tunnels.find(data, "work")["enabled"] = False
+    tunnels.save(data)
+
+    assert buildconfig.main(log=lambda line: None) == [("home", "Home")]
+
+    assert (state / "tunnel-work.json").exists()
+    assert _load(state / "rules-work.json") == {"version": 3, "rules": []}
 
 
 def test_сборка_в_сторону_rule_set_рядом_а_не_в_run(state, tmp_path, monkeypatch):
@@ -874,7 +910,8 @@ def test_сборка_в_сторону_rule_set_рядом_а_не_в_run(state
     assert list(state.iterdir()) == []
     main = _load(out)
     assert {rs["path"] for rs in main["route"]["rule_set"]} == {
-        str(tmp_path / "test.rules-work.json"), str(tmp_path / "test.names-work.json")}
+        str(tmp_path / "test.rules-work.json"), str(tmp_path / "test.names-work.json"),
+        str(tmp_path / "test.bypass.json")}
     assert buildconfig.tunnel_domains(main) == ["corp.example"]
 
 

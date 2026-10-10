@@ -481,7 +481,12 @@ class Core:
         не отдаются; подсети и домены туннеля — только администратору,
         как списки правил в get-tunnels: в них рабочая сеть."""
         main_cfg = buildconfig.read_json(paths.CONFIG_JSON)
-        ids = buildconfig.side_ids(main_cfg)
+        # Выключенный собран без процесса: подключения через него нет.
+        try:
+            off = {t["id"] for t in tunnels.load()["tunnels"] if not t["enabled"]}
+        except ValueError:
+            off = set()
+        ids = [tid for tid in buildconfig.side_ids(main_cfg) if tid not in off]
         endpoints = []
         for tid in ids:
             for ep in buildconfig.read_json(buildconfig.side_json(tid)).get("endpoints", []):
@@ -761,10 +766,11 @@ class Core:
         return ""
 
     def _apply(self):
-        """Правка конфигов — на живой VPN (решение #14): перезапуск только
-        боковых со сменившимся конфигом, tun и интернет не падают. Сменилось
-        то, что держит основной процесс, — выключение и включение. Выключенный
-        VPN не включаем: правка подхватится на включении."""
+        """Правка конфигов — на живой VPN (решение #14): боковые со сменившимся
+        конфигом, вкл/выкл туннеля, списки и смена основного — на лету
+        (Tunnel.reload_sides), tun и интернет не падают. Сменилось то, что держит
+        основной процесс, — выключение и включение. Выключенный VPN не
+        включаем: правка подхватится на включении."""
         if not self.lock.acquire(blocking=False):
             return {"ok": False, "error": f"уже идёт: {self.busy or 'операция'}"}
         try:
@@ -773,6 +779,7 @@ class Core:
             # Круг сторожа, начатый до правки, увидел бы перезапускаемый
             # процесс лежащим и перезапустил бы его сам.
             self._human += 1
+            main = self.tunnel.main_id
             done = self.tunnel.reload_sides()
             if done is not None:
                 errs = [err for _, err in done if err]
@@ -780,7 +787,8 @@ class Core:
                     if err:
                         self.log(f"!! {err}")
                     self._forget_side(side)
-                if done:
+                # Выход мог смениться и без процессов: основной стал «по списку».
+                if done or self.tunnel.main_id != main:
                     self.prober.set(out=self.tunnel.out_now())
                     self.prober.remeasure()
                 return {"ok": not errs, "applied": "sides",
@@ -1542,8 +1550,8 @@ class Core:
         return {"ok": True, "tunnel": t["id"], "active": name}
 
     def _set_enabled(self, tunnel, on):
-        """Включает или выключает туннель «по списку»: сборка выключенный
-        пропускает, конфиги и правила остаются. На живой VPN переносит apply
+        """Включает или выключает туннель «по списку»: у выключенного нет
+        процесса и rule-set пустой, конфиги и правила остаются. На живой VPN переносит apply
         отправителя, как после set-active и правки правил. Основной так не
         выключается: «Всё остальное напрямую»."""
         if not isinstance(on, bool):

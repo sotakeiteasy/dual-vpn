@@ -333,8 +333,9 @@ class Prober:
     def check_plan():
         """Что проверять у каждого туннеля, по порядку tunnels.json:
         [{id, name, mode, host, dns, running}]. host — домен проверки «по
-        списку», dns — DNS туннеля из собранного конфига, running — процесс
-        туннеля есть в собранном конфиге (без конфига сборка его пропускает)."""
+        списку», dns — DNS туннеля из собранного конфига, running — туннель
+        включён и есть в собранном конфиге (без конфига сборка его пропускает,
+        выключенный собирается без процесса)."""
         try:
             items = tunnels.load()["tunnels"]
         except ValueError:
@@ -344,7 +345,8 @@ class Prober:
         dns = buildconfig.tunnel_dns(cfg)
         return [{"id": t["id"], "name": t["name"], "mode": t["mode"],
                  "host": _probe_host(t) if t["mode"] == "list" else "",
-                 "dns": dns.get(t["id"], ""), "running": t["id"] in running}
+                 "dns": dns.get(t["id"], ""),
+                 "running": t["enabled"] and t["id"] in running}
                 for t in items]
 
     @staticmethod

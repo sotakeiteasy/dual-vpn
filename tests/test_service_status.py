@@ -218,6 +218,19 @@ def test_howto_без_прав_без_списков_рабочей_сети(run
     assert [e["tag"] for e in howto["endpoints"]] == ["wg-work", "wg-home"]
 
 
+def test_howto_без_выключенного_туннеля(run_dir, monkeypatch):
+    """Выключенный собран без процесса — в «Как подключиться» его нет."""
+    monkeypatch.setattr(paths, "TUNNELS_JSON", str(run_dir / "tunnels.json"))
+    (run_dir / "tunnels.json").write_text(json.dumps({"tunnels": [
+        {"id": "work", "name": "Работа", "mode": "list", "enabled": False},
+        {"id": "home", "name": "Дом", "mode": "all"}]}), encoding="utf-8")
+
+    howto = service.Core._howto(True)
+
+    assert [e["tag"] for e in howto["endpoints"]] == ["wg-home"]
+    assert howto["corp_nets"] == []
+
+
 def test_howto_до_первой_сборки_пуст(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "CONFIG_JSON", str(tmp_path / "нет.json"))
 

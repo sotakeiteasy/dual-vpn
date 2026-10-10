@@ -40,6 +40,10 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Сколько ждём, пока боковой процесс откроет socks на loopback.
 SIDE_WAIT = 15
 
+# Сколько ждём, пока sing-box перечитает rule-set: на 1.14.2 — до 1,5 с. Успех
+# он не пишет, только отказ («reload rule-set <тег>: …»), — ждём всё время.
+RULE_SET_WAIT = 2
+
 # Журнал временного процесса проверки конфига (Tunnel.trial).
 TRIAL_PREFIX = "trial"
 
@@ -694,15 +698,19 @@ class Tunnel:
         return err
 
     def reload_sides(self):
-        """Правка конфигов на поднятом VPN: перезапуск только тех боковых, чей
-        активный .conf сменился. [(процесс, ошибка или '')] перезапущенных или
-        None, если без полного перезапуска не обойтись.
+        """Правка конфигов на поднятом VPN без падения tun. [(процесс, ошибка
+        или '')] затронутых боковых или None, если без полного перезапуска не
+        обойтись.
 
-        Полный нужен, когда новая сборка меняет основной конфиг: набор туннелей,
-        подсети и DNS туннеля «по списку», MTU и IPv6 основного, правила.
-        Основной процесс конфиг не перечитывает, а tun, маршруты и остальные
-        туннели здесь не трогаем — интернет на перезапуск не падает. Пока лежит
-        процесс основного туннеля, выход идёт напрямую.
+        На лету: смена .conf (перезапуск одного бокового), вкл/выкл туннеля
+        «по списку», списки и смена основного — файлы rule-set, NRPT и выбор
+        selector out. Полный нужен, когда новая сборка меняет сам основной
+        конфиг: новый туннель (новый socks), адрес DNS «по списку», MTU и IPv6
+        основного, — или sing-box отверг новый rule-set. Пока лежит процесс
+        основного туннеля, выход идёт напрямую.
+
+        Порядок: включённый — старт бокового и socks до rule-set, иначе первые
+        соединения получили бы отказ; выключенный — пустой rule-set до остановки.
 
         Уровень журнала полного не требует: боковые перезапускаются с ним сразу,
         основной возьмёт его на следующем включении — ради журнала tun не роняем.
@@ -716,31 +724,112 @@ class Tunnel:
             data, confs = buildconfig.sources()
             # Имена пиров не резолвим: в основном конфиге адресов пиров нет,
             # а резолвить всех заново незачем — только сменившихся, ниже.
-            config, sides, sets, _, _ = buildconfig.assemble(
+            config, sides, sets, built, _ = buildconfig.assemble(
                 data, confs, self.log, links, _api_link(running), resolve=False)
         except SystemExit:
             return None
-        if json.loads(json.dumps({**config, "log": None})) != {**running, "log": None}:
-            return None
-        # Что забирают туннели «по списку», лежит в rule-set, а не в основном
-        # конфиге: сменилось оно — пока тоже полный.
-        if any(json.loads(json.dumps(rs)) != buildconfig.read_json(
-                buildconfig.rule_set_json(tag)) for tag, rs in sets.items()):
+        if _fixed(config) != _fixed(running):
             return None
         stamps = {tid: _conf_stamp(path) for tid, path in confs.items()}
         main = tunnels.main_tunnel(data)
         self.profile = main["active"] if main else ""
-        done = []
-        for side in self.sides:
-            if stamps.get(side.tid) != side.source:
-                done.append((side, self._swap_side(side, sides[side.tid],
-                                                   stamps.get(side.tid))))
-                continue
-            cfg = buildconfig.read_json(buildconfig.side_json(side.tid))
-            if cfg.get("log") != sides[side.tid].get("log"):
-                done.append((side, self._relog_side(side, cfg,
-                                                    sides[side.tid].get("log"))))
+        done, have, order = [], {s.tid: s for s in self.sides}, []
+        for tid, title in built:
+            side = have.pop(tid, None)
+            if side is None:
+                side = Side(tid, title)
+                done.append((side, self._enable_side(side, sides[tid],
+                                                     stamps.get(tid))))
+            elif stamps.get(tid) != side.source:
+                done.append((side, self._swap_side(side, sides[tid],
+                                                   stamps.get(tid))))
+            else:
+                cfg = buildconfig.read_json(buildconfig.side_json(tid))
+                if cfg.get("log") != sides[tid].get("log"):
+                    done.append((side, self._relog_side(side, cfg,
+                                                        sides[tid].get("log"))))
+            order.append(side)
+        self.sides = order
+        names = self._corp_domains()
+        if not self._write_sets(sets):
+            return None
+        self._renew_nrpt(names)
+        # Выход — до остановки: прежний основной мог стать выключенным «по списку».
+        self._switch_main(buildconfig.main_id(config), {**config, "log": running.get("log")})
+        for side in have.values():
+            self._stop_side(side)
+            self.log(f"→ туннель «{side.title}» выключен — его процесс остановлен")
+            done.append((side, ""))
         return done
+
+    def _enable_side(self, side, cfg, stamp):
+        """Боковой включённого туннеля: пир, маршрут, конфиг, старт с ожиданием
+        socks. '' или ошибка; не поднялся — его поднимет сторож, как на включении."""
+        err = self._place_side(side, cfg, stamp)
+        if err:
+            return err
+        self.log(f"→ туннель «{side.title}» включён — запускаю его процесс")
+        return self._start_side(side)
+
+    def _write_sets(self, sets):
+        """Пишет сменившиеся rule-set и ждёт, пока sing-box их перечитает.
+        False — не записались или sing-box отверг их: ошибка только в его журнале,
+        а процесс молча держит старые правила."""
+        changed = [tag for tag, rs in sets.items()
+                   if json.loads(json.dumps(rs)) != buildconfig.read_json(
+                       buildconfig.rule_set_json(tag))]
+        if not changed:
+            return True
+        log_path = self.log_start[0] if self.log_start else ""
+        try:
+            at = os.path.getsize(log_path) if log_path else 0
+        except OSError:
+            at = 0
+        try:
+            for tag in changed:
+                buildconfig.write_json(buildconfig.rule_set_json(tag), sets[tag])
+        except OSError as exc:
+            self.log(f"!! rule-set не записать: {exc}")
+            return False
+        self.log(f"→ правила туннелей на лету: {', '.join(changed)}")
+        time.sleep(RULE_SET_WAIT)
+        bad = [line for line in _tail(log_path, at)
+               if "reload rule-set" in line and any(tag in line for tag in changed)]
+        for line in bad:
+            self.log(f"!! sing-box не принял rule-set: {line.strip()}")
+        return not bad
+
+    def _renew_nrpt(self, before):
+        """Правило NRPT — по доменам теперь, если они сменились с before."""
+        names = self._corp_domains()
+        if names == before:
+            return
+        if not names:
+            winnet.nrpt_clear()
+            self.log("→ правило NRPT снято: доменов туннелей нет")
+        elif winnet.nrpt_set(names, paths.TUN_DNS):
+            self.log(f"→ корп-домены спрашиваю только у DNS туннеля: {', '.join(names)}")
+        else:
+            self.log("!! правило NRPT не встало: несуществующие корп-имена "
+                     "будут отвечать по 12 с")
+
+    def _switch_main(self, new, config):
+        """Основной сменился — selector out на его socks (или direct, основного
+        нет или его процесс лежит), а config.json — с новым default: по нему
+        main_id находят основной пробер и следующая правка. Процесс
+        конфиг не перечитывает, а всё, кроме default и журнала, в нём то же."""
+        if new == self.main_id:
+            return
+        self.main_id = new
+        main = self.main
+        tag = (buildconfig.socks_tag(new) if main and main.alive()
+               else buildconfig.DIRECT_TAG)
+        self.log(f"→ основной туннель: {main.title if main else 'нет, остальное напрямую'}")
+        self.set_out(tag)
+        try:
+            buildconfig.write_json(paths.CONFIG_JSON, config)
+        except OSError as exc:
+            self.log(f"!! config.json не записать: {exc}")
 
     def _relog_side(self, side, cfg, log_cfg):
         """Боковой процесс на новый уровень журнала: его работающий конфиг cfg,
@@ -759,6 +848,15 @@ class Tunnel:
         """Боковой процесс на новый конфиг cfg (пир ещё именем) из .conf с меткой
         stamp. '' или ошибка; при ошибке до записи конфига старый процесс работает
         дальше, а метка прежняя — следующая правка попробует снова."""
+        err = self._place_side(side, cfg, stamp)
+        if err:
+            return err
+        self.log(f"→ сменился конфиг «{side.title}» — перезапускаю только его процесс")
+        return self._restart_out(side)
+
+    def _place_side(self, side, cfg, stamp):
+        """Конфиг бокового на диск до старта: пир резолвлен, host-маршрут к нему
+        стоит, метка stamp записана. '' или ошибка."""
         peer = cfg["endpoints"][0]["peers"][0]
         try:
             # Резолвим, как на включении: системный DNS вместе с публичными. Он
@@ -780,8 +878,7 @@ class Tunnel:
             return f"конфиг процесса «{side.title}» не записать: {exc}"
         # На диске уже новый: не поднимется — сторож поднимет его из этого файла.
         side.source = stamp
-        self.log(f"→ сменился конфиг «{side.title}» — перезапускаю только его процесс")
-        return self._restart_out(side)
+        return ""
 
     def _restart_out(self, side):
         """restart_side; пока лежит процесс основного туннеля — выход напрямую."""
@@ -1036,6 +1133,26 @@ def _stamps():
         return {}
     return {t["id"]: _conf_stamp(tunnels.active_conf(t))
             for t in data["tunnels"] if t["enabled"]}
+
+
+def _fixed(main_cfg):
+    """Основной конфиг без того, что меняется на лету: журнала и выбора
+    selector out. Сравнение после json: собранный и прочитанный с диска равны."""
+    cfg = json.loads(json.dumps({**main_cfg, "log": None}))
+    for ob in cfg.get("outbounds", []):
+        if ob.get("tag") == buildconfig.OUT_TAG:
+            ob["default"] = None
+    return cfg
+
+
+def _tail(path, at):
+    """Строки файла после смещения at; нет файла — []."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(at)
+            return fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
 
 
 def _api_link(main_cfg):

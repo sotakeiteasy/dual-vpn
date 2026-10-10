@@ -594,7 +594,8 @@ def live(env, monkeypatch):
         seen["asked"].append({"links": links, "resolve": resolve})
         sides = {tid: {"endpoints": [{"peers": [{"address": f"{tid}.example"}]}]}
                  for tid in confs}
-        return seen["main_cfg"], sides, seen["sets"], [], []
+        built = [(t["id"], t["name"]) for t in data["tunnels"] if t["enabled"]]
+        return seen["main_cfg"], sides, seen["sets"], built, []
 
     def peer_host(host, _tag, _log):
         if not seen["peer"]:
@@ -604,7 +605,14 @@ def live(env, monkeypatch):
     build.assemble, build.peer_host = assemble, peer_host
     seen["outs"] = []
     monkeypatch.setattr(tun, "set_out", seen["outs"].append)
+    monkeypatch.setattr(tunnel, "RULE_SET_WAIT", 0)
     return tun, seen
+
+
+def _enable(tid, on):
+    data = tunnels.load()
+    tunnels.find(data, tid)["enabled"] = on
+    tunnels.save(data)
 
 
 def _peer(tid):
@@ -707,17 +715,100 @@ def test_смена_уровня_журнала_без_полного_перез
     assert tun.reload_sides() == []
 
 
-def test_сменился_rule_set_нужен_полный_перезапуск(live):
-    """Основной конфиг тот же, но туннель «по списку» забирает другое."""
+def test_сменился_rule_set_пишется_на_лету(live):
+    """Основной конфиг тот же, а туннель «по списку» забирает другое: файл
+    rule-set sing-box перечитывает сам, процессы не трогаем."""
     tun, seen = live
-    rs = buildconfig.rule_set({"ip_cidr": ["10.20.0.0/16"]})
-    buildconfig.write_json(buildconfig.rule_set_json("rules-work"), rs)
+    main, started = tun.proc, list(seen["started"])
+    rs = buildconfig.rule_set({"ip_cidr": ["10.30.0.0/16"]})
     seen["sets"] = {"rules-work": rs}
 
     assert tun.reload_sides() == []
 
-    seen["sets"] = {"rules-work": buildconfig.rule_set({"ip_cidr": ["10.30.0.0/16"]})}
+    assert buildconfig.read_json(buildconfig.rule_set_json("rules-work")) == rs
+    assert tun.proc is main and not main.terminated and seen["started"] == started
+
+
+def test_отвергнутый_rule_set_нужен_полный_перезапуск(live, monkeypatch):
+    """sing-box молча держит старые правила — отказ только в его журнале."""
+    tun, seen = live
+
+    def sleep(_s):
+        with open(tun.log_start[0], "a", encoding="utf-8") as fh:
+            fh.write("ERROR router: reload rule-set names-work: legacy fields\n")
+
+    monkeypatch.setattr(tunnel.time, "sleep", sleep)
+    seen["sets"] = {"names-work": buildconfig.rule_set({"domain_suffix": ["x.example"]})}
+
     assert tun.reload_sides() is None
+    assert any("не принял rule-set" in line for line in seen["log"])
+
+
+def test_выключенный_туннель_пустой_rule_set_потом_стоп_бокового(live, monkeypatch):
+    tun, seen = live
+    main, work = tun.proc, _side(tun, "work").proc
+    alive_at_write = []
+    write = tun._write_sets
+    monkeypatch.setattr(tun, "_write_sets", lambda sets: (
+        alive_at_write.append(not work.terminated), write(sets))[1])
+    _enable("work", False)
+    seen["sets"] = {"rules-work": buildconfig.rule_set(None)}
+
+    done = tun.reload_sides()
+
+    assert [(side.tid, err) for side, err in done] == [("work", "")]
+    assert alive_at_write == [True] and work.terminated
+    assert [s.tid for s in tun.sides] == ["home"]
+    assert buildconfig.read_json(buildconfig.rule_set_json("rules-work"))["rules"] == []
+    assert tun.proc is main and not main.terminated and seen["outs"] == []
+
+
+def test_включённый_туннель_сначала_боковой_потом_rule_set(live, monkeypatch):
+    tun, seen = live
+    _enable("work", False)
+    seen["sets"] = {"rules-work": buildconfig.rule_set(None)}
+    tun.reload_sides()
+    started_at_write = []
+    write = tun._write_sets
+    monkeypatch.setattr(tun, "_write_sets", lambda sets: (
+        started_at_write.append(seen["started"][-1]), write(sets))[1])
+    _enable("work", True)
+    rs = buildconfig.rule_set({"ip_cidr": ["10.10.0.0/16"]})
+    seen["sets"] = {"rules-work": rs}
+
+    done = tun.reload_sides()
+
+    assert [(side.tid, err) for side, err in done] == [("work", "")]
+    assert started_at_write == [buildconfig.side_json("work")]
+    assert [s.tid for s in tun.sides] == ["work", "home"] and _side(tun, "work").alive()
+    assert _peer("work")["address"] == "203.0.113.30"
+    assert any(parts[:2] == ["host", "203.0.113.30"] for parts in tun.owned_lines())
+    assert buildconfig.read_json(buildconfig.rule_set_json("rules-work")) == rs
+    assert seen["outs"] == []
+
+
+def test_основной_выключен_выход_напрямую_без_перезапуска(live):
+    """«Всё остальное напрямую» — выбор selector out, config.json с новым default:
+    по нему основной находят пробер и следующая правка."""
+    tun, seen = live
+    main, home = tun.proc, tun.main.proc
+    cfg = json.loads(json.dumps(seen["main_cfg"]))
+    next(o for o in cfg["outbounds"] if o["tag"] == buildconfig.OUT_TAG)["default"] = (
+        buildconfig.DIRECT_TAG)
+    seen["main_cfg"] = cfg
+
+    assert tun.reload_sides() == []
+
+    assert seen["outs"] == [buildconfig.DIRECT_TAG]
+    assert tun.main_id is None and tun.main is None
+    assert buildconfig.main_id(buildconfig.read_json(paths.CONFIG_JSON)) is None
+    assert tun.proc is main and not main.terminated and not home.terminated
+
+    seen["main_cfg"] = json.loads(json.dumps(seen["main_cfg"]))
+    next(o for o in seen["main_cfg"]["outbounds"]
+         if o["tag"] == buildconfig.OUT_TAG)["default"] = HOME_SOCKS
+    assert tun.reload_sides() == []
+    assert seen["outs"] == [buildconfig.DIRECT_TAG, HOME_SOCKS] and tun.main_id == "home"
 
 
 def test_испорченный_tunnels_json_нужен_полный_перезапуск(live):
