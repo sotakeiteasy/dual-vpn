@@ -323,7 +323,7 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
     <div id="state">
       <div id="dot"></div>
       <div>
-        <div id="state-title">соединяюсь…</div>
+        <div id="state-title" data-en="connecting…">соединяюсь…</div>
         <div id="state-sub">&nbsp;</div>
       </div>
     </div>
@@ -334,45 +334,50 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
     <div id="err-more"></div>
     <pre id="err-log"></pre>
     <div class="btnrow">
-      <button id="err-open-log">Весь лог</button>
-      <button id="err-dismiss">Скрыть</button>
+      <button id="err-open-log" data-en="Full Log">Весь лог</button>
+      <button id="err-dismiss" data-en="Hide">Скрыть</button>
     </div>
   </div>
 
-  <button id="btn-install" class="primary" hidden>Установить службу…</button>
+  <button id="btn-install" class="primary" hidden data-en="Install Service…">Установить службу…</button>
 
   <div id="actions">
-    <button id="btn-toggle" class="primary">Включить</button>
-    <button id="btn-restart" class="icon" title="Перезапустить" aria-label="Перезапустить">
+    <button id="btn-toggle" class="primary" data-en="Turn On">Включить</button>
+    <button id="btn-restart" class="icon" title="Перезапустить" aria-label="Перезапустить"
+            data-en-title="Restart">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
            stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
         <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.2v3.2h-3.2"/></svg>
     </button>
-    <button id="btn-check" class="icon" title="Проверить связь" aria-label="Проверить связь">
+    <button id="btn-check" class="icon" title="Проверить связь" aria-label="Проверить связь"
+            data-en-title="Check Connection">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
            stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
         <path d="M1.5 8.5h3l1.8-4.5 3.2 8 1.8-3.5h3.2"/></svg>
     </button>
   </div>
 
-  <div id="lockhint" hidden>выключи VPN, чтобы менять конфиги</div>
+  <div id="lockhint" hidden data-en="turn the VPN off to change configs">выключи VPN, чтобы менять конфиги</div>
   <div id="confs-wrap">
-  <h2>рабочий <span class="info" data-info="corp"><svg width="14" height="14"
+  <h2><span data-en="work">рабочий</span> <span class="info" data-info="corp"><svg width="14" height="14"
       viewBox="0 0 14 14" fill="none" stroke="currentColor"><circle cx="7" cy="7" r="6.5"/>
       <circle cx="7" cy="4.2" r="0.9" fill="currentColor" stroke="none"/>
       <path d="M7 6.1v4" stroke-width="1.4" stroke-linecap="round"/></svg></span>
     <span class="hacts">
-      <button class="icon" id="btn-fetch" title="Обновить с сайта" aria-label="Обновить с сайта">
+      <button class="icon" id="btn-fetch" title="Обновить с сайта" aria-label="Обновить с сайта"
+              data-en-title="Update from Website">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M23 4v6h-6M1 20v-6h6"/>
           <path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/></svg>
       </button>
-      <button class="icon" data-add="corp" title="Заменить из файла" aria-label="Заменить из файла">
+      <button class="icon" data-add="corp" title="Заменить из файла" aria-label="Заменить из файла"
+              data-en-title="Replace from File">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
              stroke-width="1.6" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
       </button>
-      <button class="icon" id="btn-site" title="Настроить рабочую сеть" aria-label="Настроить рабочую сеть">
+      <button class="icon" id="btn-site" title="Настроить рабочую сеть" aria-label="Настроить рабочую сеть"
+              data-en-title="Work Network Settings">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -382,12 +387,13 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
   </h2>
   <div class="card" id="confs-corp"></div>
 
-  <h2>личный <span class="info" data-info="personal"><svg width="14" height="14"
+  <h2><span data-en="personal">личный</span> <span class="info" data-info="personal"><svg width="14" height="14"
       viewBox="0 0 14 14" fill="none" stroke="currentColor"><circle cx="7" cy="7" r="6.5"/>
       <circle cx="7" cy="4.2" r="0.9" fill="currentColor" stroke="none"/>
       <path d="M7 6.1v4" stroke-width="1.4" stroke-linecap="round"/></svg></span>
     <span class="hacts">
-      <button class="icon" data-add="personal" title="Добавить из файла" aria-label="Добавить из файла">
+      <button class="icon" data-add="personal" title="Добавить из файла" aria-label="Добавить из файла"
+              data-en-title="Add from File">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
              stroke-width="1.6" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
       </button>
@@ -400,8 +406,8 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
 
 <div id="logs">
   <div id="tabs">
-    <button class="tab on" data-tab="log">Логи</button>
-    <button class="tab" data-tab="how">Как это работает</button>
+    <button class="tab on" data-tab="log" data-en="Logs">Логи</button>
+    <button class="tab" data-tab="how" data-en="How It Works">Как это работает</button>
     <button id="btn-theme">
       <svg class="t-system" width="15" height="15" viewBox="0 0 16 16" fill="none"
            stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.25"/>
@@ -415,11 +421,11 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
     </button>
   </div>
   <div id="logbar">
-    <input id="search" placeholder="поиск по логу" spellcheck="false">
-    <label><input type="checkbox" id="only-err"> только ошибки</label>
-    <span class="tzhint" title="время местное">UTC+3</span>
+    <input id="search" placeholder="поиск по логу" spellcheck="false" data-en-ph="search the log">
+    <label><input type="checkbox" id="only-err"> <span data-en="errors only">только ошибки</span></label>
+    <span class="tzhint" title="время местное" data-en-title="local time">UTC+3</span>
   </div>
-  <div id="lines"><div id="empty">лога пока нет</div></div>
+  <div id="lines"><div id="empty" data-en="no log yet">лога пока нет</div></div>
   <div id="how" hidden></div>
 </div>
 
@@ -428,11 +434,11 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
     <div id="sheet-head"><span id="sheet-name"></span></div>
     <div id="sheet-body"></div>
     <div id="sheet-foot">
-      <button id="sheet-del">Удалить</button>
-      <button id="sheet-load" hidden>Взять из файла…</button>
-      <button id="sheet-save" hidden>Сохранить</button>
-      <button id="sheet-apply" hidden>Применить</button>
-      <button id="sheet-close" class="primary">Закрыть</button>
+      <button id="sheet-del" data-en="Delete">Удалить</button>
+      <button id="sheet-load" hidden data-en="Load from File…">Взять из файла…</button>
+      <button id="sheet-save" hidden data-en="Save">Сохранить</button>
+      <button id="sheet-apply" hidden data-en="Apply">Применить</button>
+      <button id="sheet-close" class="primary" data-en="Close">Закрыть</button>
     </div>
   </div>
 </div>
@@ -486,6 +492,16 @@ const tick = w => { if (!done[w]) { done[w] = 1; send('rendered', w); } };
 
 const $ = id => document.getElementById(id);
 
+// Статичная разметка — по-русски, английский лежит рядом в data-en*.
+if (LANG === 'en') {
+  document.querySelectorAll('[data-en]').forEach(el => { el.textContent = el.dataset.en; });
+  document.querySelectorAll('[data-en-title]').forEach(el => {
+    el.title = el.dataset.enTitle;
+    el.setAttribute('aria-label', el.dataset.enTitle);
+  });
+  document.querySelectorAll('[data-en-ph]').forEach(el => { el.placeholder = el.dataset.enPh; });
+}
+
 function render(s) {
   LAST = s;
   const v = viewModel(s);
@@ -513,13 +529,15 @@ function render(s) {
   CHECKING_WAS = checking;
   const fresh = Date.now() - FRESH_AT < FRESH_FOR ? ' fresh' : '';
   const tunnels = v.rows.map(r => {
-    const hint = !r.toggleable ? 'оба туннеля выключить нельзя — это «Выключить»'
-               : r.off ? 'нажми, чтобы включить' : 'нажми, чтобы выключить';
+    const hint = !r.toggleable ? tr('оба туннеля выключить нельзя — это «Выключить»',
+                                    'can’t turn off both tunnels — use “Turn Off”')
+               : r.off ? tr('нажми, чтобы включить', 'click to turn on')
+               : tr('нажми, чтобы выключить', 'click to turn off');
     return `<div class="tun${r.toggleable ? ' toggle' : ''}${r.off ? ' off' : ''}"
        data-tunnel="${r.tunnel}" title="${esc(hint)}"><span class="tdot ${r.dot}" title="${esc(r.label)}" aria-label="${esc(r.label)}"></span>
        <span class="tun-name">${esc(r.name)}</span>
        <span class="tun-val">${esc(r.value)}</span>
-       ${checking && !r.off ? '<span class="tun-ms measuring" aria-label="меряю"><i></i><i></i><i></i></span>'
+       ${checking && !r.off ? `<span class="tun-ms measuring" aria-label="${tr('меряю', 'measuring')}"><i></i><i></i><i></i></span>`
          : r.ms ? `<span class="tun-ms${fresh}">${esc(r.ms)}</span>` : ''}</div>`;
   }).join('');
   if (tunnels !== prev.tunnels) { prev.tunnels = tunnels; $('tunnels').innerHTML = tunnels; }
@@ -585,22 +603,24 @@ function renderConfs(d) {
          data-pick="${pick ? 1 : 0}">
       ${pick ? '<div class="conf-radio"></div>' : ''}
       <span class="conf-name">${esc(c.name)}</span>
-      <button class="conf-menu" data-menu="${esc(c.name)}" title="Действия">⋯</button>
+      <button class="conf-menu" data-menu="${esc(c.name)}" title="${tr('Действия', 'Actions')}">⋯</button>
     </div>`).join('');
 
   document.getElementById('confs-corp').innerHTML =
     (d.corp_ambiguous
-      ? '<div class="warnline">несколько рабочих конфигов — сборка не пройдёт, оставь один</div>'
+      ? `<div class="warnline">${tr('несколько рабочих конфигов — сборка не пройдёт, оставь один',
+                                   'several work configs — the build will fail, keep one')}</div>`
       : '') +
     (rows(d.corp || [], false) ||
-      '<div class="emptyrow">рабочего конфига нет</div>');
+      `<div class="emptyrow">${tr('рабочего конфига нет', 'no work config')}</div>`);
 
   document.getElementById('confs-personal').innerHTML =
     (d.personal_ambiguous
-      ? '<div class="warnline">подходящих личных конфигов несколько — выбери один, иначе сборка не пройдёт</div>'
+      ? `<div class="warnline">${tr('подходящих личных конфигов несколько — выбери один, иначе сборка не пройдёт',
+                                   'several matching personal configs — pick one or the build will fail')}</div>`
       : '') +
     (rows(d.personal || [], true) ||
-      '<div class="emptyrow">личных конфигов нет</div>');
+      `<div class="emptyrow">${tr('личных конфигов нет', 'no personal configs')}</div>`);
   tick('confs');
 }
 
@@ -610,7 +630,7 @@ function openMenu(name, near) {
   closeMenu();
   const m = document.createElement('div');
   m.id = 'rowmenu';
-  m.innerHTML = ['Показать', 'Редактировать', 'Удалить']
+  m.innerHTML = [tr('Показать', 'Show'), tr('Редактировать', 'Edit'), tr('Удалить', 'Delete')]
     .map((t, i) => `<button data-act="${['show','edit','del'][i]}"
                       class="${i === 2 ? 'danger' : ''}">${t}</button>`).join('');
   document.body.appendChild(m);
@@ -670,7 +690,7 @@ function renderLogs(lines) {
     return `<div class="ln ${cls}">${fmtLine(l)}</div>`;
   }).join('');
 
-  const html = out || '<div id="empty">ничего не найдено</div>';
+  const html = out || `<div id="empty">${tr('ничего не найдено', 'nothing found')}</div>`;
   // Присваивание innerHTML сбрасывает прокрутку и снимает выделение текста.
   // Раз в две секунды это делало лог нечитаемым: ни отмотать, ни скопировать.
   if (html !== prev.logs) {
@@ -688,10 +708,89 @@ function renderHowto(h) {
 
   const ep = t => (h.endpoints || []).find(e => e.tag === t) || {};
   const p = ep('awg-personal'), c = ep('wg-corp');
-  const nets = (h.corp_nets || []).map(n => `<code>${esc(n)}</code>`).join(' ') || '<span class="note">не задано</span>';
-  const doms = (h.corp_domains || []).map(d => `<code>${esc(d)}</code>`).join(' ') || '<span class="note">не задано</span>';
+  const unset = `<span class="note">${tr('не задано', 'not set')}</span>`;
+  const nets = (h.corp_nets || []).map(n => `<code>${esc(n)}</code>`).join(' ') || unset;
+  const doms = (h.corp_domains || []).map(d => `<code>${esc(d)}</code>`).join(' ') || unset;
+  const resolvers = (h.resolvers || []).map(r => `<code>${esc(r)}</code>`).join(' ') || '—';
 
-  document.getElementById('how').innerHTML = `
+  document.getElementById('how').innerHTML = LANG === 'en' ? `
+    <h3>Why two tunnels at once</h3>
+    <p>A regular VPN client holds one connection: either work or personal.
+    Here both are up at the same time, and each packet is routed to one of
+    them. So corporate resources are reachable without turning off the
+    personal tunnel, and vice versa.</p>
+
+    <h3>Where a packet goes</h3>
+    <p>Rules are checked in order, until the first match:</p>
+    <ol>
+      <li>address is in the corp subnets → <code>work tunnel</code></li>
+      <li>address is local (<code>10/8</code>, <code>192.168/16</code>) → past the tunnels, to your network</li>
+      <li>everything else → <code>${esc(h.final || 'personal tunnel')}</code></li>
+    </ol>
+    <div class="box"><p>Your corp subnets: ${nets}</p></div>
+
+    <h3>Names and DNS</h3>
+    <p>The corp server's address doesn't resolve from outside, so requests to
+    ${doms} go to the corporate DNS
+    <code>${esc(h.corp_dns || '—')}</code>, and the rest go to a public one through
+    the personal tunnel. This is set by a file in <code>/etc/resolver</code>, not
+    by the global network settings: ${resolvers}.</p>
+    <p class="note">As a result, a short name like <code>git</code> won't work —
+    use the full one: the /etc/resolver rule matches by suffix.</p>
+
+    <h3>Which configs fit</h3>
+    <p>Regular WireGuard files from your admin or your own server.
+    They go into <code>conf/</code>; the type is decided by the file name:</p>
+    <table>
+      <tr><td>work</td><td><code>corp.conf</code>, <code>wg.conf</code>,
+        <code>wg-*.conf</code>, <code>wg0-*.conf</code><br>
+        <span class="note">regular WireGuard. Routes come from its
+        <code>AllowedIPs</code> — whatever the admin put there goes into
+        the work tunnel</span></td></tr>
+      <tr><td>personal</td><td><code>personal.conf</code>, <code>awg-*.conf</code>,
+        <code>amnezia-*.conf</code><br>
+        <span class="note">WireGuard or AmneziaWG. The latter is a fork that
+        obfuscates traffic (<code>Jc</code>, <code>S1</code>, <code>H1</code> and
+        similar fields) so the ISP doesn't recognize the connection as VPN</span></td></tr>
+    </table>
+    <p class="note">Any other file in <code>conf/</code> can be picked as
+    personal too — in the list on the left. The work one is always connected and
+    needs no choice.</p>
+
+    <h3>Work config from the website</h3>
+    <p>No need to ask the admin for a work config: ⟳ in the work section
+    downloads a fresh one from <code>wg.media-effect.ru</code>. The site sends a
+    code to your work email, you enter it in the window — and the new config
+    replaces the old one; a running tunnel restarts.</p>
+    <p class="note">The email comes from the work network settings (the gear);
+    the first time, the window asks for it. The app doesn't read your mail and
+    doesn't know its password — you copy the code yourself.</p>
+
+    <h3>What's connected now</h3>
+    <table>
+      <tr><td>work</td><td><code>${esc(c.address || '—')}</code>  MTU ${esc(c.mtu || '—')}</td></tr>
+      <tr><td>personal</td><td><code>${esc(p.address || '—')}</code>  MTU ${esc(p.mtu || '—')}${p.awg ? '  · obfuscated' : ''}</td></tr>
+    </table>
+
+    <h3>Why two programs</h3>
+    <p>The tunnel changes the system routing table, which requires administrator
+    rights. So it's owned by a background service started by the system, while
+    this window is a regular app without special rights: it shows the state and
+    sends the service two commands, turn on and turn off.</p>
+    <p class="note">The service never starts on its own — not at boot, not after
+    a crash: only when you click “Turn On”.</p>
+
+    <h3>Updates</h3>
+    <p>The window checks for new versions itself and shows “Update” at the
+    bottom. The image is downloaded from GitHub and verified by checksum, then
+    the system asks for the administrator password to replace the app in
+    Applications. What's new is on the release page.</p>
+
+    <h3>If something doesn't work</h3>
+    <p>Look at the “corp” row on the left. If only it is silent while the personal
+    tunnel is alive, the problem is in the work network, not in the app. If
+    everything dropped after the laptop slept, “Restart” helps: sleep breaks the
+    connection, and pages opened before stay hanging on dead connections.</p>` : `
     <h3>Зачем два туннеля сразу</h3>
     <p>Обычный VPN-клиент держит одно соединение: либо рабочее, либо личное.
     Здесь подняты оба одновременно, и для каждого пакета решается, в какой из
@@ -712,7 +811,7 @@ function renderHowto(h) {
     ${doms} отправляются корпоративному DNS
     <code>${esc(h.corp_dns || '—')}</code>, а остальные — публичному через личный
     туннель. Это настроено файлом в <code>/etc/resolver</code>, а не общими
-    настройками сети: ${(h.resolvers || []).map(r => `<code>${esc(r)}</code>`).join(' ') || '—'}.</p>
+    настройками сети: ${resolvers}.</p>
     <p class="note">Следствие: короткое имя вроде <code>git</code> не сработает,
     нужно полное — правило в /etc/resolver срабатывает по суффиксу.</p>
 
@@ -803,20 +902,26 @@ function renderVersion(v) {
 // а не что программа с этим делает: прошлые описывали внутреннюю логику.
 // Порядок — по важности: без первых двух рабочая сеть не работает вовсе.
 const SITE_FIELDS = [
-  {key: 'CORP_DOMAINS', label: 'Домены рабочей сети',
-   what: 'Адреса внутри рабочей сети: их имена знает только рабочий DNS. Несколько — через пробел.',
+  {key: 'CORP_DOMAINS', label: tr('Домены рабочей сети', 'Work network domains'),
+   what: tr('Адреса внутри рабочей сети: их имена знает только рабочий DNS. Несколько — через пробел.',
+            'Addresses inside the work network: only the work DNS knows their names. Separate several with spaces.'),
    example: 'corp.example.com example.local'},
-  {key: 'CORP_PROBE', label: 'Хост для проверки',
-   what: 'Любой внутренний адрес, который всегда работает. По нему окно решает, отвечает ли корп.',
+  {key: 'CORP_PROBE', label: tr('Хост для проверки', 'Probe host'),
+   what: tr('Любой внутренний адрес, который всегда работает. По нему окно решает, отвечает ли корп.',
+            'Any internal address that is always up. The window uses it to tell whether corp responds.'),
    example: 'git.corp.example.com'},
-  {key: 'CORP_HOSTS', label: 'Хосты для диагностики', optional: true,
-   what: 'Что дополнительно проверить, когда что-то не открывается.',
+  {key: 'CORP_HOSTS', label: tr('Хосты для диагностики', 'Diagnostic hosts'), optional: true,
+   what: tr('Что дополнительно проверить, когда что-то не открывается.',
+            'What else to check when something won’t open.'),
    example: 'git.corp.example.com wiki.corp.example.com'},
-  {key: 'SB_CORP_EXCLUDE', label: 'Не пускать через рабочий туннель', optional: true,
-   what: 'Адреса, которые открываются только напрямую. Формат 1.2.3.4/32.',
+  {key: 'SB_CORP_EXCLUDE', label: tr('Не пускать через рабочий туннель', 'Keep out of the work tunnel'),
+   optional: true,
+   what: tr('Адреса, которые открываются только напрямую. Формат 1.2.3.4/32.',
+            'Addresses that only open directly. Format 1.2.3.4/32.'),
    example: '198.51.100.7/32'},
-  {key: 'CORP_EMAIL', label: 'Рабочая почта', optional: true,
-   what: 'На неё сайт конфигов пришлёт код, когда обновляешь рабочий конфиг значком ⟳ в заголовке.',
+  {key: 'CORP_EMAIL', label: tr('Рабочая почта', 'Work email'), optional: true,
+   what: tr('На неё сайт конфигов пришлёт код, когда обновляешь рабочий конфиг значком ⟳ в заголовке.',
+            'The config site sends a code here when you update the work config with ⟳ in the header.'),
    example: 'ivanov@media-effect.ru'},
 ];
 
@@ -840,14 +945,15 @@ function corpBusy(on) {
 
 // Код пришёл на почту — спрашиваем его тут же, в листе поверх окна.
 function showCode(d) {
-  $('sheet-name').textContent = 'Код из письма';
+  $('sheet-name').textContent = tr('Код из письма', 'Code from Email');
   const b = $('sheet-body');
   b.classList.remove('mono');
   b.innerHTML = `
-    <p>Код отправлен на ${esc(d.email)}, действует ${esc(d.minutes)} мин.
-       <a href="#" id="open-mail">Открыть почту</a></p>
+    <p>${tr(`Код отправлен на ${esc(d.email)}, действует ${esc(d.minutes)} мин.`,
+            `The code was sent to ${esc(d.email)}, valid for ${esc(d.minutes)} min.`)}
+       <a href="#" id="open-mail">${tr('Открыть почту', 'Open Mail')}</a></p>
     <label class="field">
-      <span class="flabel">Код</span>
+      <span class="flabel">${tr('Код', 'Code')}</span>
       <input id="f-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"
              spellcheck="false">
     </label>
@@ -867,23 +973,23 @@ function codeError(msg) {
 
 function sendCode() {
   const code = $('f-code').value.trim();
-  if (!/^\d{6}$/.test(code)) { codeError('код — 6 цифр из письма'); return; }
+  if (!/^\d{6}$/.test(code)) { codeError('the code is 6 digits from the email'); return; }
   $('code-err').hidden = true;
   $('sheet-apply').disabled = true;
   send('corp_code', code);
 }
 
 function showSite(cur) {
-  document.getElementById('sheet-name').textContent = 'Рабочая сеть';
+  document.getElementById('sheet-name').textContent = tr('Рабочая сеть', 'Work Network');
   const b = document.getElementById('sheet-body');
   b.classList.remove('mono');
   b.innerHTML = SITE_FIELDS.map(f => `
     <label class="field">
-      <span class="flabel">${f.label}${f.optional ? ' <span class="fopt">· необязательно</span>' : ''}</span>
+      <span class="flabel">${f.label}${f.optional ? ` <span class="fopt">· ${tr('необязательно', 'optional')}</span>` : ''}</span>
       <span class="fwhat">${f.what}</span>
       <input id="f-${f.key}" value="${esc(cur[f.key] || '')}"
              spellcheck="false" autocapitalize="off" autocomplete="off">
-      <span class="fex">например: ${esc(f.example)}</span>
+      <span class="fex">${tr('например', 'e.g.')}: ${esc(f.example)}</span>
     </label>`).join('');
   sheetButtons('sheet-save', 'sheet-load');
   document.getElementById('sheet').classList.add('on');
@@ -1008,8 +1114,8 @@ document.getElementById('tabs').onclick = e => {
 function setTheme(t) {
   document.documentElement.dataset.theme = t;
   const b = document.getElementById('btn-theme');
-  b.title = THEME_TITLE[t];
-  b.setAttribute('aria-label', THEME_TITLE[t]);
+  b.title = themeTitle(t);
+  b.setAttribute('aria-label', themeTitle(t));
 }
 setTheme(THEMES.includes(document.documentElement.dataset.theme)
          ? document.documentElement.dataset.theme : 'system');

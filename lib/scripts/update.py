@@ -79,10 +79,10 @@ def _curl(args, timeout):
         r = subprocess.run([CURL, "-fsSL", "--max-time", str(timeout), *args],
                            capture_output=True, timeout=timeout + 10)
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise UpdateError(f"сеть: {e}") from e
+        raise UpdateError(f"network: {e}") from e
     if r.returncode != 0:
         err = r.stderr.decode("utf-8", "replace").strip()
-        raise UpdateError(f"сеть: {err or f'curl вернул {r.returncode}'}")
+        raise UpdateError(f"network: {err or f'curl returned {r.returncode}'}")
     return r.stdout
 
 
@@ -92,9 +92,9 @@ def check(current):
     try:
         releases = json.loads(body)
     except ValueError as e:
-        raise UpdateError("GitHub ответил не JSON") from e
+        raise UpdateError("GitHub didn't return JSON") from e
     if not isinstance(releases, list):
-        raise UpdateError("GitHub ответил не списком релизов")
+        raise UpdateError("GitHub didn't return a release list")
     return pick(releases, current)
 
 
@@ -105,7 +105,7 @@ def expected_sha(text, name):
         if len(parts) == 2 and parts[1].lstrip("*") == name \
                 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
             return parts[0].lower()
-    raise UpdateError(f"в файле суммы нет строки для {name}")
+    raise UpdateError(f"no checksum line for {name}")
 
 
 def sha256_file(path):
@@ -128,7 +128,7 @@ def download(info, dest):
     got = sha256_file(dmg)
     if got != want:
         os.unlink(dmg)
-        raise UpdateError("сумма образа не совпала — скачанное удалено")
+        raise UpdateError("image checksum mismatch — download deleted")
     return dmg
 
 
@@ -141,11 +141,11 @@ def mount(dmg, point):
     r = subprocess.run([HDIUTIL, "attach", "-nobrowse", "-readonly", "-noautoopen",
                         "-mountpoint", point, dmg], capture_output=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
-        raise UpdateError(f"образ не открылся: {(r.stderr or '').strip()[:160]}")
+        raise UpdateError(f"couldn't open the image: {(r.stderr or '').strip()[:160]}")
     app = os.path.join(point, APP_NAME)
     if not os.path.isdir(app):
         unmount(point)
-        raise UpdateError(f"в образе нет {APP_NAME}")
+        raise UpdateError(f"{APP_NAME} not found in the image")
     return app
 
 

@@ -37,7 +37,7 @@ def check_email(email):
     """
     email = (email or "").strip().lower()
     if not EMAIL_RE.fullmatch(email):
-        raise CorpConfError(f"нужна рабочая почта вида имя@{DOMAIN}")
+        raise CorpConfError(f"a work email like name@{DOMAIN} is required")
     return email
 
 
@@ -68,18 +68,18 @@ def _post(path, payload):
             input=json.dumps(payload).encode(), capture_output=True,
             timeout=TIMEOUT + 10)
     except (OSError, subprocess.TimeoutExpired) as e:
-        raise CorpConfError(f"сеть: {e}") from e
+        raise CorpConfError(f"network: {e}") from e
     try:
         body = json.loads(r.stdout or b"null")
     except ValueError:
         body = None
     if isinstance(body, dict) and body.get("success") is False:
-        raise CorpConfError(body.get("message") or "сайт отказал")
+        raise CorpConfError(body.get("message") or "the site refused")
     if r.returncode != 0:
         err = r.stderr.decode("utf-8", "replace").strip()
-        raise CorpConfError(f"сеть: {err or f'curl вернул {r.returncode}'}")
+        raise CorpConfError(f"network: {err or f'curl returned {r.returncode}'}")
     if not isinstance(body, dict) or not body.get("success"):
-        raise CorpConfError("сайт ответил непонятно")
+        raise CorpConfError("unexpected response from the site")
     return body
 
 
@@ -93,7 +93,7 @@ def verify(email, code):
     """Меняет код на конфиг. Текст конфига или CorpConfError."""
     code = (code or "").strip()
     if not re.fullmatch(r"\d{6}", code):
-        raise CorpConfError("код — 6 цифр из письма")
+        raise CorpConfError("the code is 6 digits from the email")
     return parse_config(_post("/api/verify-code", {"email": check_email(email), "code": code}))
 
 
@@ -101,5 +101,5 @@ def parse_config(body):
     """Конфиг из ответа — только если это и правда конфиг WireGuard."""
     text = body.get("config") if isinstance(body, dict) else None
     if not isinstance(text, str) or "[Interface]" not in text or "PrivateKey" not in text:
-        raise CorpConfError("сайт прислал не конфиг WireGuard")
+        raise CorpConfError("the site didn't send a WireGuard config")
     return text

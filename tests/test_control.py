@@ -208,13 +208,13 @@ class StartTests(unittest.TestCase):
         ctrl, ops, clock, _ = make("silent_exit")
         t0 = clock.now()
         snap = run(ctrl, "start")
-        self.assertIn("служба завершилась", snap["error"])
+        self.assertIn("the service exited", snap["error"])
         self.assertLess(clock.now() - t0, 10, "молчаливый выход ждали до таймаута")
 
     def test_hang_times_out_and_cleans_up(self):
         ctrl, ops, clock, _ = make("hang")
         snap = run(ctrl, "start")
-        self.assertIn("не поднялся за 75", snap["error"])
+        self.assertIn("didn't come up in 75", snap["error"])
         self.assertIn("stop", ops.calls, "после таймаута полуподнятое не убрано")
 
     def test_kickstart_error_is_immediate(self):
@@ -250,7 +250,7 @@ class StopTests(unittest.TestCase):
     def test_gives_up_with_message(self):
         ctrl, ops, clock, _ = make(stop_mode="never", up=True, running=True)
         snap = run(ctrl, "stop")
-        self.assertIn("не выключился", snap["error"])
+        self.assertIn("didn't turn off", snap["error"])
 
     def test_stop_command_error(self):
         ctrl, ops, _, _ = make(stop_mode="stop_error", up=True, running=True)
@@ -274,7 +274,7 @@ class RestartTests(unittest.TestCase):
     def test_aborts_when_stop_fails(self):
         ctrl, ops, _, _ = make(stop_mode="stop_error", up=True, running=True)
         snap = run(ctrl, "restart")
-        self.assertIn("не выключился", snap["error"])
+        self.assertIn("didn't turn off", snap["error"])
         self.assertNotIn("kickstart", ops.calls)
 
     def test_restart_reports_start_failure(self):

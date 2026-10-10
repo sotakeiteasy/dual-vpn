@@ -7,13 +7,36 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const {viewModel, versionModel, THEMES, nextTheme} = require(path.join(__dirname, '..', 'lib', 'scripts', 'ui', 'view.js'));
+const {viewModel, versionModel, THEMES, nextTheme, setLang, themeTitle} =
+  require(path.join(__dirname, '..', 'lib', 'scripts', 'ui', 'view.js'));
 
 const IDLE = {phase: 'idle', step: '', busy: false};
 const UP = {up: true, daemon: true, op: IDLE, exit_ip: '188.241.219.116',
             exit_state: 'tunnel', corp_ip: '172.15.0.5',
             exit_country: 'DE'};
 const OFF = {up: false, daemon: true, op: IDLE};
+
+test('английская система: в окне ни одной русской буквы', () => {
+  setLang('en');
+  try {
+    const states = [OFF, UP, {...OFF, daemon: false}, {...OFF, error: 'build failed'},
+                    {...UP, corp_ip: '', exit_state: 'down'}, {...UP, corp_state: 'off'},
+                    {...UP, exit_state: 'off'}, {...UP, op: {phase: 'restarting', busy: true}}];
+    for (const s of states) {
+      const text = JSON.stringify(viewModel(s));
+      assert.doesNotMatch(text, /[А-Яа-яЁё]/, text);
+    }
+    for (const state of ['available', 'working', 'error']) {
+      const text = JSON.stringify(versionModel({app: '1', update: {state, version: '2', step: 'downloading'}}));
+      assert.doesNotMatch(text, /[А-Яа-яЁё]/, text);
+    }
+    assert.equal(viewModel(UP).title, 'All working');
+    assert.equal(viewModel(OFF).toggle.label, 'Turn On');
+    assert.equal(themeTitle('dark'), 'Theme: dark');
+  } finally {
+    setLang('ru');
+  }
+});
 
 test('выключено: «Включить», без строк туннелей, конфиги открыты', () => {
   const v = viewModel(OFF);

@@ -142,13 +142,12 @@ def launchctl(*args):
     # чем повесить приложение на невидимом приглашении ввести пароль.
     err = (r.stderr or r.stdout).strip()
     if "password" in err.lower() or "sudo:" in err:
-        return no_rights()
-    return err or t(f"launchctl вернул {r.returncode}", f"launchctl returned {r.returncode}")
+        return NO_RIGHTS
+    return err or f"launchctl returned {r.returncode}"
 
 
-def no_rights():
-    return t("нет прав: переустанови (install-daemon.sh)",
-             "no permission: reinstall (install-daemon.sh)")
+# Ошибки — всегда по-английски, переводится только интерфейс.
+NO_RIGHTS = "no permission: reinstall (install-daemon.sh)"
 
 
 def stop_tunnel():
@@ -175,11 +174,10 @@ def stop_tunnel():
         return ""
     direct = (r.stderr or r.stdout).strip()
     if "password" in direct.lower() or direct.startswith("sudo:"):
-        direct = no_rights()
+        direct = NO_RIGHTS
     # Показываем обе причины: без первой непонятно, почему вообще дошло
     # до прямой уборки.
-    return t(f"{err}; напрямую тоже не вышло: {direct}",
-             f"{err}; direct cleanup failed too: {direct}")
+    return f"{err}; direct cleanup failed too: {direct}"
 
 
 def stop_direct():
@@ -197,8 +195,8 @@ def stop_direct():
         return ""
     err = (r.stderr or r.stdout).strip()
     if "password" in err.lower() or err.startswith("sudo:"):
-        return no_rights()
-    return err or t(f"vpn stop вернул {r.returncode}", f"vpn stop returned {r.returncode}")
+        return NO_RIGHTS
+    return err or f"vpn stop returned {r.returncode}"
 
 
 def daemon_running():

@@ -22,8 +22,10 @@ import traceback
 
 import control
 import corpconf
+import i18n
 import tui
 import update
+from i18n import t
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSMakePoint,
@@ -45,6 +47,20 @@ INSTALLED_APP = "/Applications/DualVPN.app"
 NO_UPDATE = {"state": "", "version": "", "step": "", "error": ""}
 THEMES = ("system", "light", "dark")    # те же, что THEMES в ui/view.js
 AT_DOCUMENT_START = 0                   # WKUserScriptInjectionTimeAtDocumentStart
+
+
+def RESTART_WARN():
+    return t("Туннель перезапустится, соединения оборвутся.",
+             "The tunnel will restart and connections will drop.")
+
+
+def REPLACE_CORP():
+    return t("Заменить рабочий конфиг?", "Replace the work config?")
+
+
+def replace_info(old, base):
+    return t(f"{', '.join(old)} будет удалён, вместо него — {base}.",
+             f"{', '.join(old)} will be removed and replaced with {base}.")
 
 
 def _list(v):
@@ -152,10 +168,12 @@ class Window:
         self.bridge = Bridge.alloc().initWithOwner_(self)
         ucc.addScriptMessageHandler_name_(self.bridge, "py")
         # Тема — до разбора страницы: выставленная из её скрипта, она
-        # успевала бы показать первый кадр в системных цветах.
+        # успевала бы показать первый кадр в системных цветах. Язык — туда
+        # же: view.js читает его при загрузке.
         ucc.addUserScript_(WKUserScript.alloc()
                            .initWithSource_injectionTime_forMainFrameOnly_(
-                               f"document.documentElement.dataset.theme = {_js(self.theme())};",
+                               f"document.documentElement.dataset.theme = {_js(self.theme())};"
+                               f"document.documentElement.lang = {_js(i18n.LANG)};",
                                AT_DOCUMENT_START, True))
         cfg.setUserContentController_(ucc)
 
@@ -495,6 +513,26 @@ class Window:
     # переносы строк, и в окне они сохранялись — абзац рвался посреди фразы.
     # Коротко и по убыванию важности. Прошлый текст был втрое длиннее и
     # ровный по тону — из него не было видно, что главное.
+    INFO_EN = {
+        "corp": ("Work tunnel", [
+            "A WireGuard file from your admin. There must be exactly one.",
+            "A config from the website lives 15 hours. For a fresh one, click ⟳ "
+            "in the section header: a code will arrive at the work email from settings.",
+            "Got it as a file? Click ＋ in the header. The old one is removed, "
+            "the file is copied in, and the original is no longer needed.",
+            "Names: corp.conf, wg.conf, wg-*.conf, wg0-*.conf. "
+            "Any other name is fixed automatically.",
+            "Where traffic goes is decided by AllowedIPs inside the file.",
+        ]),
+        "personal": ("Personal tunnel", [
+            "Everything that didn't go to the work tunnel goes here.",
+            "Keep as many as you like and switch with a click.",
+            "Names: personal.conf, awg-*.conf, amnezia-*.conf — "
+            "or any file picked in the list.",
+            "AmneziaWG is detected automatically: if the file has Jc, S1, H1 "
+            "and similar fields, obfuscation is already on.",
+        ]),
+    }
     INFO = {
         "corp": ("Рабочий туннель", [
             "Файл WireGuard от админа. Должен быть ровно один.",
@@ -528,27 +566,29 @@ class Window:
         """
         script = self.tool("install-daemon.sh")
         if not os.path.exists(script):
-            self.eval(f"failed({_js('не нашёл установщик службы')})")
+            self.eval(f"failed({_js('service installer not found')})")
             return
 
         user = os.environ.get("USER") or ""
         # Кавычки внутри osascript двойные, поэтому пути не должны их содержать;
         # свои пути мы контролируем, но проверить дешевле, чем ловить потом.
         if '"' in script or '"' in user:
-            self.eval(f"failed({_js('недопустимый путь установки')})")
+            self.eval(f"failed({_js('invalid install path')})")
             return
         # Внутри строки AppleScript кавычки экранируются: без \" osascript
         # падал с синтаксической ошибкой, и служба из DMG не ставилась.
         cmd = f'SUDO_USER={user} /bin/bash \\"{script}\\"'
-        osa = (f'do shell script "{cmd}" with administrator privileges '
-               f'with prompt "DualVPN устанавливает фоновую службу. '
-               f'Она поднимает туннель, для этого нужны права администратора."')
+        prompt = t("DualVPN устанавливает фоновую службу. "
+                   "Она поднимает туннель, для этого нужны права администратора.",
+                   "DualVPN is installing a background service. "
+                   "It brings the tunnel up, which requires administrator rights.")
+        osa = f'do shell script "{cmd}" with administrator privileges with prompt "{prompt}"'
         r = subprocess.run(["/usr/bin/osascript", "-e", osa],
                            capture_output=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             err = (r.stderr or "").strip()
             # -128 — человек нажал «Отмена», это не ошибка.
-            msg = "" if "-128" in err else (err[:160] or "не удалось поставить службу")
+            msg = "" if "-128" in err else (err[:160] or "couldn't install the service")
             self.log(f"установка службы: {err[:200]}")
             if msg:
                 self.eval(f"failed({_js(msg)})")
@@ -603,7 +643,7 @@ class Window:
         if info is None or self.upd["state"] not in ("available", "error"):
             return
         self.upd = dict(NO_UPDATE, state="working", version=info["version"],
-                        step="скачиваю")
+                        step=t("скачиваю", "downloading"))
         self.push()
         threading.Thread(target=self._update, args=(info,), daemon=True).start()
 
@@ -620,21 +660,21 @@ class Window:
         mounted = False
         try:
             dmg = update.download(info, tmp)
-            self._update_step("открываю образ")
+            self._update_step(t("открываю образ", "opening the image"))
             os.mkdir(point)
             app = update.mount(dmg, point)
             mounted = True
-            self._update_step("жду пароль")
+            self._update_step(t("жду пароль", "waiting for password"))
             err = self._apply(app, info["version"])
         except update.UpdateError as e:
             err = str(e)
         except OSError as e:
-            err = f"обновление: {e}"
+            err = f"update: {e}"
         except Exception as e:
             # Без этого поток умирал молча: окно навсегда оставалось на
             # «открываю образ», а причины не было ни в логе, ни на экране.
             self.log(f"обновление: сбой\n{traceback.format_exc().rstrip()}")
-            err = f"сбой обновления: {type(e).__name__}: {e}"[:160]
+            err = f"update failed: {type(e).__name__}: {e}"[:160]
         finally:
             # И по факту: том мог подключиться, а mount — упасть уже после.
             if mounted or os.path.ismount(point):
@@ -659,14 +699,16 @@ class Window:
         """
         script = self.tool("apply-update.sh")
         if not os.path.exists(script):
-            return "не нашёл установщик обновления"
+            return "update installer not found"
         user = os.environ.get("USER") or ""
         if '"' in script or '"' in app or '"' in user:
-            return "недопустимый путь обновления"
+            return "invalid update path"
         cmd = f'SUDO_USER={user} /bin/bash \\"{script}\\" \\"{app}\\"'
-        osa = (f'do shell script "{cmd}" with administrator privileges '
-               f'with prompt "DualVPN ставит версию {version}. '
-               f'Чтобы заменить приложение в Программах, нужны права администратора."')
+        prompt = t(f"DualVPN ставит версию {version}. "
+                   "Чтобы заменить приложение в Программах, нужны права администратора.",
+                   f"DualVPN is installing version {version}. "
+                   "Replacing the app in Applications requires administrator rights.")
+        osa = f'do shell script "{cmd}" with administrator privileges with prompt "{prompt}"'
         r = subprocess.run(["/usr/bin/osascript", "-e", osa],
                            capture_output=True, encoding="utf-8", errors="replace")
         for line in (r.stdout or "").strip().splitlines():
@@ -674,7 +716,7 @@ class Window:
         if r.returncode != 0:
             err = (r.stderr or "").strip()
             # -128 — человек нажал «Отмена», это не ошибка.
-            return None if "-128" in err else (err[:160] or "не удалось поставить")
+            return None if "-128" in err else (err[:160] or "couldn't install the update")
         return ""
 
     def relaunch(self):
@@ -722,7 +764,8 @@ class Window:
         прежде чем это уедет в файл.
         """
         panel = NSOpenPanel.openPanel()
-        panel.setMessage_("Файл настроек рабочей сети (site.env)")
+        panel.setMessage_(t("Файл настроек рабочей сети (site.env)",
+                            "Work network settings file (site.env)"))
         panel.setAllowsOtherFileTypes_(True)
         if panel.runModal() != 1:
             return
@@ -744,7 +787,7 @@ class Window:
             self.eval(f"failed({_js(str(e))})")
             return
         if not any(out.values()):
-            self.eval(f"failed({_js('в файле нет знакомых настроек')})")
+            self.eval(f"failed({_js('no known settings in the file')})")
             return
         self.log(f"настройки подхвачены из {os.path.basename(src)}")
         self.eval(f"call('fillSite', {_js(out)})")
@@ -757,7 +800,7 @@ class Window:
         # Кавычки в значении разорвали бы строку файла, который читает bash.
         for k, v in vals.items():
             if '"' in v:
-                self.eval(f"failed({_js('кавычки в поле ' + k + ' недопустимы')})")
+                self.eval(f"failed({_js('quotes are not allowed in ' + k)})")
                 return
         if vals["CORP_EMAIL"]:
             try:
@@ -785,7 +828,7 @@ class Window:
         self.push()
 
     def show_info(self, key):
-        title, paras = self.INFO.get(key, ("", []))
+        title, paras = t(self.INFO, self.INFO_EN).get(key, ("", []))
         if title:
             self.eval(f"showInfo({_js(title)}, {_js(paras)})")
 
@@ -802,7 +845,7 @@ class Window:
             with open(path, encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
         except OSError as e:
-            text = f"не читается: {e}"
+            text = f"can't read: {e}"
         # Ключи прячет страница; сюда они всё же попадают, поэтому в лог ни строчки.
         self.eval(f"showConf({_js(name)}, {_js(text)})")
 
@@ -821,9 +864,9 @@ class Window:
         # туннеля: отметка переезжала, трафик шёл через прежний конфиг, и
         # понять это было невозможно. Теперь либо применяем, либо не трогаем.
         if up and not self.confirm(
-                f"Переключиться на {name}?",
-                "Туннель перезапустится, соединения оборвутся.",
-                ok="Переключить"):
+                t(f"Переключиться на {name}?", f"Switch to {name}?"),
+                RESTART_WARN(),
+                ok=t("Переключить", "Switch")):
             return
 
         try:
@@ -839,7 +882,7 @@ class Window:
             self.ctrl.restart()
         self.push()
 
-    TUNNEL_NAME = {"corp": "корп", "personal": "личный"}
+    TUNNEL_NAME = {"corp": ("корп", "corp"), "personal": ("личный", "personal")}
 
     def toggle_tunnel(self, which):
         """Клик по строке туннеля: выключить его или включить обратно.
@@ -858,18 +901,21 @@ class Window:
         except OSError:
             off = ""
         if off and off != which:
-            self.alert("Оба туннеля выключить нельзя",
-                       f"Сейчас выключен {self.TUNNEL_NAME[off]}. "
-                       "Чтобы выключить всё — кнопка «Выключить».")
+            self.alert(t("Оба туннеля выключить нельзя", "Can't turn off both tunnels"),
+                       t(f"Сейчас выключен {self.TUNNEL_NAME[off][0]}. "
+                         "Чтобы выключить всё — кнопка «Выключить».",
+                         f"{self.TUNNEL_NAME[off][1].capitalize()} is already off. "
+                         "To turn everything off, use “Turn Off”."))
             return
 
-        name = self.TUNNEL_NAME[which]
+        name = self.TUNNEL_NAME[which][0]
         turn_on = off == which
         up = bool(self.status().get("up"))
         if up and not self.confirm(
-                f"{'Включить' if turn_on else 'Выключить'} {name}?",
-                "Туннель перезапустится, соединения оборвутся.",
-                ok="Включить" if turn_on else "Выключить"):
+                t(f"{'Включить' if turn_on else 'Выключить'} {name}?",
+                  f"Turn {'on' if turn_on else 'off'} {self.TUNNEL_NAME[which][1]}?"),
+                RESTART_WARN(),
+                ok=t("Включить", "Turn On") if turn_on else t("Выключить", "Turn Off")):
             return
 
         try:
@@ -891,8 +937,10 @@ class Window:
     def add_config(self, kind):
         panel = NSOpenPanel.openPanel()
         panel.setAllowedFileTypes_(["conf"])
-        panel.setMessage_("Рабочий конфиг WireGuard" if kind == "corp"
-                          else "Личный конфиг WireGuard или AmneziaWG")
+        panel.setMessage_(t("Рабочий конфиг WireGuard", "Work WireGuard config")
+                          if kind == "corp" else
+                          t("Личный конфиг WireGuard или AmneziaWG",
+                            "Personal WireGuard or AmneziaWG config"))
         if panel.runModal() != 1:
             return
         src = str(panel.URLs()[0].path())
@@ -909,13 +957,14 @@ class Window:
         dst = os.path.join(self.data, "conf", base)
         replacing = self.replaced_by(kind, base)
         if replacing:
-            if not self.confirm("Заменить рабочий конфиг?",
-                                f"{', '.join(replacing)} будет удалён, "
-                                f"вместо него — {base}.", ok="Заменить"):
+            if not self.confirm(REPLACE_CORP(), replace_info(replacing, base),
+                                ok=t("Заменить", "Replace")):
                 return
         if os.path.exists(dst) and not os.path.samefile(src, dst):
-            if not self.confirm(f"Перезаписать {base}?",
-                                "Файл с таким именем уже есть.", ok="Перезаписать"):
+            if not self.confirm(t(f"Перезаписать {base}?", f"Overwrite {base}?"),
+                                t("Файл с таким именем уже есть.",
+                                  "A file with this name already exists."),
+                                ok=t("Перезаписать", "Overwrite")):
                 return
         self.put_config(kind, base, lambda tmp: shutil.copy2(src, tmp))
 
@@ -1019,9 +1068,10 @@ class Window:
         self.eval("closeSheet()")
         base = corpconf.file_name(email)
         old = self.replaced_by("corp", base)
-        info = (f"{', '.join(old)} будет удалён, вместо него — {base}." if old
-                else f"{base} заменится свежим конфигом с сайта.")
-        if not self.confirm("Заменить рабочий конфиг?", info, ok="Заменить"):
+        info = (replace_info(old, base) if old
+                else t(f"{base} заменится свежим конфигом с сайта.",
+                       f"{base} will be replaced with a fresh config from the website."))
+        if not self.confirm(REPLACE_CORP(), info, ok=t("Заменить", "Replace")):
             return
 
         def write(tmp):
@@ -1046,8 +1096,9 @@ class Window:
     def del_config(self, name):
         if not self._safe(name):
             return
-        if not self.confirm(f"Удалить {name}.conf?",
-                            "Файл будет удалён с диска, это не отменить."):
+        if not self.confirm(t(f"Удалить {name}.conf?", f"Delete {name}.conf?"),
+                            t("Файл будет удалён с диска, это не отменить.",
+                              "The file will be deleted from disk. This can't be undone.")):
             return
         try:
             os.unlink(os.path.join(self.data, "conf", f"{name}.conf"))
@@ -1060,7 +1111,7 @@ class Window:
                     if fh.read().strip() == name:
                         os.unlink(prof)
         except OSError as e:
-            self.alert("Не удалось удалить", str(e))
+            self.alert(t("Не удалось удалить", "Couldn't delete"), str(e))
         self.eval("closeSheet()")
         self.push()
 
@@ -1072,10 +1123,10 @@ class Window:
         a.setInformativeText_(info)
         a.runModal()
 
-    def confirm(self, text, info="", ok="Удалить"):
+    def confirm(self, text, info="", ok=None):
         a = NSAlert.alloc().init()
         a.setMessageText_(text)
         a.setInformativeText_(info)
-        a.addButtonWithTitle_(ok)
-        a.addButtonWithTitle_("Отмена")
+        a.addButtonWithTitle_(ok or t("Удалить", "Delete"))
+        a.addButtonWithTitle_(t("Отмена", "Cancel"))
         return a.runModal() == 1000        # 1000 = первая кнопка
