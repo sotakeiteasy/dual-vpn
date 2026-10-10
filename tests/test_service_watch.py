@@ -113,6 +113,7 @@ def _core(monkeypatch):
     core.log_lock = threading.Lock()
     core._paths, core._ip_names = {}, {}
     core._log_at, core._side_after, core._side_noted = {}, {}, {}
+    core._side_said = set()
     core.prober = probe.Prober()
     core.tunnel = _Tunnel(core.prober)
     core.logged = []
@@ -764,6 +765,38 @@ def test_таймауты_корпа_при_живом_корпе_не_пере�
     [line] = _said(core, "«Работа» отвечает")
     assert "wg-work" in line and "DNS 10.20.0.4" in line
     assert core._dead_hits == ()
+
+
+def test_dns_ответил_без_адреса_не_перезапускает_и_пишет_один_раз(monkeypatch, tmp_path):
+    """Правила от другой сети: таймауты пачка за пачкой, а сервер жив —
+    раньше процесс перезапускался каждые DEAD_GAP."""
+    core = _core(monkeypatch)
+    log = _side_log(core, tmp_path, "work")
+    asked = _corp_says(monkeypatch, core, probe.DNS_NO_ADDR)
+
+    for _ in range(2):
+        _append(log, *_corp_dead())
+        _rounds(core, 1)
+
+    assert core.tunnel.restarts == []
+    assert asked == ["work", "work"]
+    [line] = _said(core, "«Работа» отвечает")
+    assert f"DNS {probe.DNS_NO_ADDR}" in line and "не перезапускаю" in line
+
+
+def test_dns_замолчал_после_ответа_перезапуск_и_снова_строка(monkeypatch, tmp_path):
+    core = _core(monkeypatch)
+    log = _side_log(core, tmp_path, "work")
+    answers = iter(["10.20.0.4", "", "10.20.0.4"])
+    monkeypatch.setattr(core.prober, "tunnel_answer", lambda tid: next(answers))
+    monkeypatch.setattr(service, "DEAD_GAP", 0.0)
+
+    for _ in range(3):
+        _append(log, *_corp_dead())
+        _rounds(core, 1)
+
+    assert core.tunnel.restarts == ["work"]
+    assert len(_said(core, "«Работа» отвечает")) == 2
 
 
 def test_таймауты_второго_по_списку_спрашивают_его_dns(monkeypatch, tmp_path):

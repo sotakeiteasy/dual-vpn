@@ -68,7 +68,8 @@ def test_основной_на_запасном_выходе_красный_да
     assert colors == {"work": "up", "home": "error"}
 
 
-@pytest.mark.parametrize("check, color", [("error", "error"), ("none", "off"), ("", "off")])
+@pytest.mark.parametrize("check, color", [("error", "error"), ("none", "off"), ("", "off"),
+                                          ("rules", "busy")])
 def test_молчит_красный_а_без_домена_проверки_серый(check, color):
     assert tray._conf_colors(_up(_work(check=check)), NONE) == {"work": color}
 

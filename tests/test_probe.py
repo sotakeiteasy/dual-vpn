@@ -453,9 +453,9 @@ def test_туннель_опустился_во_время_проверки_вы
     assert "выход 46.242.14.241, unknown" in logged[0]
 
 
-def test_итог_без_домена_в_пускать_так_и_пишет(monkeypatch):
+def test_итог_без_dns_и_домена_в_пускать_так_и_пишет(monkeypatch):
     asked = _slow_parts(monkeypatch)
-    _plan(monkeypatch, _p_work(host=""), _p_home())
+    _plan(monkeypatch, _p_work(host="", dns=""), _p_home())
     logged = []
     p = probe.Prober(logged.append)
 
@@ -463,10 +463,38 @@ def test_итог_без_домена_в_пускать_так_и_пишет(mon
 
     [line] = logged
     assert "выход не узнал" in line
-    assert "«Работа» не проверял (в «пускать» нет домена)" in line
+    assert "«Работа» не проверял (ни DNS в конфиге, ни домена в «пускать»)" in line
     assert "IPv6 без утечки" in line
     assert asked == []
     assert _checks(p)["work"] == ("none", "")
+
+
+def test_без_домена_в_пускать_конфиг_проверяется_по_dns(monkeypatch):
+    # wg0-korolev: «не с чем проверить», хотя его DNS отвечал — конфиг жив.
+    asked = _slow_parts(monkeypatch, dns={"work": probe.DNS_NO_ADDR})
+    _plan(monkeypatch, _p_work(host=""))
+    logged = []
+    p = probe.Prober(logged.append)
+
+    p.probe_slow()
+
+    assert asked == [("dns", "work")]
+    assert _checks(p) == {"work": ("up", "по DNS")}
+    assert "«Работа» DNS отвечает (" in logged[0]
+
+
+def test_dns_отвечает_а_домена_не_знает_это_правила(monkeypatch):
+    # В «пускать» личного конфига вписали рабочий домен: сервер жив, не те правила.
+    _slow_parts(monkeypatch, dns={"work": probe.DNS_NO_ADDR})
+    _plan(monkeypatch, _p_work())
+    logged = []
+    p = probe.Prober(logged.append)
+
+    p.probe_slow()
+
+    assert _checks(p) == {"work": ("rules", "git.corp.example")}
+    assert p.snapshot()["corp_ip"] == ""
+    assert "«Работа» DNS отвечает, но «git.corp.example» не знает (" in logged[0]
 
 
 class _Resp:
@@ -522,34 +550,53 @@ def test_http_code_нет_ответа_после_всех_попыток_пус
 
 
 def test_dns_ask_потерянный_пакет_повторяется(monkeypatch):
-    answers = iter(["", "10.0.0.8"])
-    monkeypatch.setattr(probe.winnet, "resolve4_via",
+    answers = iter([(False, ""), (True, "10.0.0.8")])
+    monkeypatch.setattr(probe.winnet, "dns_ask_via",
                         lambda name, server, timeout: next(answers))
 
     assert probe.Prober._dns_ask("10.0.0.1", "corp") == "10.0.0.8"
 
 
-def test_tunnel_answer_спрашивает_dns_этого_туннеля(monkeypatch):
+def test_dns_ask_ответ_без_адреса_окончателен(monkeypatch):
     asked = []
-    _plan(monkeypatch, _p_work(), _p_work(id="work-2", host="wiki.corp.example",
-                                          dns="10.0.0.2"))
-    monkeypatch.setattr(probe.winnet, "resolve4_via",
+    monkeypatch.setattr(probe.winnet, "dns_ask_via",
+                        lambda name, server, timeout: asked.append(name) or (True, ""))
+
+    assert probe.Prober._dns_ask("10.0.0.1", "corp") == probe.DNS_NO_ADDR
+    assert asked == ["corp"]
+
+
+def test_dns_ask_молчит_после_всех_попыток_пусто(monkeypatch):
+    monkeypatch.setattr(probe.winnet, "dns_ask_via",
+                        lambda name, server, timeout: (False, ""))
+
+    assert probe.Prober._dns_ask("10.0.0.1", "corp") == ""
+
+
+@pytest.mark.parametrize("plan, name", [
+    ([_p_work(), _p_work(id="work-2", host="wiki.corp.example", dns="10.0.0.2")],
+     "wiki.corp.example"),
+    ([_p_work(id="work-2", host="", dns="10.0.0.2")], probe.DNS_ASK_NAME),
+])
+def test_tunnel_answer_спрашивает_dns_этого_туннеля(monkeypatch, plan, name):
+    asked = []
+    _plan(monkeypatch, *plan)
+    monkeypatch.setattr(probe.winnet, "dns_ask_via",
                         lambda name, server, timeout: asked.append((name, server))
-                        or "10.0.0.8")
+                        or (True, "10.0.0.8"))
 
     assert probe.Prober().tunnel_answer("work-2") == "10.0.0.8"
-    assert asked == [("wiki.corp.example", "10.0.0.2")]
+    assert asked == [(name, "10.0.0.2")]
 
 
 @pytest.mark.parametrize("tid, plan", [
-    ("work", [_p_work(host="")]),
     ("work", [_p_work(dns="")]),
     ("gone", [_p_work()]),
 ])
 def test_tunnel_answer_не_спрашивает_когда_нечем(monkeypatch, tid, plan):
     _plan(monkeypatch, *plan)
-    monkeypatch.setattr(probe.winnet, "resolve4_via",
-                        lambda *a, **kw: pytest.fail("спросил без домена или DNS"))
+    monkeypatch.setattr(probe.winnet, "dns_ask_via",
+                        lambda *a, **kw: pytest.fail("спросил без DNS"))
 
     assert probe.Prober().tunnel_answer(tid) == ""
 

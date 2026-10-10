@@ -207,6 +207,9 @@ class Core:
         # какой паузы уже записали «жду»: раз за паузу, не каждый круг.
         self._side_after = {}
         self._side_noted = {}
+        # Туннели, чей DNS отвечает при таймаутах: «не перезапускаю» — раз на смену
+        # состояния, а не на каждую пачку таймаутов к адресу чужой сети.
+        self._side_said = set()
 
     # Сколько ещё попыток поднять туннель после неудачного переподключения.
     # Команда человека (start/stop) их отменяет: он уже решил сам.
@@ -472,8 +475,9 @@ class Core:
     def _remember_check(self, st):
         """Запоминает итог проверки при поднятом туннеле: up и error из
         st["tunnels"]; «не с чем проверить» и не поднятый — без итога."""
-        result = {t["id"]: t.get("check") if t.get("check") in ("up", "error")
-                  else "" for t in st.get("tunnels") or []}
+        # rules — сервер отвечал, не подошли правила: конфиг работал.
+        result = {t["id"]: {"up": "up", "rules": "up", "error": "error"}.get(t.get("check"), "")
+                  for t in st.get("tunnels") or []}
         data = {tid: {"name": n, "stamp": self._conf_stamp(tid, n),
                       "result": result.get(tid, "")}
                 for tid, n in self._in_use().items() if n}
@@ -563,6 +567,7 @@ class Core:
             # перезапускали свежий туннель, а упавший на новой сети ждал DEAD_GAP.
             self._dead_hits = ()
             self._side_after, self._side_noted = {}, {}
+            self._side_said = set()
             self._back_at = 0.0
             # Личный мог не подняться: проверка выхода на подъёме должна знать
             # это до первого круга сторожа, иначе увидит «утечку».
@@ -612,6 +617,7 @@ class Core:
         self._dead_hits = tuple(h for h in self._dead_hits if h[1] != side.tag)
         self._side_after.pop(side.tid, None)
         self._side_noted.pop(side.tid, None)
+        self._side_said.discard(side.tid)
 
     def _do_stop(self):
         if not self.lock.acquire(blocking=False):
@@ -833,7 +839,9 @@ class Core:
 
     def _side_down(self, side, hits):
         """Что с туннелем, для журнала, или '' — туннель «по списку» всё-таки
-        отвечает: его DNS назвал адрес домена проверки."""
+        отвечает: его DNS ответил хоть чем-то. Таймауты тогда — к адресам, до
+        которых этот сервер не достаёт (правила от другой сети), и перезапуск
+        их не вылечит: раньше так процесс перезапускался каждые DEAD_GAP."""
         if not side.alive():
             if side.proc is None:
                 return f"процесс «{side.title}» не запущен"
@@ -846,11 +854,14 @@ class Core:
                 f"{len(hits)} за {now - hits[0][0]:.0f} с, "
                 f"адреса: {', '.join(sorted({h[2] for h in hits}))}")
         if side is not self.tunnel.main:
-            ip = self.prober.tunnel_answer(side.tid)
-            if ip:
-                self.log(f"!! {what} — но «{side.title}» отвечает (DNS {ip} за "
-                         f"{time.monotonic() - now:.1f} с), не перезапускаю")
+            said = self.prober.tunnel_answer(side.tid)
+            if said:
+                if side.tid not in self._side_said:
+                    self._side_said.add(side.tid)
+                    self.log(f"!! {what} — но «{side.title}» отвечает (DNS {said} за "
+                             f"{time.monotonic() - now:.1f} с), не перезапускаю")
                 return ""
+            self._side_said.discard(side.tid)
         return what
 
     def _try_back(self, main):

@@ -40,6 +40,11 @@ CORP_HTTP_TIMEOUT = 6.0
 # Старые стороны окна: corp — первый туннель «по списку», personal — основной.
 # Их <сторона>_seq пробер ведёт до шага окна, рядом с итогами по туннелям.
 LEGACY_SIDES = ("corp", "personal")
+# Что спрашивать у DNS туннеля «по списку» без домена в «пускать»: важен любой
+# ответ, даже NXDOMAIN от сервера без выхода наружу — сервер жив.
+DNS_ASK_NAME = "dns.msftncsi.com"
+# Ответ DNS без A-записи: сервер ответил, но имени не знает.
+DNS_NO_ADDR = "без адреса"
 
 
 def _probe_host(tunnel):
@@ -50,16 +55,19 @@ def _probe_host(tunnel):
 
 
 def _list_part(p):
-    """Чем проверять туннель «по списку» p: 'dns' — домен проверки через его
-    DNS, 'http' — HTTPS к домену, когда DNS у туннеля нет. При DNS HTTPS не
-    нужен: адрес домена бывает в «не пускать», и запрос мерил бы соседа."""
+    """Чем проверять туннель «по списку» p: 'dns' — его DNS (домен проверки
+    или, без него, DNS_ASK_NAME), 'http' — HTTPS к домену, когда DNS у туннеля
+    нет. При DNS HTTPS не нужен: адрес домена бывает в «не пускать», и запрос
+    мерил бы соседа."""
     return "dns" if p["dns"] else "http"
 
 
 def _check_result(p, got, st):
     """(итог, ответ) проверки туннеля p по ответам его частей got и снимку st.
 
-    Итог: up — ответил, error — молчит, none — «по списку» без домена в
+    Итог: up — ответил, error — молчит, rules — DNS туннеля отвечает, но
+    домена из «пускать» не знает (ответ — этот домен): сервер жив, не
+    подходят правила; none — «по списку» без DNS и без домена в
     «пускать», проверять нечем; '' — туннель не поднят. Основной работает,
     если выход виден и он не мимо туннеля и не запасной напрямую.
     """
@@ -70,11 +78,18 @@ def _check_result(p, got, st):
         ok = (ip and st.get("out") != buildconfig.DIRECT_TAG
               and st.get("exit_state") not in ("leak", "direct"))
         return ("up" if ok else "error"), ip
+    mine = got.get(p["id"]) or {}
+    if p["dns"]:
+        said = mine.get("dns")
+        if not said:
+            return "error", ""
+        if not p["host"]:
+            return "up", "по DNS"
+        if said == DNS_NO_ADDR:
+            return "rules", p["host"]
+        return "up", said
     if not p["host"]:
         return "none", ""
-    mine = got.get(p["id"]) or {}
-    if mine.get("dns"):
-        return "up", mine["dns"]
     if mine.get("http"):
         return "up", f"HTTP {mine['http']}"
     return "error", ""
@@ -296,7 +311,7 @@ class Prober:
             answer = fn(p)
             got[p["id"]][how] = answer
             if p is work:
-                self.set(**{legacy[how]: answer})
+                self.set(**{legacy[how]: "" if answer == DNS_NO_ADDR else answer})
 
         jobs = {"exit": self._slow_exit, "v6": self._slow_v6}
         # (вид, имя) → части, после которых известен итог туннеля или старой стороны.
@@ -305,7 +320,7 @@ class Prober:
             mine = set()
             if p["running"] and p["mode"] == "all":
                 mine.add("exit")
-            elif p["running"] and p["host"]:
+            elif p["running"] and (p["dns"] or p["host"]):
                 how = _list_part(p)
                 fn = self._slow_dns if how == "dns" else self._slow_http
                 name = f"{how} {p['id']}"
@@ -386,13 +401,18 @@ class Prober:
         for p in plan:
             if p["mode"] != "list" or not p["running"]:
                 continue
-            if not p["host"]:
-                lines.append(f"«{p['name']}» не проверял (в «пускать» нет домена)")
+            if not p["dns"] and not p["host"]:
+                lines.append(f"«{p['name']}» не проверял (ни DNS в конфиге, "
+                             f"ни домена в «пускать»)")
                 continue
             mine, how = got.get(p["id"]) or {}, _list_part(p)
             label = "DNS" if how == "dns" else "HTTPS"
-            lines.append(f"«{p['name']}» {label} {mine.get(how) or 'молчит'} "
-                         f"({sec(how + ' ' + p['id'])})")
+            said = mine.get(how) or "молчит"
+            if how == "dns" and mine.get(how) and not p["host"]:
+                said = "отвечает"
+            elif said == DNS_NO_ADDR:
+                said = f"отвечает, но «{p['host']}» не знает"
+            lines.append(f"«{p['name']}» {label} {said} ({sec(how + ' ' + p['id'])})")
         v6 = (f"утечка IPv6 {s['v6_leak']}" if s.get("v6_leak")
               else "IPv6 без утечки")
         return (f"→ проверка сети за {total:.1f} с: {'; '.join(lines)}; "
@@ -444,23 +464,27 @@ class Prober:
         self.set(v6_leak=v6 if re.match(r"^[0-9a-fA-F:]+$", v6 or "") else "")
 
     def tunnel_answer(self, tid):
-        """Адрес домена проверки туннеля tid от его DNS через туннель; '' —
-        молчит или спрашивать нечего (нет домена в «пускать» или DNS у туннеля)."""
+        """Ответ DNS туннеля tid через туннель (_slow_dns): адрес или DNS_NO_ADDR —
+        сервер жив; '' — молчит или DNS у туннеля нет."""
         p = next((p for p in self.check_plan() if p["id"] == tid), None)
-        return self._slow_dns(p) if p and p["host"] and p["dns"] else ""
+        return self._slow_dns(p) if p and p["dns"] else ""
 
     def _slow_dns(self, p):
-        return self._dns_ask(p["dns"], p["host"])
+        return self._dns_ask(p["dns"], p["host"] or DNS_ASK_NAME)
 
     def _slow_http(self, p):
         return self._http_code(f"https://{p['host']}")
 
     @staticmethod
     def _dns_ask(server, name):
+        """Адрес name от server; DNS_NO_ADDR — ответил без адреса (NXDOMAIN окончателен,
+        повтор не нужен); '' — молчит после всех попыток."""
         for _ in range(CORP_TRIES):
-            ip = winnet.resolve4_via(name, server, timeout=CORP_DNS_TIMEOUT)
+            said, ip = winnet.dns_ask_via(name, server, timeout=CORP_DNS_TIMEOUT)
             if re.match(r"^[\d.]+$", ip or ""):
                 return ip
+            if said:
+                return DNS_NO_ADDR
         return ""
 
     @staticmethod

@@ -747,7 +747,9 @@ def _conf_colors(st, checking):
     служба проверяет сама. Каждый по себе: молчащий рабочий не красит рыжим
     работающий личный. Итог — check службы; у основного красный и на
     запасном выходе напрямую, случившемся после проверки. «По списку» без
-    домена в «пускать» ответить нечему — серый честнее красного.
+    DNS и домена в «пускать» ответить нечему — серый честнее красного.
+    Сервер отвечает, а домен из «пускать» нет (rules) — рыжий, как жёлтая
+    плитка окна: не мёртвый, но и не «всё хорошо».
     """
     items = st.get("tunnels") or []
     if not st.get("up"):
@@ -761,6 +763,8 @@ def _conf_colors(st, checking):
             out[t["id"]] = "busy"
         elif check == "up" and t.get("mode") == "all" and st.get("out") == "direct":
             out[t["id"]] = "error"
+        elif check == "rules":
+            out[t["id"]] = "busy"
         else:
             out[t["id"]] = check if check in ("up", "error") else "off"
     return out

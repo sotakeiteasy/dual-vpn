@@ -282,7 +282,16 @@ def resolve4(name):
 
 
 def resolve4_via(name, server, timeout=4.0):
-    """То же, но у конкретного DNS-сервера, в обход системного.
+    """То же, но у конкретного DNS-сервера, в обход системного."""
+    return dns_ask_via(name, server, timeout)[1]
+
+
+def dns_ask_via(name, server, timeout=4.0):
+    """(ответил, адрес) DNS-сервера server на A-запрос name.
+
+    Ответил — пришёл ответ на наш запрос, хоть NXDOMAIN: сервер жив, даже если
+    имени не знает. Так проверка туннеля отделяет мёртвый сервер от домена
+    чужой сети в «пускать».
 
     Свой минимальный DNS-запрос по UDP вместо Resolve-DnsName -Server: тот
     стоил запуска PowerShell, а пробер спрашивает корп-DNS постоянно.
@@ -291,7 +300,7 @@ def resolve4_via(name, server, timeout=4.0):
     try:
         labels = [p.encode("idna") for p in name.strip(".").split(".")]
     except UnicodeError:
-        return ""
+        return False, ""
     qname = b"".join(bytes([len(p)]) + p for p in labels) + bytes([0])
     packet = (struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + qname
               + struct.pack(">HH", 1, 1))
@@ -301,8 +310,8 @@ def resolve4_via(name, server, timeout=4.0):
             sock.sendto(packet, (server, 53))
             data, _ = sock.recvfrom(4096)
     except OSError:
-        return ""
-    return _first_a(data, qid)
+        return False, ""
+    return data[:2] == struct.pack(">H", qid), _first_a(data, qid)
 
 
 def _first_a(data, qid):

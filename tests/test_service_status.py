@@ -37,6 +37,7 @@ def _core(monkeypatch, up):
     core.log_lock = threading.Lock()
     core._paths, core._ip_names = {}, {}
     core._log_at, core._side_after, core._side_noted = {}, {}, {}
+    core._side_said = set()
     core.tunnel = _Tunnel(net)
     core.prober = probe.Prober()
     monkeypatch.setattr(core.prober, "probe_fast", lambda: core.prober.set(

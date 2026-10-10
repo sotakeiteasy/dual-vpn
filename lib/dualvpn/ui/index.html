@@ -490,8 +490,11 @@ function tileState(t, s, checking, direct) {
   }
   if (checking(t)) return ['warn', 'проверяю…'];
   if (t.check === 'up') return ['ok', `отвечает ${t.answer || ''}`.trim()];
+  // Сервер отвечает, а домен из «пускать» его DNS не знает: правила от другой сети.
+  if (t.check === 'rules') return ['warn',
+    `работает · «${t.answer || ''}» через него не открывается — проверь туннелирование`];
   if (t.check === 'error') return ['bad', 'молчит'];
-  if (t.check === 'none') return ['off', 'не с чем проверить: в «пускать» нет домена'];
+  if (t.check === 'none') return ['off', 'не с чем проверить: ни DNS в конфиге, ни домена в «пускать»'];
   return ['warn', 'проверяю…'];
 }
 

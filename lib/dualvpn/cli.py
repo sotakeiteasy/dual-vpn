@@ -49,8 +49,11 @@ def _check_text(t):
     if t.get("checking"):
         return "проверяю…"
     return {"up": f"отвечает {t.get('answer') or ''}".rstrip(),
+            "rules": f"отвечает, но «{t.get('answer') or ''}» через него не открывается "
+                     "— проверь туннелирование",
             "error": "молчит",
-            "none": "не с чем проверить: в «пускать» нет домена"}.get(t.get("check"), "")
+            "none": "не с чем проверить: ни DNS в конфиге, ни домена в «пускать»"
+            }.get(t.get("check"), "")
 
 
 def _print_status(st):

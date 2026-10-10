@@ -79,17 +79,21 @@ def test_статус_cli_пишет_итог_проверки_у_туннеля
          "check": "up", "answer": "10.0.0.8"},
         {"id": "lab", "name": "Лаб", "mode": "list", "check": "none"},
         {"id": "dev", "name": "Дев", "mode": "list", "check": "error", "checking": True},
-        {"id": "home", "name": "Личный", "mode": "all", "active": "nl-1", "check": "error"}]}
+        {"id": "home", "name": "Личный", "mode": "all", "active": "nl-1", "check": "error"},
+        {"id": "own", "name": "Свой", "mode": "list", "check": "rules",
+         "answer": "corp.example"}]}
 
     cli._print_status(st)
     cli._print_status({**st, "up": False})
 
     lines = [l for l in capsys.readouterr().out.splitlines() if "туннель" in l]
     assert lines[0].endswith("— corp; отвечает 10.0.0.8")
-    assert lines[1].endswith("; не с чем проверить: в «пускать» нет домена")
+    assert lines[1].endswith("; не с чем проверить: ни DNS в конфиге, ни домена в «пускать»")
     assert lines[2].endswith("; проверяю…")
     assert lines[3].endswith("— nl-1; молчит")
-    assert lines[4].endswith("— corp")
+    assert lines[4].endswith("; отвечает, но «corp.example» через него не открывается "
+                             "— проверь туннелирование")
+    assert lines[5].endswith("— corp")
 
 
 class _Window:
