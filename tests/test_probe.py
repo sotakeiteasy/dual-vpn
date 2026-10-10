@@ -610,8 +610,11 @@ def test_check_plan_по_tunnels_json_и_собранному_конфигу(mon
     cfg.write_text(json.dumps({
         "outbounds": [{"type": "socks", "tag": "socks-work"},
                       {"type": "socks", "tag": "socks-home"}],
+        # dns-home сборка кладёт ради смены основного на лету; основной
+        # проверяется выходом, а не DNS.
         "dns": {"servers": [{"tag": "dns", "server": "1.1.1.1"},
-                            {"tag": "dns-work", "server": "10.0.0.1"}]}}),
+                            {"tag": "dns-work", "server": "10.0.0.1"},
+                            {"tag": "dns-home", "server": "9.9.9.9"}]}}),
         encoding="utf-8")
     monkeypatch.setattr(probe.paths, "CONFIG_JSON", str(cfg))
 

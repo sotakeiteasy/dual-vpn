@@ -557,6 +557,8 @@ def test_порядок_правил_списки_локальная_сеть_м
         {"protocol": "dns", "action": "hijack-dns"},
         {"rule_set": ["rules-work"], "outbound": "socks-work"},
         {"rule_set": ["rules-lab"], "outbound": "socks-lab"},
+        # У основного — с пустым rule-set: его смена меняет файл, а не конфиг.
+        {"rule_set": ["rules-home"], "outbound": "socks-home"},
         {"ip_cidr": buildconfig.LOCAL_NETS, "outbound": "direct"},
         {"rule_set": ["bypass"], "outbound": "direct"},
     ]
@@ -572,7 +574,8 @@ def test_что_забирает_туннель_лежит_в_его_rule_set(bu
     assert main["route"]["rule_set"] == [
         {"type": "local", "tag": tag, "format": "source",
          "path": str(tmp_path / f"{tag}.json")}
-        for tag in ("rules-work", "names-work", "rules-lab", "bypass")]
+        for tag in ("rules-work", "names-work", "rules-lab", "rules-home", "bypass")]
+    assert _load(tmp_path / "rules-home.json") == {"version": 3, "rules": []}
     assert _load(tmp_path / "rules-work.json") == {"version": 3, "rules": [
         {"type": "logical", "mode": "and", "rules": [
             {"ip_cidr": ["10.10.0.0/16", "192.168.77.0/24"],
@@ -729,10 +732,10 @@ def test_помощники_читают_собранный_конфиг(build):
     assert buildconfig.side_link(main, "нет") is None
 
 
-def _again(main, tmp_path, texts):
+def _again(main, tmp_path, texts, items=THREE):
     """Сборка, как в Tunnel.reload_sides: связи и clash_api работающего запуска,
     имена пиров не резолвим."""
-    data = tunnels.validate({"tunnels": THREE})
+    data = tunnels.validate({"tunnels": items})
     confs = {tid: _write(tmp_path, f"{tid}-2.conf", text) for tid, text in texts.items()}
     links = {tid: buildconfig.side_link(main, tid) for tid in buildconfig.side_ids(main)}
     config, sides, sets, _, _ = buildconfig.assemble(
@@ -766,6 +769,28 @@ def test_другие_подсети_туннеля_по_списку_меняю
     assert buildconfig.tunnel_domains(main) == ["corp.example", ".intra.example"]
     assert buildconfig.tunnel_nets(main, "work") == ["10.10.0.0/16", "192.168.77.0/24"]
     assert buildconfig.tunnel_nets(main, "lab") == ["172.20.0.0/16", "203.0.113.9/32"]
+
+
+@pytest.mark.parametrize("modes, out", [
+    ({"home": "list"}, "direct"),
+    ({"home": "list", "lab": "all"}, "socks-lab"),
+])
+def test_смена_основного_меняет_только_rule_set_и_выход(build, tmp_path, modes, out):
+    """«Всё остальное напрямую» и смена основного — на лету (Tunnel.live_plan):
+    основной конфиг тот же, кроме выбора out. MTU основного (1420) больше, чем у
+    «по списку» (1280), — tun всё равно с наименьшим."""
+    texts = dict(CONFS, home=PERSONAL_AWG.replace("MTU = 1420", "MTU = 1420\nDNS = 1.1.1.1"))
+    main, _ = build(THREE, texts=texts)
+    items = [dict(t, mode=modes[t["id"]], include=[], exclude=[]) if t["id"] in modes
+             else t for t in THREE]
+
+    again, _, sets = _again(main, tmp_path, texts, items)
+
+    assert tunnel._fixed(again) == tunnel._fixed(main)
+    assert buildconfig.main_id(again) == (None if out == "direct" else "lab")
+    assert again["inbounds"][0]["mtu"] == 1280
+    assert buildconfig.tunnel_dns(main) == {"work": "10.0.0.53", "home": "1.1.1.1"}
+    assert sets["bypass"] != _load(tmp_path / "bypass.json")
 
 
 @pytest.mark.parametrize("tag, ep", [
@@ -883,8 +908,8 @@ def test_лишние_боковые_конфиги_удаляются(state):
     buildconfig.main(log=lambda line: None)
 
     assert sorted(p.name for p in state.iterdir()) == [
-        "bypass.json", "config.json", "names-work.json", "rules-work.json",
-        "tunnel-home.json", "tunnel-work.json"]
+        "bypass.json", "config.json", "names-work.json", "rules-home.json",
+        "rules-work.json", "tunnel-home.json", "tunnel-work.json"]
 
 
 def test_боковой_и_rule_set_выключенного_остаются(state):
@@ -911,7 +936,7 @@ def test_сборка_в_сторону_rule_set_рядом_а_не_в_run(state
     main = _load(out)
     assert {rs["path"] for rs in main["route"]["rule_set"]} == {
         str(tmp_path / "test.rules-work.json"), str(tmp_path / "test.names-work.json"),
-        str(tmp_path / "test.bypass.json")}
+        str(tmp_path / "test.rules-home.json"), str(tmp_path / "test.bypass.json")}
     assert buildconfig.tunnel_domains(main) == ["corp.example"]
 
 

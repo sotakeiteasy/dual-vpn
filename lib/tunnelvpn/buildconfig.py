@@ -972,8 +972,9 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
         # из файла endpoint отбрасывал бы домены и адреса из «пускать»,
         # которых в AllowedIPs нет.
         ep["peers"][0]["allowed_ips"] = ["0.0.0.0/0"] + (["::/0"] if v6 else [])
-        nets, domains, dns = [], [], None
-        if t["mode"] == "list":
+        listed = t["mode"] == "list"
+        nets, domains, rule, dns = [], [], None, None
+        if listed:
             corp_diagnostics(ep)
             inc_nets, domains = split_entries(t["include"], v6)
             nets = _unique(allowed_nets(conf, v6) + inc_nets)
@@ -984,20 +985,22 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
             elif not rule:
                 log(f"  [{t['id']}] «{t['name']}»: пускать нечего — ни подсетей "
                     f"в AllowedIPs, ни записей в списке")
-            # Правило в основном конфиге есть и с пустым rule-set: что
-            # забирает туннель, меняет файл, а не основной конфиг.
-            sets[rules_tag(t["id"])] = rule_set(rule)
-            rules.append({"rule_set": [rules_tag(t["id"])],
-                          "outbound": socks_tag(t["id"])})
-            # DNS туннеля: из [Interface] DNS его .conf, иначе не поднимаем.
-            servers = conf_dns(conf)
-            if servers:
-                host = conf["peer"]["endpoint"].rpartition(":")[0]
-                dns = (t["id"], servers[0], off_endpoint(domains, host))
-                dns_tunnels.append(dns)
-                sets[names_tag(t["id"])] = rule_set(
-                    {"domain_suffix": dns[2]} if dns[2] and t["enabled"] else None)
-        report += _summary(t, ep, nets, domains, dns)
+        # Правило и DNS в основном конфиге — у каждого туннеля, у выключенного
+        # и у «всего остального» с пустыми rule-set: что забирает туннель,
+        # меняет файл, а не основной конфиг. Иначе смена основного и «Всё
+        # остальное напрямую» требовали бы полного перезапуска (Tunnel.live_plan).
+        sets[rules_tag(t["id"])] = rule_set(rule)
+        rules.append({"rule_set": [rules_tag(t["id"])],
+                      "outbound": socks_tag(t["id"])})
+        # DNS туннеля: из [Interface] DNS его .conf, иначе не поднимаем.
+        servers = conf_dns(conf)
+        if servers:
+            host = conf["peer"]["endpoint"].rpartition(":")[0]
+            dns = (t["id"], servers[0], off_endpoint(domains, host))
+            dns_tunnels.append(dns)
+            sets[names_tag(t["id"])] = rule_set(
+                {"domain_suffix": dns[2]} if dns[2] and t["enabled"] else None)
+        report += _summary(t, ep, nets, domains, dns if listed else None)
 
     # Локальная сеть — напрямую, не в туннель. Без этого запросы к соседним
     # устройствам (NAS, принтер, роутер) уходили в личный туннель и висли там
@@ -1026,9 +1029,10 @@ def assemble(data, confs, log=print, links=None, api=None, resolve=True):
                       "default": socks_tag(main[0]["id"]) if main else DIRECT_TAG,
                       "interrupt_exist_connections": True})
     dns_servers, dns_rules = dns_section(dns_tunnels, OUT_TAG)
-    # Без основного — наименьший среди всех, выключенные в счёте: иначе их
-    # включение меняло бы MTU tun и требовало полного перезапуска.
-    mtu = main[2]["mtu"] if main else min(ep["mtu"] for _, _, ep in built)
+    # Наименьший среди всех, выключенные в счёте: иначе включение туннеля,
+    # смена основного и «Всё остальное напрямую» меняли бы MTU tun и
+    # требовали полного перезапуска.
+    mtu = min(ep["mtu"] for _, _, ep in built)
 
     config = {
         "log": {"level": level, "timestamp": True},

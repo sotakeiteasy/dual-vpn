@@ -335,7 +335,9 @@ class Prober:
         [{id, name, mode, host, dns, running}]. host — домен проверки «по
         списку», dns — DNS туннеля из собранного конфига, running — туннель
         включён и есть в собранном конфиге (без конфига сборка его пропускает,
-        выключенный собирается без процесса)."""
+        выключенный собирается без процесса). dns — только «по списку»: у
+        основного DNS в собранном конфиге есть ради смены на лету, но
+        проверяется он выходом, а не DNS."""
         try:
             items = tunnels.load()["tunnels"]
         except ValueError:
@@ -345,7 +347,7 @@ class Prober:
         dns = buildconfig.tunnel_dns(cfg)
         return [{"id": t["id"], "name": t["name"], "mode": t["mode"],
                  "host": _probe_host(t) if t["mode"] == "list" else "",
-                 "dns": dns.get(t["id"], ""),
+                 "dns": dns.get(t["id"], "") if t["mode"] == "list" else "",
                  "running": t["enabled"] and t["id"] in running}
                 for t in items]
 
