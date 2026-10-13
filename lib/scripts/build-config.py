@@ -550,10 +550,19 @@ def main():
         },
     }
 
-    with open(out_path, "w", encoding="utf-8") as fh:
+    # O_NOFOLLOW: пишет служба от root, а папка пользовательская — симлинк
+    # на месте конфига увёл бы запись и смену владельца в чужой файл.
+    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(config, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
-    os.chmod(out_path, 0o600)
+        os.fchmod(fh.fileno(), 0o600)
+        # Читает конфиг пробер окна от пользователя. Новый файл доставался
+        # root, и с 0600 пробер его не открывал: оба туннеля в окне —
+        # «выключен», хотя трафик шёл. Отдаём владельцу папки данных.
+        if os.geteuid() == 0:
+            st = os.stat(STATE)
+            os.fchown(fh.fileno(), st.st_uid, st.st_gid)
 
     print(f"собрано: {out_path}")
     print(f"  из     : {' + '.join(os.path.basename(p) for p in (p_path, c_path) if p)}")
