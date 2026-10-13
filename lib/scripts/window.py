@@ -12,6 +12,7 @@ NSApp, поэтому конфликта нет.
 
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -707,15 +708,33 @@ class Window:
                    f"DualVPN is installing version {version}. "
                    "Replacing the app in Applications requires administrator rights.")
         osa = f'do shell script "{cmd}" with administrator privileges with prompt "{prompt}"'
-        r = subprocess.run(["/usr/bin/osascript", "-e", osa],
+        # cwd="/": py2app запускает приложение из его Contents/Resources, а
+        # скрипт эту папку подменяет — дальше оболочка работала из удалённой
+        # папки, и повторная попытка падала уже на старте.
+        r = subprocess.run(["/usr/bin/osascript", "-e", osa], cwd="/",
                            capture_output=True, encoding="utf-8", errors="replace")
         for line in (r.stdout or "").strip().splitlines():
             self.log(f"apply-update: {line}")
         if r.returncode != 0:
             err = (r.stderr or "").strip()
             # -128 — человек нажал «Отмена», это не ошибка.
-            return None if "-128" in err else (err[:160] or "couldn't install the update")
+            if "-128" in err:
+                return None
+            self.log(f"apply-update: код {r.returncode}\n{err}")
+            # Приложение уже подменено, упал шаг после — новая версия стоит,
+            # и показывать «не удалось» значит пугать зря.
+            if self.installed_version() == version:
+                return ""
+            return err[:160] or "couldn't install the update"
         return ""
+
+    @staticmethod
+    def installed_version():
+        try:
+            with open(os.path.join(INSTALLED_APP, "Contents", "Info.plist"), "rb") as fh:
+                return plistlib.load(fh).get("CFBundleShortVersionString", "")
+        except (OSError, plistlib.InvalidFileException):
+            return ""
 
     def relaunch(self):
         """Закрыться и открыть уже новую версию.

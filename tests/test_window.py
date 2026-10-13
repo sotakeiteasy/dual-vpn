@@ -189,6 +189,23 @@ class UpdateTests(unittest.TestCase):
         got, _ = self.osa(1, "execution error: User canceled. (-128)")
         self.assertIsNone(got)
 
+    def test_runs_outside_the_app_being_replaced(self):
+        # Из Contents/Resources, которую скрипт удаляет, повтор падал на старте.
+        done = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(window.subprocess, "run", return_value=done) as run:
+            self.w._apply("/m/DualVPN.app", "0.1.5")
+        self.assertEqual(run.call_args.kwargs["cwd"], "/")
+
+    def test_failure_after_replacement_counts_as_installed(self):
+        with mock.patch.object(self.w, "installed_version", return_value="0.1.5"):
+            got, _ = self.osa(1, "execution error: exited with a non-zero status. (1)")
+        self.assertEqual(got, "")
+
+    def test_failure_before_replacement_is_shown(self):
+        with mock.patch.object(self.w, "installed_version", return_value="0.1.4"):
+            got, _ = self.osa(1, "execution error: exited with a non-zero status. (1)")
+        self.assertIn("non-zero status", got)
+
     def opened(self, checked_ago):
         w = self.w
         w.upd_timer = object()                      # проверки запущены
