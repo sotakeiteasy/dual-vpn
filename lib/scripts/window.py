@@ -309,8 +309,10 @@ class Window:
             self.log(f"не смог разложить конфиги: {e}")
 
         corp = confdirs.names(self.conf(), "corp")
+        # По проводу рабочий конфиг не используется — и выбранным не выглядит.
+        wire = self.site().get("CORP_VIA") == "wire"
         return {
-            "corp": [{"name": n, "active": True} for n in corp],
+            "corp": [{"name": n, "active": not wire} for n in corp],
             # Несколько рабочих — не выбор, а поломка: сборка конфига упадёт.
             "corp_ambiguous": len(corp) > 1,
             "personal": [{"name": n, "active": n == chosen}
@@ -851,6 +853,14 @@ class Window:
                 fh.write(text)
             os.chmod(self.site_path(), 0o600)
             self.log("настройки рабочей сети сохранены")
+            # Выбрать провод — значит включить рабочую сеть: флаг «корп
+            # выключен» иначе молча перебивал бы его при каждом старте.
+            off = os.path.join(self.state, "off")
+            if vals["CORP_VIA"] == "wire" and os.path.exists(off):
+                with open(off, encoding="utf-8") as fh:
+                    if fh.read().strip() == "corp":
+                        os.remove(off)
+                        self.log("туннель корп: включён — рабочая сеть по проводу")
         except OSError as e:
             self.eval(f"failed({_js(str(e))})")
             return

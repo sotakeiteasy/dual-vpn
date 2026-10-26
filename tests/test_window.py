@@ -19,11 +19,42 @@ class SaveSiteTests(unittest.TestCase):
     def setUp(self):
         self.w = window.Window.__new__(window.Window)
         self.w.data = tempfile.mkdtemp()
+        self.w.state = os.path.join(self.w.data, "state")
+        os.makedirs(self.w.state)
         self.w.log = lambda *a: None
         self.js = []
         self.w.eval = self.js.append
         self.w.status = lambda: {"up": False}
         self.w.push = lambda: None
+
+    def write_off(self, which):
+        with open(os.path.join(self.w.state, "off"), "w", encoding="utf-8") as fh:
+            fh.write(which)
+
+    def test_wire_turns_corp_back_on(self):
+        # Иначе флаг «корп выключен» молча перебивал бы провод при старте.
+        self.write_off("corp")
+
+        self.w.save_site({"CORP_VIA": "wire"})
+
+        self.assertFalse(os.path.exists(os.path.join(self.w.state, "off")))
+
+    def test_wire_keeps_personal_off_flag(self):
+        self.write_off("personal")
+
+        self.w.save_site({"CORP_VIA": "wire"})
+
+        self.assertTrue(os.path.exists(os.path.join(self.w.state, "off")))
+
+    def test_work_config_is_not_active_over_the_wire(self):
+        corp = os.path.join(self.w.data, "conf", "corp")
+        os.makedirs(corp)
+        with open(os.path.join(corp, "office.conf"), "w", encoding="utf-8") as fh:
+            fh.write("[Interface]\n")
+
+        self.assertEqual(self.w.configs()["corp"], [{"name": "office", "active": True}])
+        self.w.save_site({"CORP_VIA": "wire"})
+        self.assertEqual(self.w.configs()["corp"], [{"name": "office", "active": False}])
 
     def test_pasted_column_becomes_one_line(self):
         self.w.save_site({"CORP_DOMAINS": "  corp.example.com\nexample.local\t\n",
