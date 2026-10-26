@@ -313,6 +313,7 @@ class Window:
         wire = self.site().get("CORP_VIA") == "wire"
         return {
             "corp": [{"name": n, "active": not wire} for n in corp],
+            "corp_wire": wire,
             # Несколько рабочих — не выбор, а поломка: сборка конфига упадёт.
             "corp_ambiguous": len(corp) > 1,
             "personal": [{"name": n, "active": n == chosen}
@@ -433,6 +434,8 @@ class Window:
             self.load_site()
         elif name == "save_site":
             self.save_site(arg or {})
+        elif name == "set_wire":
+            self.set_wire(bool(arg))
         elif name == "install_daemon":
             self.install_daemon()
         elif name == "update":
@@ -816,6 +819,8 @@ class Window:
     def save_site(self, values):
         # Пробелы и переносы — в один пробел: список, вставленный столбиком,
         # тоже должен лечь строкой, а bash делит значение как раз по пробелам.
+        # Чего форма не прислала (провод — тумблер вне формы), остаётся как было.
+        values = {**self.site(), **values}
         vals = {k: " ".join(str(values.get(k, "") or "").split())
                 for k in self.SITE_KEYS}
         # Кавычки в значении разорвали бы строку файла, который читает bash.
@@ -869,6 +874,15 @@ class Window:
         if self.status().get("up"):
             self.ctrl.restart()
         self.push()
+
+    def set_wire(self, on):
+        """Тумблер «по проводу» в блоке «рабочий»: CORP_VIA в site.env."""
+        if self.status().get("up") and not self.confirm(
+                t("Рабочая сеть по проводу?" if on else "Рабочая сеть через туннель?",
+                  "Work network over the wire?" if on else "Work network through the tunnel?"),
+                RESTART_WARN(), ok=t("Переключить", "Switch")):
+            return
+        self.save_site({"CORP_VIA": "wire" if on else ""})
 
     def show_info(self, key):
         title, paras = t(self.INFO, self.INFO_EN).get(key, ("", []))

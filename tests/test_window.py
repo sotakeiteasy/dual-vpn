@@ -39,6 +39,23 @@ class SaveSiteTests(unittest.TestCase):
 
         self.assertFalse(os.path.exists(os.path.join(self.w.state, "off")))
 
+    def test_wire_switch_keeps_other_settings(self):
+        self.w.save_site({"CORP_DOMAINS": "corp.example.com"})
+
+        self.w.set_wire(True)
+
+        self.assertEqual((self.w.site()["CORP_VIA"], self.w.site()["CORP_DOMAINS"]),
+                         ("wire", "corp.example.com"))
+        self.assertTrue(self.w.configs()["corp_wire"])
+
+    def test_settings_form_does_not_reset_wire(self):
+        # Тумблер вне формы: «Сохранить» в настройках его не присылает.
+        self.w.set_wire(True)
+
+        self.w.save_site({"CORP_DOMAINS": "corp.example.com"})
+
+        self.assertEqual(self.w.site()["CORP_VIA"], "wire")
+
     def test_wire_keeps_personal_off_flag(self):
         self.write_off("personal")
 

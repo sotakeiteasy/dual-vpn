@@ -130,7 +130,19 @@ button.primary:hover:not(:disabled) { background: #0b62e4; }
    подействует только после перезапуска, а полупроходной режим («поменял,
    а работает старое») уже один раз всех запутал. Гасим весь блок целиком —
    так понятнее, чем поштучно выключенные кнопки. */
-#confs-wrap.locked { opacity: 0.45; pointer-events: none; }
+#confs-wrap.locked .card, #confs-wrap.locked .hacts { opacity: 0.45; pointer-events: none; }
+/* Тумблер «по проводу» гасить незачем: он сам перезапускает туннель. */
+.wire-sw { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px;
+           cursor: pointer; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.wire-sw input { appearance: none; -webkit-appearance: none; margin: 0; cursor: pointer;
+                 width: 26px; height: 15px; border-radius: 8px; background: var(--line);
+                 position: relative; transition: background 0.15s; }
+.wire-sw input::after { content: ''; position: absolute; top: 2px; left: 2px;
+                        width: 11px; height: 11px; border-radius: 50%; background: #fff;
+                        transition: transform 0.15s; }
+.wire-sw input:checked { background: var(--accent); }
+.wire-sw input:checked::after { transform: translateX(11px); }
+.wire-sw:hover { color: var(--text); }
 #lockhint { color: var(--dim); padding: 2px 3px 0; }
 /* Подвал колонки: версия нужна, когда просят «а какая у тебя», но внимания
    к себе требовать не должна. */
@@ -270,10 +282,10 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
 #sheet-foot { padding: 11px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; }
 .field { display: block; margin-bottom: 14px; }
 .flabel { display: block; font-weight: 500; margin-bottom: 4px; }
-.field input, .field select { width: 100%; font: inherit; padding: 5px 9px; border-radius: 6px;
+.field input { width: 100%; font: inherit; padding: 5px 9px; border-radius: 6px;
                border: 1px solid var(--line); background: var(--bg); color: var(--text);
                -webkit-user-select: text; user-select: text; }
-.field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 /* Пояснение — обычным шрифтом: оно говорит, что вписать, и читать его
    обязательно. Пример — мелко и моноширинно, как сама строка ввода. */
 .fopt  { font-weight: 400; color: var(--dim); }
@@ -368,6 +380,8 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
       viewBox="0 0 14 14" fill="none" stroke="currentColor"><circle cx="7" cy="7" r="6.5"/>
       <circle cx="7" cy="4.2" r="0.9" fill="currentColor" stroke="none"/>
       <path d="M7 6.1v4" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+    <label class="wire-sw"><input type="checkbox" id="wire-sw">
+      <span data-en="over the wire">по проводу</span></label>
     <span class="hacts">
       <button class="icon" id="btn-fetch" title="Обновить с сайта" aria-label="Обновить с сайта"
               data-en-title="Update from Website">
@@ -614,8 +628,12 @@ function renderConfs(d) {
               title="${tr('Действия', 'Actions')}">⋯</button>
     </div>`).join('');
 
-  document.getElementById('confs-corp').innerHTML =
-    (d.corp_ambiguous
+  document.getElementById('wire-sw').checked = !!d.corp_wire;
+  // По проводу рабочий конфиг не используется: вместо него — сам режим.
+  document.getElementById('confs-corp').innerHTML = d.corp_wire
+    ? `<div class="emptyrow">${tr('по проводу, без туннеля — конфиг не нужен',
+                                 'over the wire, no tunnel — no config needed')}</div>`
+    : (d.corp_ambiguous
       ? `<div class="warnline">${tr('несколько рабочих конфигов — сборка не пройдёт, оставь один',
                                    'several work configs — the build will fail, keep one')}</div>`
       : '') +
@@ -907,11 +925,6 @@ function renderVersion(v) {
 // а не что программа с этим делает: прошлые описывали внутреннюю логику.
 // Порядок — по важности: без первых двух рабочая сеть не работает вовсе.
 const SITE_FIELDS = [
-  {key: 'CORP_VIA', label: tr('Подключение', 'Connection'),
-   choices: [['', tr('через рабочий туннель', 'through the work tunnel')],
-             ['wire', tr('по проводу, без туннеля', 'over the wire, no tunnel')]],
-   what: tr('По проводу рабочий конфиг не нужен: адреса рабочей сети идут напрямую, остальное — через личный туннель.',
-            'Over the wire no work config is needed: work network addresses go direct, the rest through the personal tunnel.')},
   {key: 'CORP_DOMAINS', label: tr('Домены рабочей сети', 'Work network domains'),
    what: tr('Адреса внутри рабочей сети: их имена знает только рабочий DNS. Несколько — через пробел.',
             'Addresses inside the work network: only the work DNS knows their names. Separate several with spaces.'),
@@ -1005,12 +1018,9 @@ function showSite(cur) {
     <label class="field">
       <span class="flabel">${f.label}${f.optional ? ` <span class="fopt">· ${tr('необязательно', 'optional')}</span>` : ''}</span>
       <span class="fwhat">${f.what}</span>
-      ${f.choices
-        ? `<select id="f-${f.key}">${f.choices.map(([v, l]) =>
-             `<option value="${esc(v)}"${(cur[f.key] || '') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`
-        : `<input id="f-${f.key}" value="${esc(cur[f.key] || '')}"
+      <input id="f-${f.key}" value="${esc(cur[f.key] || '')}"
              spellcheck="false" autocapitalize="off" autocomplete="off">
-      <span class="fex">${tr('например', 'e.g.')}: ${esc(f.example)}</span>`}
+      <span class="fex">${tr('например', 'e.g.')}: ${esc(f.example)}</span>
     </label>`).join('');
   sheetButtons('sheet-save', 'sheet-load');
   document.getElementById('sheet').classList.add('on');
@@ -1101,6 +1111,12 @@ document.getElementById('sheet-save').onclick = () => {
   const v = {};
   SITE_FIELDS.forEach(({key}) => { v[key] = document.getElementById('f-' + key).value; });
   send('save_site', v);
+};
+// Положение тумблера возвращаем сразу: настоящее придёт со списком конфигов,
+// а отказ в подтверждении иначе оставил бы его переключённым.
+document.getElementById('wire-sw').onchange = e => {
+  send('set_wire', e.target.checked);
+  e.target.checked = !e.target.checked;
 };
 document.getElementById('btn-restart').onclick = () => send('restart');
 document.getElementById('tunnels').onclick = e => {
