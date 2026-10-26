@@ -123,6 +123,19 @@ class ProbeSlowTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual((st["corp_state"], st["exit_state"]), ("off", "tunnel"))
 
+    def test_corp_over_the_wire_is_probed(self):
+        # По проводу эндпоинта wg-corp нет, но рабочая сеть есть — её меряют.
+        with open(os.path.join(self.state, "config.json"), "w", encoding="utf-8") as fh:
+            json.dump({"endpoints": [{"tag": "awg-personal", "peers": [{"address": "1.2.3.4"}]}],
+                       "outbounds": [{"type": "direct", "tag": "direct"},
+                                     {"type": "direct", "tag": "corp-wire"}],
+                       "dns": {"servers": [{"tag": "dns-corp", "server": "172.15.0.110"}]}}, fh)
+
+        st = self.probe(json.dumps({"ip": "1.2.3.4"}), "10.0.0.5")
+
+        self.assertEqual((st["corp_state"], st["corp_ip"], st["corp_wire"]),
+                         ("ok", "10.0.0.5", True))
+
     def test_ping_ms(self):
         self.assertIsNone(tui.ping_ms(""))
         with mock.patch.object(tui, "sh", return_value="round-trip min/avg/max/stddev = 7.7/8.433/9.2/0.6 ms"):

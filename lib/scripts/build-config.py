@@ -296,6 +296,74 @@ def corp_routes(conf):
     return nets
 
 
+def corp_wire():
+    """Рабочая сеть по проводу (CORP_VIA=wire из настроек): туннеля нет,
+    её подсети и DNS идут напрямую, остальное — в личный."""
+    return os.environ.get("CORP_VIA") == "wire"
+
+
+def wire_corp():
+    """Рабочий конфиг для провода — необязательный, из него берутся подсети
+    и DNS, когда они не заданы в настройках. Битый или лишний — не помеха."""
+    have = confdirs.names(CONF, "corp") if confdirs.has_dirs(CONF) else []
+    if len(have) != 1:
+        return None
+    try:
+        return parse_conf(confdirs.conf_path(CONF, "corp", have[0]))
+    except (OSError, UnicodeError, SystemExit):
+        return None
+
+
+def wire_routes(corp):
+    """Подсети рабочей сети для провода: CORP_NETS, иначе AllowedIPs конфига."""
+    nets = os.environ.get("CORP_NETS", "").replace(",", " ").split()
+    if not nets:
+        if corp and "allowedips" in corp["peer"]:
+            return corp_routes(corp)
+        sys.exit("[corp] work network over the wire: no internal subnets\n"
+                 "set them in the work network settings")
+    bad = [n for n in nets if not _is_cidr(n)
+           or ipaddress.ip_network(n, strict=False).version != 4]
+    if bad:
+        sys.exit(f"[corp] internal subnets: not an IPv4 subnet: {', '.join(bad)}")
+    return [str(ipaddress.ip_network(n, strict=False)) for n in nets]
+
+
+def network_dns():
+    """DNS, который выдала сеть на основном интерфейсе. Зовётся до подъёма
+    туннеля, поэтому основной интерфейс — ещё настоящий, провод."""
+    try:
+        out = subprocess.run(["route", "-n", "get", "default"], capture_output=True,
+                             encoding="utf-8", errors="replace", timeout=5).stdout
+        dev = next((l.split(":", 1)[1].strip() for l in out.splitlines()
+                    if l.strip().startswith("interface:")), "")
+        if not dev:
+            return []
+        out = subprocess.run(["ipconfig", "getoption", dev, "domain_name_server"],
+                             capture_output=True, encoding="utf-8", errors="replace",
+                             timeout=5).stdout
+        return out.split()
+    except Exception:
+        return []
+
+
+def wire_dns(corp):
+    """Рабочий DNS для провода: CORP_DNS, иначе из конфига, иначе от сети."""
+    dns = os.environ.get("CORP_DNS", "").replace(",", " ").split()
+    if not dns and corp:
+        dns = split_list(corp["interface"].get("dns", ""))
+    if not dns:
+        dns = network_dns()
+    return [d for d in dns if _is_ipv4(d)]
+
+
+def _is_ipv4(s):
+    try:
+        return ipaddress.ip_address(s).version == 4
+    except ValueError:
+        return False
+
+
 def dns_domains(conf):
     """Домены для корп-DNS: из имени корп-endpoint + известные внутренние."""
     domains = set()
@@ -356,17 +424,21 @@ def main():
     # Выключенный туннель не собираем вовсе: ни эндпоинта, ни маршрутов, ни
     # DNS. Его файл тогда и не нужен — истёкший корп можно просто не трогать.
     off = disabled_tunnel()
+    # По проводу рабочего туннеля нет, и его конфиг не обязателен.
+    wire = corp_wire() and off != "corp"
+    corp_on = off != "corp" and not wire
     if confdirs.has_dirs(CONF):
         p_path = pick_personal() if off != "personal" else None
-        c_path = pick_corp() if off != "corp" else None
+        c_path = pick_corp() if corp_on else None
     else:
         p_path = (pick_conf("personal", personal_patterns())
                   if off != "personal" else None)
         c_path = (pick_conf("corp", confdirs.CORP_PAT, exclude=p_path)
-                  if off != "corp" else None)
+                  if corp_on else None)
 
     personal = parse_conf(p_path) if p_path else None
     corp = parse_conf(c_path) if c_path else None
+    wire_src = wire_corp() if wire else None
 
     # Значение по умолчанию — только когда в конфиге нет строки MTU.
     #
@@ -378,6 +450,10 @@ def main():
     ep_personal = endpoint(personal, "awg-personal", 1280) if personal else None
     ep_corp = endpoint(corp, "wg-corp", 1280) if corp else None
     endpoints = [ep for ep in (ep_personal, ep_corp) if ep]
+    if not endpoints:
+        sys.exit("nothing to bring up: the personal tunnel is off "
+                 "and the work network goes over the wire\n"
+                 "turn the personal tunnel on")
 
     # Переключатели для диагностики, без правки файлов:
     #   SB_STACK=system|gvisor|mixed   сетевой стек tun
@@ -419,18 +495,18 @@ def main():
     if ep_corp and os.environ.get("SB_CORP_MTU"):
         ep_corp["mtu"] = int(os.environ["SB_CORP_MTU"])
 
-    routes = corp_routes(corp) if corp else []
+    routes = corp_routes(corp) if corp else wire_routes(wire_src) if wire else []
 
     # SB_CORP_EXCLUDE="198.51.100.7/32 ..." — не гнать эти адреса в корп-туннель.
     # Нужно, когда какой-то адрес из AllowedIPs недоступен со стороны корп-сети:
     # без исключения соединение с ним висит 15с и тормозит браузер.
     excl = os.environ.get("SB_CORP_EXCLUDE", "").replace(",", " ").split()
-    if excl and ep_corp:
+    if excl and routes:
         drop = [ipaddress.ip_network(x, strict=False) for x in excl if _is_cidr(x)]
         routes = [r for r in routes
                   if not any(ipaddress.ip_network(r, strict=False).subnet_of(d)
                              for d in drop)]
-        for ep in (ep_corp,):
+        for ep in (ep_corp,) if ep_corp else ():
             ep["peers"][0]["allowed_ips"] = [
                 c for c in ep["peers"][0]["allowed_ips"]
                 if not (_is_cidr(c) and any(
@@ -467,8 +543,16 @@ def main():
             ]
 
     # Корп-DNS: из [Interface] DNS корп-конфига, иначе не поднимаем.
+    # По проводу — из настроек, конфига или от самой сети (wire_dns).
     corp_dns = split_list(corp["interface"].get("dns", "")) if corp else []
     corp_dns = [d for d in corp_dns if re.match(r"^[\d.]+$", d)]
+    if wire:
+        corp_dns = wire_dns(wire_src)
+        # Рабочий DNS обязан идти мимо личного туннеля, даже вне CORP_NETS.
+        if corp_dns and not any(
+                ipaddress.ip_address(corp_dns[0]) in ipaddress.ip_network(r, strict=False)
+                for r in routes):
+            routes.append(f"{corp_dns[0]}/32")
 
     # Домены, которые резолвятся через корп-DNS. Дублируют /etc/resolver на macOS
     # (там правила sing-box до DNS не доходят), но нужны на Windows, где DNS
@@ -486,6 +570,8 @@ def main():
             d for d in (dns_domains(corp) | extra)
             if not endpoint_host.endswith(d.lower())
         )
+    elif wire:
+        domains = sorted(extra)
 
     # Без личного туннеля всё, что не ушло в корп, идёт напрямую — и DNS тоже.
     # Тег прежний: на него завязаны final и default_domain_resolver.
@@ -495,10 +581,12 @@ def main():
     dns_servers = [dns_personal]
     dns_rules = []
     if corp_dns:
-        dns_servers.insert(0, {
-            "type": "udp", "tag": "dns-corp",
-            "server": corp_dns[0], "detour": "wg-corp",
-        })
+        # По проводу detour не нужен: без него sing-box и так ходит напрямую,
+        # а detour на пустой direct он отвергает.
+        dns_corp = {"type": "udp", "tag": "dns-corp", "server": corp_dns[0]}
+        if ep_corp:
+            dns_corp["detour"] = "wg-corp"
+        dns_servers.insert(0, dns_corp)
         dns_rules.append({"domain_suffix": domains, "server": "dns-corp"})
 
     tun = {
@@ -525,12 +613,16 @@ def main():
         },
         "endpoints": endpoints,
         "inbounds": [tun],
-        "outbounds": [{"type": "direct", "tag": "direct"}],
+        # corp-wire — тот же direct, но своим тегом: по нему окно и пробер
+        # отличают рабочую сеть по проводу от выключенной.
+        "outbounds": [{"type": "direct", "tag": "direct"},
+                      *([{"type": "direct", "tag": "corp-wire"}] if wire else [])],
         "route": {
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
                 *([{"ip_cidr": routes, "outbound": "wg-corp"}] if ep_corp else []),
+                *([{"ip_cidr": routes, "outbound": "corp-wire"}] if wire and routes else []),
                 # Локальная сеть — напрямую, не в туннель. Без этого запросы
                 # к соседним устройствам (NAS, принтер, роутер) уходили в
                 # личный туннель и висли там по 15 секунд.
@@ -575,6 +667,11 @@ def main():
     if ep_corp:
         print(f"  корп   : {ep_corp['peers'][0]['address']}:"
               f"{ep_corp['peers'][0]['port']}  mtu {ep_corp['mtu']}")
+        print(f"  в корп : {', '.join(routes)}")
+        print(f"  корп-DNS: {corp_dns[0] if corp_dns else 'нет'}"
+              f"  для {', '.join(domains)}")
+    elif wire:
+        print("  корп   : по проводу, напрямую")
         print(f"  в корп : {', '.join(routes)}")
         print(f"  корп-DNS: {corp_dns[0] if corp_dns else 'нет'}"
               f"  для {', '.join(domains)}")

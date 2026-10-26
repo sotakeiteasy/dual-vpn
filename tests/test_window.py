@@ -36,6 +36,24 @@ class SaveSiteTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.w.site_path()))
         self.assertIn("failed(", self.js[0])
 
+    def test_wire_settings_are_kept(self):
+        self.w.save_site({"CORP_VIA": "wire", "CORP_NETS": "172.15.0.0/24\n10.13.35.0/28",
+                          "CORP_DNS": "172.15.0.110"})
+
+        site = self.w.site()
+        self.assertEqual((site["CORP_VIA"], site["CORP_NETS"], site["CORP_DNS"]),
+                         ("wire", "172.15.0.0/24 10.13.35.0/28", "172.15.0.110"))
+
+    def test_bad_wire_settings_are_refused(self):
+        for bad in ({"CORP_VIA": "cable"}, {"CORP_NETS": "172.15.0.0/24 nope"},
+                    {"CORP_NETS": "fd00::/8"}, {"CORP_DNS": "dns.corp"}):
+            self.js.clear()
+
+            self.w.save_site(bad)
+
+            self.assertFalse(os.path.exists(self.w.site_path()), bad)
+            self.assertIn("failed(", self.js[0])
+
     def test_email_is_checked_and_kept(self):
         self.w.save_site({"CORP_EMAIL": "ivanov@gmail.com"})
         self.assertFalse(os.path.exists(self.w.site_path()))

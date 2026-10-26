@@ -160,6 +160,16 @@ def peer_addrs():
     return out
 
 
+def corp_wire():
+    """Рабочая сеть в собранном конфиге идёт по проводу (outbound corp-wire)."""
+    try:
+        with open(os.path.join(STATE, "config.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        return any(o.get("tag") == "corp-wire" for o in cfg.get("outbounds", []))
+    except Exception:
+        return False
+
+
 def ping_ms(host):
     """Средний круг ICMP до host в целых мс; None — не ответил.
 
@@ -316,13 +326,15 @@ def probe_slow():
     # меряем: иначе мёртвый корп весь день отвечал бы «молчит» по таймаутам.
     # Смотрим на config.json, а не на флаг: флаг меняется раньше перезапуска.
     tags = peer_addrs()
+    wire = corp_wire()
+    set_st(corp_wire=wire)
     probes = []
     if "awg-personal" in tags:
         probes.append(probe_personal)
     else:
         set_st(exit_ip="", exit_country="", exit_state="off", exit_ms=None,
                exit_is_peer=False, v6_leak="")
-    if "wg-corp" in tags:
+    if "wg-corp" in tags or wire:
         probes.append(probe_corp)
     else:
         set_st(corp_ip="", corp_http="", corp_state="off", corp_ms=None)

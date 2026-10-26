@@ -75,7 +75,12 @@ fi
 : "${CORP_PROBE:=}"
 : "${CORP_HOSTS:=}"
 : "${SB_CORP_EXCLUDE:=}"
-export CORP_DOMAINS CORP_PROBE CORP_HOSTS SB_CORP_EXCLUDE
+# CORP_VIA=wire — рабочая сеть по проводу: туннеля нет, подсети CORP_NETS
+# и DNS CORP_DNS идут напрямую (пустые — из рабочего конфига или от сети).
+: "${CORP_VIA:=}"
+: "${CORP_NETS:=}"
+: "${CORP_DNS:=}"
+export CORP_DOMAINS CORP_PROBE CORP_HOSTS SB_CORP_EXCLUDE CORP_VIA CORP_NETS CORP_DNS
 
 PID=""
 PEERS=""   # адреса пиров из config.json, заполняется динамически

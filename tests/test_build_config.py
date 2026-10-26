@@ -107,10 +107,12 @@ class BuildConfigTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
 
-    def build(self, profile=""):
+    def build(self, profile="", **site):
         out = os.path.join(self.data, "config.json")
         env = {**os.environ, "DUALVPN_DATA": self.data, "LC_ALL": "C"}
-        env.pop("SB_PERSONAL", None)
+        for k in ("SB_PERSONAL", "CORP_VIA", "CORP_NETS", "CORP_DNS", "SB_CORP_EXCLUDE"):
+            env.pop(k, None)
+        env.update(site)
         args = ["--personal", profile] if profile else []
         r = subprocess.run([sys.executable, SCRIPT, *args, "--out", out],
                            capture_output=True, text=True, env=env)
@@ -192,6 +194,93 @@ class BuildConfigTests(unittest.TestCase):
         self.assertNotIn("detour", dns["dns-personal"])
         self.assertEqual(dns["dns-corp"]["detour"], "wg-corp")
         self.check_with_sing_box(out)
+
+    def wire_rule(self, cfg):
+        return next(r for r in cfg["route"]["rules"] if r.get("outbound") == "corp-wire")
+
+    def test_wire_without_work_config(self):
+        # По проводу рабочий конфиг не нужен: подсети и DNS — из настроек.
+        shutil.rmtree(os.path.join(self.data, "conf", "corp"))
+        self.write("personal/home.conf", AWG2)
+
+        r, cfg, out = self.build("home", CORP_VIA="wire", CORP_NETS="172.15.0.0/24, 198.51.100.23/32",
+                                 CORP_DNS="172.15.0.110", CORP_DOMAINS="corp.example.com")
+
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([e["tag"] for e in cfg["endpoints"]], ["awg-personal"])
+        self.assertEqual(self.wire_rule(cfg)["ip_cidr"], ["172.15.0.0/24", "198.51.100.23/32"])
+        self.assertEqual(cfg["route"]["final"], "awg-personal")
+        dns = {s["tag"]: s for s in cfg["dns"]["servers"]}
+        self.assertEqual(dns["dns-corp"]["server"], "172.15.0.110")
+        self.assertNotIn("detour", dns["dns-corp"])
+        self.assertIn({"domain_suffix": ["corp.example.com"], "server": "dns-corp"}, cfg["dns"]["rules"])
+        self.check_with_sing_box(out)
+
+    def test_wire_takes_subnets_and_dns_from_work_config(self):
+        self.write("personal/home.conf", AWG2)
+
+        r, cfg, _ = self.build("home", CORP_VIA="wire")
+
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("wg-corp", json.dumps(cfg))
+        self.assertEqual(self.wire_rule(cfg)["ip_cidr"], ["172.15.0.0/24", "10.13.35.0/28"])
+        dns = {s["tag"]: s for s in cfg["dns"]["servers"]}
+        self.assertEqual(dns["dns-corp"]["server"], "172.15.0.110")
+
+    def test_wire_routes_dns_outside_subnets_direct(self):
+        self.write("personal/home.conf", AWG2)
+
+        r, cfg, _ = self.build("home", CORP_VIA="wire", CORP_NETS="10.13.35.0/28",
+                               CORP_DNS="192.0.2.53")
+
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.wire_rule(cfg)["ip_cidr"], ["10.13.35.0/28", "192.0.2.53/32"])
+
+    def test_wire_drops_bad_dns(self):
+        self.write("personal/home.conf", AWG2)
+
+        r, cfg, _ = self.build("home", CORP_VIA="wire", CORP_NETS="10.13.35.0/28",
+                               CORP_DNS="999.1.1.1")
+
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.wire_rule(cfg)["ip_cidr"], ["10.13.35.0/28"])
+        self.assertNotIn("dns-corp", json.dumps(cfg))
+
+    def test_wire_without_subnets_fails(self):
+        shutil.rmtree(os.path.join(self.data, "conf", "corp"))
+        self.write("personal/home.conf", AWG2)
+
+        r, _, _ = self.build("home", CORP_VIA="wire", CORP_DNS="172.15.0.110")
+
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no internal subnets", r.stderr)
+
+    def test_wire_bad_subnet_names_it(self):
+        self.write("personal/home.conf", AWG2)
+
+        r, _, _ = self.build("home", CORP_VIA="wire", CORP_NETS="172.15.0.0/24 fd00::/8")
+
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("fd00::/8", r.stderr)
+
+    def test_wire_with_personal_off_fails(self):
+        self.write("personal/home.conf", AWG2)
+        self.turn_off("personal")
+
+        r, _, _ = self.build("home", CORP_VIA="wire")
+
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("nothing to bring up", r.stderr)
+
+    def test_corp_off_beats_wire(self):
+        self.write("personal/home.conf", AWG2)
+        self.turn_off("corp")
+
+        r, cfg, _ = self.build("home", CORP_VIA="wire")
+
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("corp-wire", json.dumps(cfg))
+        self.assertNotIn("dns-corp", json.dumps(cfg))
 
     def endpoint_port(self, cfg, tag):
         return next(e for e in cfg["endpoints"] if e["tag"] == tag)["peers"][0]["port"]

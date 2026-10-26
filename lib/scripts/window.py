@@ -10,6 +10,7 @@ NSApp, поэтому конфликта нет.
 («нажали включить», «показать конфиг») и уходят данные.
 """
 
+import ipaddress
 import json
 import os
 import plistlib
@@ -360,7 +361,7 @@ class Window:
         Общие слова про VPN человек и так найдёт; ценно здесь то, что показаны
         его собственные подсети, его DNS и его эндпоинты.
         """
-        out = {"corp_nets": [], "corp_dns": "", "corp_domains": [],
+        out = {"corp_nets": [], "corp_wire": False, "corp_dns": "", "corp_domains": [],
                "endpoints": [], "final": ""}
         try:
             with open(os.path.join(self.state, "config.json"), encoding="utf-8") as fh:
@@ -378,8 +379,9 @@ class Window:
             })
 
         for r in cfg.get("route", {}).get("rules", []):
-            if r.get("outbound") == "wg-corp" and r.get("ip_cidr"):
+            if r.get("outbound") in ("wg-corp", "corp-wire") and r.get("ip_cidr"):
                 out["corp_nets"] = _list(r["ip_cidr"])
+                out["corp_wire"] = r["outbound"] == "corp-wire"
             if r.get("final"):
                 out["final"] = r["final"]
         out["final"] = out["final"] or cfg.get("route", {}).get("final", "")
@@ -746,8 +748,8 @@ class Window:
                          start_new_session=True)
         AppHelper.callAfter(NSApp.terminate_, None)
 
-    SITE_KEYS = ("CORP_DOMAINS", "CORP_PROBE", "CORP_HOSTS", "SB_CORP_EXCLUDE",
-                 "CORP_EMAIL")
+    SITE_KEYS = ("CORP_VIA", "CORP_DOMAINS", "CORP_PROBE", "CORP_NETS", "CORP_DNS",
+                 "CORP_HOSTS", "SB_CORP_EXCLUDE", "CORP_EMAIL")
 
     def site_path(self):
         return os.path.join(self.data, "conf", "site.env")
@@ -819,6 +821,20 @@ class Window:
             if '"' in v:
                 self.eval(f"failed({_js('quotes are not allowed in ' + k)})")
                 return
+        # Опечатка тут всплыла бы только при старте, отказом сборки.
+        if vals["CORP_VIA"] not in ("", "wire"):
+            self.eval(f"failed({_js('CORP_VIA is either empty or wire')})")
+            return
+        for k, parse in (("CORP_NETS", lambda s: ipaddress.ip_network(s, strict=False)),
+                         ("CORP_DNS", ipaddress.ip_address)):
+            for item in vals[k].replace(",", " ").split():
+                try:
+                    ok = parse(item).version == 4
+                except ValueError:
+                    ok = False
+                if not ok:
+                    self.eval(f"failed({_js(f'{k}: not an IPv4 value: {item}')})")
+                    return
         if vals["CORP_EMAIL"]:
             try:
                 vals["CORP_EMAIL"] = corpconf.check_email(vals["CORP_EMAIL"])
@@ -935,6 +951,15 @@ class Window:
                        t(f"Сейчас выключен {self.TUNNEL_NAME[off][0]}. "
                          "Чтобы выключить всё — кнопка «Выключить».",
                          f"{self.TUNNEL_NAME[off][1].capitalize()} is already off. "
+                         "To turn everything off, use “Turn Off”."))
+            return
+        # По проводу рабочего туннеля нет: без личного поднимать нечего.
+        if which == "personal" and not off and self.site().get("CORP_VIA") == "wire":
+            self.alert(t("Личный выключить нельзя", "Can't turn off personal"),
+                       t("Рабочая сеть идёт по проводу, без личного туннеля "
+                         "поднимать нечего. Чтобы выключить всё — кнопка «Выключить».",
+                         "The work network goes over the wire, so without the personal "
+                         "tunnel there is nothing to bring up. "
                          "To turn everything off, use “Turn Off”."))
             return
 

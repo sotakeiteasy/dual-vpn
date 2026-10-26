@@ -21,7 +21,8 @@ test('английская система: в окне ни одной русс�
   try {
     const states = [OFF, UP, {...OFF, daemon: false}, {...OFF, error: 'build failed'},
                     {...UP, corp_ip: '', exit_state: 'down'}, {...UP, corp_state: 'off'},
-                    {...UP, exit_state: 'off'}, {...UP, op: {phase: 'restarting', busy: true}}];
+                    {...UP, exit_state: 'off'}, {...UP, corp_wire: true},
+                    {...UP, op: {phase: 'restarting', busy: true}}];
     for (const s of states) {
       const text = JSON.stringify(viewModel(s));
       assert.doesNotMatch(text, /[А-Яа-яЁё]/, text);
@@ -89,6 +90,15 @@ test('строки туннелей — переключатели, оба вы�
   assert.equal(p.title, 'Работает только корп');
   assert.deepEqual(p.rows.map(r => [r.dot, r.off, r.toggleable]),
                    [['off', true, true], ['ok', false, false]]);
+});
+
+test('корп по проводу: строка подписана, личный не выключается', () => {
+  const v = viewModel({...UP, corp_wire: true});
+
+  assert.equal(v.title, 'Всё работает');
+  assert.equal(v.sub, 'личный туннель поднят, корп по проводу');
+  assert.deepEqual(v.rows.map(r => [r.name, r.toggleable]),
+                   [['личный', false], ['корп · провод', true]]);
 });
 
 test('задержка — только после замера', () => {

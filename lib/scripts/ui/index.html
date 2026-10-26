@@ -270,10 +270,10 @@ h2 button.icon:hover:not(:disabled) { color: var(--text); }
 #sheet-foot { padding: 11px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; }
 .field { display: block; margin-bottom: 14px; }
 .flabel { display: block; font-weight: 500; margin-bottom: 4px; }
-.field input { width: 100%; font: inherit; padding: 5px 9px; border-radius: 6px;
+.field input, .field select { width: 100%; font: inherit; padding: 5px 9px; border-radius: 6px;
                border: 1px solid var(--line); background: var(--bg); color: var(--text);
                -webkit-user-select: text; user-select: text; }
-.field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.field input:focus, .field select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 /* Пояснение — обычным шрифтом: оно говорит, что вписать, и читать его
    обязательно. Пример — мелко и моноширинно, как сама строка ввода. */
 .fopt  { font-weight: 400; color: var(--dim); }
@@ -728,7 +728,7 @@ function renderHowto(h) {
     <h3>Where a packet goes</h3>
     <p>Rules are checked in order, until the first match:</p>
     <ol>
-      <li>address is in the corp subnets → <code>work tunnel</code></li>
+      <li>address is in the corp subnets → <code>${h.corp_wire ? 'direct, over the wire' : 'work tunnel'}</code></li>
       <li>address is local (<code>10/8</code>, <code>192.168/16</code>) → past the tunnels, to your network</li>
       <li>everything else → <code>${esc(h.final || 'personal tunnel')}</code></li>
     </ol>
@@ -805,7 +805,7 @@ function renderHowto(h) {
     <h3>Куда уходит конкретный пакет</h3>
     <p>Правила проверяются по порядку, до первого совпадения:</p>
     <ol>
-      <li>адрес попадает в корп-подсети → <code>рабочий туннель</code></li>
+      <li>адрес попадает в корп-подсети → <code>${h.corp_wire ? 'напрямую, по проводу' : 'рабочий туннель'}</code></li>
       <li>адрес локальный (<code>10/8</code>, <code>192.168/16</code>) → мимо туннелей, в свою сеть</li>
       <li>всё остальное → <code>${esc(h.final || 'личный туннель')}</code></li>
     </ol>
@@ -907,6 +907,11 @@ function renderVersion(v) {
 // а не что программа с этим делает: прошлые описывали внутреннюю логику.
 // Порядок — по важности: без первых двух рабочая сеть не работает вовсе.
 const SITE_FIELDS = [
+  {key: 'CORP_VIA', label: tr('Подключение', 'Connection'),
+   choices: [['', tr('через рабочий туннель', 'through the work tunnel')],
+             ['wire', tr('по проводу, без туннеля', 'over the wire, no tunnel')]],
+   what: tr('По проводу рабочий конфиг не нужен: адреса рабочей сети идут напрямую, остальное — через личный туннель.',
+            'Over the wire no work config is needed: work network addresses go direct, the rest through the personal tunnel.')},
   {key: 'CORP_DOMAINS', label: tr('Домены рабочей сети', 'Work network domains'),
    what: tr('Адреса внутри рабочей сети: их имена знает только рабочий DNS. Несколько — через пробел.',
             'Addresses inside the work network: only the work DNS knows their names. Separate several with spaces.'),
@@ -915,6 +920,14 @@ const SITE_FIELDS = [
    what: tr('Любой внутренний адрес, который всегда работает. По нему окно решает, отвечает ли корп.',
             'Any internal address that is always up. The window uses it to tell whether corp responds.'),
    example: 'git.corp.example.com'},
+  {key: 'CORP_NETS', label: tr('Подсети рабочей сети', 'Work network subnets'), optional: true,
+   what: tr('Для провода: какие адреса идут напрямую. Пусто — из AllowedIPs рабочего конфига.',
+            'For the wire: which addresses go direct. Empty — from AllowedIPs of the work config.'),
+   example: '10.20.0.0/16 198.51.100.0/24'},
+  {key: 'CORP_DNS', label: tr('Рабочий DNS', 'Work DNS'), optional: true,
+   what: tr('Для провода: кто резолвит домены рабочей сети. Пусто — из рабочего конфига, без него — DNS, выданный сетью.',
+            'For the wire: who resolves the work network domains. Empty — from the work config, without it — the DNS the network gave.'),
+   example: '10.20.0.53'},
   {key: 'CORP_HOSTS', label: tr('Хосты для диагностики', 'Diagnostic hosts'), optional: true,
    what: tr('Что дополнительно проверить, когда что-то не открывается.',
             'What else to check when something won’t open.'),
@@ -992,9 +1005,12 @@ function showSite(cur) {
     <label class="field">
       <span class="flabel">${f.label}${f.optional ? ` <span class="fopt">· ${tr('необязательно', 'optional')}</span>` : ''}</span>
       <span class="fwhat">${f.what}</span>
-      <input id="f-${f.key}" value="${esc(cur[f.key] || '')}"
+      ${f.choices
+        ? `<select id="f-${f.key}">${f.choices.map(([v, l]) =>
+             `<option value="${esc(v)}"${(cur[f.key] || '') === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`
+        : `<input id="f-${f.key}" value="${esc(cur[f.key] || '')}"
              spellcheck="false" autocapitalize="off" autocomplete="off">
-      <span class="fex">${tr('например', 'e.g.')}: ${esc(f.example)}</span>
+      <span class="fex">${tr('например', 'e.g.')}: ${esc(f.example)}</span>`}
     </label>`).join('');
   sheetButtons('sheet-save', 'sheet-load');
   document.getElementById('sheet').classList.add('on');
